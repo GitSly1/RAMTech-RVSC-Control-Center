@@ -1,0 +1,54 @@
+schema_version: 1
+work_package_id: MOX-001
+title: MOXIE foundation and governance bootstrap
+status: in_progress
+assigned_role: architecture-and-product-foundation
+target_repositories:
+  - GitSly1/RAMTech-RVSC-Control-Center
+  - GitSly1/RAMTech-MOXIE
+base_branch: main
+work_branch: rvsc/MOX-001-foundation
+allowed_paths:
+  - config/repositories.yaml
+  - PROJECT_REGISTRY.md
+  - work-packages/MOX-001.yaml
+  - README.md
+  - .rvsc/**
+  - docs/**
+forbidden_paths:
+  - src/**
+  - tests/**
+objective: >-
+  Establish MOXIE as a governed RVSC P1 product with a clean greenfield charter,
+  explicit historical-reference boundary, product architecture direction, specialist
+  resource model, and a bounded first executable development target.
+inputs:
+  - User-created GitSly1/RAMTech-MOXIE repository
+  - Historical AI_Intelligence_Platform_v1_6_4_WF005 package as reference material
+  - Current RVSC operating model and work-package controls
+deliverables:
+  - Control Center repository registration
+  - MOXIE project metadata
+  - Product charter
+  - Historical reference boundary
+  - Initial architecture and roadmap foundation
+  - First vertical-slice definition
+acceptance_criteria:
+  - MOXIE repository is registered as an isolated RVSC product repository.
+  - MOXIE is classified GREENFIELD_REBUILD + LEGACY_REFERENCE.
+  - SEMANTIQ remains P0 and MOXIE remains P1.
+  - Historical WF005 code is explicitly reference-only and not a protected implementation baseline.
+  - Product mission and autonomous content lifecycle are documented.
+  - Routine MOXIE development is prohibited directly on main.
+validation:
+  required_checks:
+    - repository-boundary-review
+    - charter-consistency-review
+    - scope-path-review
+  regression_required: false
+  human_uat_required: false
+handoff:
+  report_files_changed: true
+  report_validation: true
+  report_risks: true
+  report_commit_or_pr: true
