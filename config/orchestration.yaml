@@ -1,0 +1,101 @@
+schema_version: 1
+engine: rvsc-orchestrator
+mode: unattended_by_default
+supervision: exception_only
+
+triggers:
+  - id: wp_ready
+    event: work_package.status_changed
+    when:
+      to: ready
+    route: dispatch_work_package
+
+  - id: worker_completed
+    event: worker.execution_completed
+    when:
+      outcome: success
+    route: collect_evidence
+
+  - id: worker_failed
+    event: worker.execution_completed
+    when:
+      outcome: failure
+    route: retry_or_block
+
+  - id: evidence_complete
+    event: evidence.bundle_complete
+    route: qa_gate
+
+  - id: qa_pass
+    event: qa.completed
+    when:
+      outcome: pass
+    route: prepare_merge
+
+  - id: qa_fail
+    event: qa.completed
+    when:
+      outcome: fail
+    route: rework_loop
+
+  - id: merged
+    event: pull_request.merged
+    route: close_and_unlock_dependents
+
+routes:
+  dispatch_work_package:
+    actions:
+      - validate_scope
+      - resolve_agent
+      - create_or_verify_work_branch
+      - invoke_worker
+
+  collect_evidence:
+    actions:
+      - collect_commit_evidence
+      - collect_test_evidence
+      - validate_handoff
+      - transition_to_review
+
+  retry_or_block:
+    actions:
+      - classify_failure
+      - retry_with_policy
+      - block_on_exhaustion
+
+  qa_gate:
+    actions:
+      - invoke_independent_qa
+      - enforce_separation_of_duties
+
+  prepare_merge:
+    actions:
+      - evaluate_merge_eligibility
+      - open_or_update_pull_request
+      - request_review
+
+  rework_loop:
+    actions:
+      - transition_to_in_progress
+      - route_back_to_implementer
+
+  close_and_unlock_dependents:
+    actions:
+      - mark_accepted
+      - mark_closed
+      - unlock_dependency_chain
+      - emit_dashboard_event
+
+escalation_categories:
+  - decision_required
+  - user_action
+  - uat_ready
+  - significant_risk
+
+resource_policy:
+  semantiq:
+    priority: P0
+    preemptive: true
+  moxie:
+    priority: P1
+    preemptive: false
