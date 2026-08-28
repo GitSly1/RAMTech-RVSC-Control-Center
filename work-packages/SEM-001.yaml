@@ -1,7 +1,7 @@
 schema_version: 1
 work_package_id: SEM-001
 title: Bootstrap SEMANTIQ product identity and test harness
-status: review
+status: accepted
 assigned_role: semantiq-implementation-agent
 target_repositories:
   - GitSly1/RAMTech-SEMANTIQ
