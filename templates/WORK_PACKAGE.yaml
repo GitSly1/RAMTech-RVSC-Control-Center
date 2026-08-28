@@ -1,0 +1,27 @@
+schema_version: 1
+work_package_id: WP-000
+title: Replace with concise work-package title
+status: draft
+assigned_role: specialist-agent
+target_repositories:
+  - owner/repository
+base_branch: main
+work_branch: rvsc/WP-000-short-slug
+allowed_paths:
+  - path/or/module/**
+forbidden_paths: []
+objective: >-
+  State the single bounded outcome this work package must achieve.
+inputs: []
+deliverables: []
+acceptance_criteria:
+  - Define an observable condition that must be true for acceptance.
+validation:
+  required_checks: []
+  regression_required: true
+  human_uat_required: false
+handoff:
+  report_files_changed: true
+  report_validation: true
+  report_risks: true
+  report_commit_or_pr: true
