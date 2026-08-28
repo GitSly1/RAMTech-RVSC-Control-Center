@@ -1,0 +1,29 @@
+name: RVSC CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Compile controller
+        run: python -m compileall -q controller
+
+      - name: Run RVSC tests
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
