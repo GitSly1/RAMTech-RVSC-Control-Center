@@ -1,0 +1,47 @@
+schema_version: 1
+work_package_id: SEM-002
+title: Source baseline inventory and legacy capability migration map
+status: ready
+assigned_role: semantiq-source-inventory-agent
+target_repositories:
+  - GitSly1/RAMTech-SEMANTIQ
+base_branch: main
+work_branch: rvsc/SEM-002-source-inventory
+allowed_paths:
+  - docs/baseline/**
+  - tests/baseline/**
+forbidden_paths:
+  - src/**
+  - .rvsc/**
+  - .github/**
+  - pyproject.toml
+objective: >-
+  Produce a verified inventory of the SEMANTIQ repository baseline and a migration map for known legacy RTUDES capabilities, without changing executable product behavior.
+inputs:
+  - SEMANTIQ main after SEM-001
+  - versioned SEMANTIQ roadmap v1
+  - known legacy capability categories from the project architecture
+
+deliverables:
+  - docs/baseline/REPOSITORY_INVENTORY.md
+  - docs/baseline/LEGACY_CAPABILITY_MAP.md
+  - docs/baseline/MIGRATION_GAPS.md
+  - tests/baseline/test_baseline_docs.py
+acceptance_criteria:
+  - AC-1: Repository inventory identifies every top-level SEMANTIQ main component present at dispatch time.
+  - AC-2: Legacy capability map distinguishes verified-in-repo, known-legacy-not-yet-imported, and planned capabilities without claiming unavailable source as present.
+  - AC-3: Migration gaps identify the minimum source/baseline inputs required before legacy behavior can be migrated safely.
+  - AC-4: Automated tests validate required baseline documents and evidence-state vocabulary.
+  - AC-5: No executable product source, protected governance path, or packaging metadata is modified.
+validation:
+  required_checks:
+    - BASELINE-DOC-TESTS: python -m unittest discover -s tests/baseline -v
+    - SCOPE-CHECK: changed files must match allowed_paths and avoid forbidden_paths
+    - INVENTORY-CHECK: inventory matches SEMANTIQ main at dispatch
+  regression_required: true
+  human_uat_required: false
+handoff:
+  report_files_changed: true
+  report_validation: true
+  report_risks: true
+  report_commit_or_pr: true
