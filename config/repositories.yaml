@@ -1,0 +1,20 @@
+schema_version: 1
+rvsc_checkpoint: RVSC-013
+repositories:
+  - id: rvsc-control-center
+    full_name: GitSly1/RAMTech-RVSC-Control-Center
+    class: control-plane
+    default_branch: main
+    managed: true
+    product_source_allowed: false
+    purpose: RVSC governance, orchestration, registry, work-package control, and cross-project policy
+
+  - id: semantiq
+    full_name: GitSly1/RAMTech-SEMANTIQ
+    class: product
+    default_branch: main
+    managed: true
+    product_source_allowed: true
+    control_plane_source_allowed: false
+    rvsc_metadata_path: .rvsc/
+    purpose: SEMANTIQ product source, tests, product documentation, and release artifacts
