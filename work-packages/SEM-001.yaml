@@ -1,0 +1,45 @@
+schema_version: 1
+work_package_id: SEM-001
+title: Bootstrap SEMANTIQ product identity and test harness
+status: ready
+assigned_role: semantiq-implementation-agent
+target_repositories:
+  - GitSly1/RAMTech-SEMANTIQ
+base_branch: main
+work_branch: rvsc/SEM-001-bootstrap
+allowed_paths:
+  - src/semantiq/**
+  - tests/**
+  - pyproject.toml
+forbidden_paths:
+  - .rvsc/**
+  - .github/**
+objective: >-
+  Create the first minimal executable SEMANTIQ product package with a stable product identity API and automated unit tests, proving RVSC-controlled product delivery without modifying protected governance metadata or main directly.
+inputs:
+  - RAMTech-SEMANTIQ main baseline after RVSC-013
+  - RVSC-014 work package lifecycle/controller on Control Center main
+  - Product name SEMANTIQ
+deliverables:
+  - src/semantiq/__init__.py
+  - src/semantiq/identity.py
+  - tests/test_identity.py
+  - pyproject.toml
+acceptance_criteria:
+  - AC-1: SEMANTIQ exposes a product identity object with name SEMANTIQ and a semantic version string.
+  - AC-2: Importing semantiq exposes PRODUCT_NAME and __version__ without side effects.
+  - AC-3: Unit tests verify product name, version format, and public package exports.
+  - AC-4: Every changed product file remains inside the declared allowed paths and no forbidden path changes occur.
+  - AC-5: Product development occurs only on rvsc/SEM-001-bootstrap and reaches main only through a reviewed PR after QA acceptance.
+validation:
+  required_checks:
+    - UNIT-TESTS: python -m unittest discover -s tests -v
+    - SCOPE-CHECK: changed files must match allowed_paths and avoid forbidden_paths
+    - IMPORT-CHECK: package imports and exposes required public identity constants
+  regression_required: true
+  human_uat_required: false
+handoff:
+  report_files_changed: true
+  report_validation: true
+  report_risks: true
+  report_commit_or_pr: true
