@@ -1,5 +1,5 @@
 schema_version: 1
-rvsc_checkpoint: RVSC-013
+rvsc_checkpoint: RVSC-015
 repositories:
   - id: rvsc-control-center
     full_name: GitSly1/RAMTech-RVSC-Control-Center
@@ -18,3 +18,15 @@ repositories:
     control_plane_source_allowed: false
     rvsc_metadata_path: .rvsc/
     purpose: SEMANTIQ product source, tests, product documentation, and release artifacts
+
+  - id: moxie
+    full_name: GitSly1/RAMTech-MOXIE
+    class: product
+    default_branch: main
+    managed: true
+    product_source_allowed: true
+    control_plane_source_allowed: false
+    rvsc_metadata_path: .rvsc/
+    priority: P1
+    project_classification: GREENFIELD_REBUILD+LEGACY_REFERENCE
+    purpose: MOXIE AI Content Intelligence & Growth Automation Platform source, tests, product documentation, integrations, and release artifacts
