@@ -1,0 +1,159 @@
+schema_version: 1
+registry: rvsc-resource-agents
+execution_model: autonomous_workers
+supervision: exception_only
+
+agents:
+  - id: CMD-001
+    name: Max
+    role: Command / Chief Development Officer
+    capabilities: [command, prioritization, orchestration, escalation]
+    projects: [rvsc, semantiq, moxie]
+    worker_enabled: false
+    qa_eligible: false
+
+  - id: ARC-001
+    name: Maya
+    role: Architecture & Requirements
+    capabilities: [architecture, requirements, acceptance_criteria, dependency_mapping]
+    projects: [rvsc, semantiq, moxie]
+    worker_enabled: true
+    qa_eligible: false
+
+  - id: DEV-001
+    name: Daniel
+    role: Lead Software Engineer
+    capabilities: [python, desktop_app, application_engineering, refactoring, testing]
+    projects: [semantiq, moxie]
+    worker_enabled: true
+    qa_eligible: false
+
+  - id: UX-001
+    name: Sofia
+    role: Product Experience / UI-UX
+    capabilities: [ui_ux, desktop_ui, interaction_design, usability]
+    projects: [semantiq, moxie]
+    worker_enabled: true
+    qa_eligible: false
+
+  - id: QA-001
+    name: Quinn
+    role: Quality Engineering
+    capabilities: [qa, regression, acceptance_validation, evidence_review]
+    projects: [rvsc, semantiq, moxie]
+    worker_enabled: true
+    qa_eligible: true
+    independent_from: [DEV-001, WEB-001, AUTO-001, AI-001]
+
+  - id: RND-001
+    name: Nova
+    role: Research / Red Team
+    capabilities: [research, red_team, feasibility, adversarial_review]
+    projects: [rvsc, semantiq, moxie]
+    worker_enabled: true
+    qa_eligible: true
+
+  - id: INT-001
+    name: Ethan
+    role: Integration & Build
+    capabilities: [integration, build, packaging, dependency_validation]
+    projects: [semantiq, moxie]
+    worker_enabled: true
+    qa_eligible: false
+
+  - id: REL-001
+    name: Clara
+    role: Release & Documentation
+    capabilities: [release, changelog, packaging, release_notes]
+    projects: [rvsc, semantiq, moxie]
+    worker_enabled: true
+    qa_eligible: false
+
+  - id: DATA-001
+    name: Iris
+    role: Data Engineering
+    capabilities: [data_engineering, normalization, parsing, data_quality]
+    projects: [semantiq, moxie]
+    worker_enabled: true
+    qa_eligible: false
+
+  - id: DB-001
+    name: Marcus
+    role: Database Engineering
+    capabilities: [database, sqlite, schema, migration, integrity]
+    projects: [semantiq, moxie]
+    worker_enabled: true
+    qa_eligible: false
+
+  - id: WEB-001
+    name: Kai
+    role: Web Extraction Engineering
+    capabilities: [web_extraction, crawling, dom, browser_automation, api_discovery]
+    projects: [semantiq]
+    worker_enabled: true
+    qa_eligible: false
+
+  - id: SEC-001
+    name: Rhea
+    role: Application Security
+    capabilities: [security_review, secrets, permissions, threat_model]
+    projects: [rvsc, semantiq, moxie]
+    worker_enabled: true
+    qa_eligible: true
+
+  - id: PERF-001
+    name: Leo
+    role: Performance Engineering
+    capabilities: [profiling, performance, scalability, load_validation]
+    projects: [semantiq, moxie]
+    worker_enabled: true
+    qa_eligible: true
+
+  - id: AUTO-001
+    name: Alex
+    role: Automation & Integration
+    capabilities: [automation, github_actions, workflow, adapters, orchestration]
+    projects: [rvsc, semantiq, moxie]
+    worker_enabled: true
+    qa_eligible: false
+
+  - id: AI-001
+    name: Mira
+    role: AI/ML Engineering
+    capabilities: [ai_ml, llm, semantic_reasoning, agent_runtime]
+    projects: [rvsc, semantiq, moxie]
+    worker_enabled: true
+    qa_eligible: false
+
+  - id: OPS-001
+    name: Noah
+    role: DevOps & Runtime
+    capabilities: [runtime, ci_cd, runner, observability, reliability]
+    projects: [rvsc, semantiq, moxie]
+    worker_enabled: true
+    qa_eligible: false
+
+  - id: BI-001
+    name: Elena
+    role: Analytics & BI
+    capabilities: [analytics, metrics, dashboards, reporting]
+    projects: [rvsc, semantiq, moxie]
+    worker_enabled: true
+    qa_eligible: false
+
+  - id: DOC-001
+    name: Sam
+    role: Technical Documentation
+    capabilities: [documentation, technical_writing, runbooks, user_guides]
+    projects: [rvsc, semantiq, moxie]
+    worker_enabled: true
+    qa_eligible: false
+
+policies:
+  max_retry_attempts: 3
+  require_branch_scope: true
+  require_evidence_bundle: true
+  require_independent_qa: true
+  allow_direct_main_write: false
+  allow_self_merge: false
+  allowed_escalations: [decision_required, user_action, uat_ready, significant_risk]
