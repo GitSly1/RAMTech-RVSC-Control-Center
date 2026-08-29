@@ -1,0 +1,38 @@
+schema_version: 1
+work_package_id: RVSC-018
+title: Persist autonomous worker execution state
+status: in_progress
+assigned_role: AUTO-001
+target_repositories:
+  - GitSly1/RAMTech-RVSC-Control-Center
+base_branch: main
+work_branch: rvsc/RVSC-018-persistent-worker-state
+allowed_paths:
+  - controller/execution_store.py
+  - tests/test_execution_store.py
+  - work-packages/RVSC-018.yaml
+forbidden_paths:
+  - config/agents.yaml
+objective: >-
+  Add durable, restart-safe storage for worker execution lifecycle records without changing dispatch policy or product code.
+inputs:
+  - controller/worker_runtime.py
+  - config/agents.yaml
+deliverables:
+  - JSON-backed execution store with atomic replacement writes
+  - Round-trip and overwrite/idempotency tests
+acceptance_criteria:
+  - WorkerExecution records survive store recreation from the same state file.
+  - Re-saving the same WP replaces its current record rather than duplicating it.
+  - Unknown WP lookup returns no record without mutation.
+  - Corrupt or structurally invalid state is rejected explicitly.
+validation:
+  required_checks:
+    - RVSC CI
+  regression_required: true
+  human_uat_required: false
+handoff:
+  report_files_changed: true
+  report_validation: true
+  report_risks: true
+  report_commit_or_pr: true
