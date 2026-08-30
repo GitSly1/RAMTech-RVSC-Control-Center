@@ -1,0 +1,29 @@
+id: RVSC-019
+title: Real worker execution bridge
+priority: P0-CRITICAL
+project: RVSC-Control-Center
+owner: CMD-001
+pilot_agent: DEV-001
+qa_agent: QA-001
+objective: >
+  Provide a provider-neutral execution broker that can invoke an approved external
+  worker runtime using a bounded RVSC WorkerRequest and return structured evidence.
+allowed_paths:
+  - controller/execution_bridge.py
+  - tests/test_execution_bridge.py
+  - work-packages/RVSC-019.yaml
+acceptance_criteria:
+  - Provider registry routes requests dynamically by provider name.
+  - HTTP JSON adapter preserves worker identity, project, branch, allowed paths, objective, and acceptance criteria.
+  - Credentials are read only from an environment variable and missing credentials fail closed.
+  - Non-2xx responses are returned as failed WorkerResult with retryability classification.
+  - Invalid provider responses are rejected explicitly.
+  - Successful responses append provider and protocol evidence.
+  - Unit tests pass in RVSC CI.
+qualification_boundary: >
+  Passing this work package proves the bridge contract and real HTTP invocation capability.
+  It does not by itself prove DEV-001 autonomous execution until a configured provider
+  accepts a live Daniel mission and returns attributable execution evidence.
+next_gate: >
+  Configure one approved execution provider, invoke DEV-001 on a bounded SEMANTIQ mission,
+  capture commit/test evidence, then hand the exact result to QA-001 for independent validation.
