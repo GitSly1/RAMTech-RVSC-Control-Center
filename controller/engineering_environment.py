@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import os
 import subprocess
@@ -28,21 +29,9 @@ class FileEvidence:
 
 
 class ControlledEngineeringEnvironment:
-    """Policy-bounded repository tools for Golden Agent qualification.
+    """Policy-bounded repository tools for Golden Agent qualification."""
 
-    The environment intentionally does not expose arbitrary shell execution. Commands
-    are argv sequences whose executable must be explicitly allowed by the work package
-    runtime. File operations are constrained to configured repository-relative roots.
-    """
-
-    def __init__(
-        self,
-        repo_root: str | Path,
-        *,
-        allowed_paths: Sequence[str],
-        allowed_executables: Iterable[str] = ("python", "git"),
-        timeout_seconds: int = 120,
-    ) -> None:
+    def __init__(self, repo_root: str | Path, *, allowed_paths: Sequence[str], allowed_executables: Iterable[str] = ("python", "git"), timeout_seconds: int = 120) -> None:
         root = Path(repo_root).expanduser().resolve()
         if not root.is_dir():
             raise EngineeringEnvironmentError(f"repository root does not exist: {root}")
@@ -62,6 +51,22 @@ class ControlledEngineeringEnvironment:
             raise EngineeringEnvironmentError(f"invalid allowed path: {value!r}")
         return normalized
 
+    @staticmethod
+    def _scope_root(pattern: str) -> str:
+        positions = [pos for token in ("*", "?", "[") if (pos := pattern.find(token)) >= 0]
+        if positions:
+            pattern = pattern[: min(positions)]
+        return pattern.rstrip("/")
+
+    def _is_permitted(self, candidate_rel: str) -> bool:
+        for pattern in self.allowed_paths:
+            if fnmatch.fnmatchcase(candidate_rel, pattern):
+                return True
+            root = self._scope_root(pattern)
+            if root and (candidate_rel == root or candidate_rel.startswith(root + "/")):
+                return True
+        return False
+
     def _resolve(self, relative_path: str) -> Path:
         candidate_rel = relative_path.replace("\\", "/").strip().lstrip("/")
         if not candidate_rel or ".." in Path(candidate_rel).parts:
@@ -71,11 +76,7 @@ class ControlledEngineeringEnvironment:
             candidate.relative_to(self.repo_root)
         except ValueError as exc:
             raise EngineeringEnvironmentError("path escapes repository") from exc
-        permitted = any(
-            candidate_rel == prefix or candidate_rel.startswith(prefix + "/")
-            for prefix in self.allowed_paths
-        )
-        if not permitted:
+        if not self._is_permitted(candidate_rel):
             raise EngineeringEnvironmentError(f"path outside work-package scope: {candidate_rel}")
         return candidate
 
@@ -91,28 +92,28 @@ class ControlledEngineeringEnvironment:
     def file_evidence(self, relative_path: str) -> FileEvidence:
         target = self._resolve(relative_path)
         payload = target.read_bytes()
-        return FileEvidence(
-            relative_path=relative_path.replace("\\", "/"),
-            sha256=hashlib.sha256(payload).hexdigest(),
-            size=len(payload),
-        )
+        return FileEvidence(relative_path=relative_path.replace("\\", "/"), sha256=hashlib.sha256(payload).hexdigest(), size=len(payload))
 
     def search_text(self, needle: str, *, suffixes: Sequence[str] = (".py", ".md", ".yaml", ".yml", ".json")) -> tuple[str, ...]:
         if not needle:
             raise EngineeringEnvironmentError("search term is empty")
         hits: list[str] = []
-        for prefix in self.allowed_paths:
-            base = self.repo_root / prefix
+        roots = sorted({self._scope_root(pattern) for pattern in self.allowed_paths if self._scope_root(pattern)})
+        for root in roots:
+            base = self.repo_root / root
             candidates = [base] if base.is_file() else base.rglob("*") if base.exists() else []
             for path in candidates:
                 if not path.is_file() or (suffixes and path.suffix.lower() not in suffixes):
+                    continue
+                relative = path.relative_to(self.repo_root).as_posix()
+                if not self._is_permitted(relative):
                     continue
                 try:
                     text = path.read_text(encoding="utf-8")
                 except UnicodeDecodeError:
                     continue
                 if needle in text:
-                    hits.append(path.relative_to(self.repo_root).as_posix())
+                    hits.append(relative)
         return tuple(sorted(set(hits)))
 
     def run(self, argv: Sequence[str], *, timeout_seconds: int | None = None) -> CommandResult:
@@ -121,17 +122,7 @@ class ControlledEngineeringEnvironment:
         executable = Path(argv[0]).name.lower()
         if executable not in self.allowed_executables:
             raise EngineeringEnvironmentError(f"executable not allowed: {argv[0]}")
-        env = os.environ.copy()
-        completed = subprocess.run(
-            list(argv),
-            cwd=self.repo_root,
-            env=env,
-            text=True,
-            capture_output=True,
-            timeout=timeout_seconds or self.timeout_seconds,
-            shell=False,
-            check=False,
-        )
+        completed = subprocess.run(list(argv), cwd=self.repo_root, env=os.environ.copy(), text=True, capture_output=True, timeout=timeout_seconds or self.timeout_seconds, shell=False, check=False)
         return CommandResult(tuple(argv), completed.returncode, completed.stdout, completed.stderr)
 
     def git_status(self) -> CommandResult:
@@ -143,12 +134,16 @@ class ControlledEngineeringEnvironment:
     def git_current_branch(self) -> CommandResult:
         return self.run(("git", "branch", "--show-current"))
 
+    def stage(self, relative_paths: Sequence[str]) -> CommandResult:
+        if not relative_paths:
+            raise EngineeringEnvironmentError("no paths supplied for staging")
+        safe_paths = []
+        for item in relative_paths:
+            self._resolve(item)
+            safe_paths.append(item.replace("\\", "/"))
+        return self.run(("git", "add", "--", *safe_paths))
+
     def commit(self, message: str, *, author_name: str = "DEV-001 Daniel", author_email: str = "dev-001@rvsc.local") -> CommandResult:
         if not message.strip():
             raise EngineeringEnvironmentError("commit message is empty")
-        # Commit only already-staged changes. Staging policy remains controlled by the
-        # work-package runner so Daniel cannot silently expand scope.
-        return self.run((
-            "git", "-c", f"user.name={author_name}", "-c", f"user.email={author_email}",
-            "commit", "-m", message,
-        ))
+        return self.run(("git", "-c", f"user.name={author_name}", "-c", f"user.email={author_email}", "commit", "-m", message))
