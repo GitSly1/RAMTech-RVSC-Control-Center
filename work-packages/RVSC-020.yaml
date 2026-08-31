@@ -1,0 +1,35 @@
+id: RVSC-020
+title: Daniel Golden Core v1 and controlled engineering environment
+priority: P0-CRITICAL
+project: RVSC-Control-Center
+owner: CMD-001
+pilot_agent: DEV-001
+qa_agent: QA-001
+objective: >
+  Establish the cloneable Golden Agent operating doctrine and a policy-bounded
+  engineering tool body that can safely support real repository inspection,
+  modification, validation, Git evidence, and later SEMANTIQ qualification.
+allowed_paths:
+  - golden-core/DANIEL_GOLDEN_CORE_V1.md
+  - controller/engineering_environment.py
+  - tests/test_engineering_environment.py
+  - work-packages/RVSC-020.yaml
+acceptance_criteria:
+  - Golden Core defines judgment, ethics, authorization, evidence, recovery, learning, collaboration, and escalation.
+  - Repository file operations fail closed outside work-package allowed paths.
+  - Glob-style work-package paths such as docs/** are supported without widening scope outside their rooted path.
+  - Path traversal is rejected.
+  - Command execution uses argv with shell disabled and executable allow-list enforcement.
+  - Controlled staging rejects files outside work-package scope.
+  - Git status, diff, branch, staging, and commit primitives are available for bounded engineering missions.
+  - File evidence includes SHA-256 and byte size.
+  - Tests are compatible with the repository's unittest-based CI and require no undeclared pytest dependency.
+  - RVSC CI passes on the exact RVSC-020 head before A4 is marked PASS.
+qualification_boundary: >
+  RVSC-020 passing proves the controlled engineering tool body (A4) only. It does not
+  prove that DEV-001 independently reasoned about, modified, tested, or committed a
+  SEMANTIQ engineering change. A5 requires a real attributable Daniel product commit.
+next_gate: >
+  After exact-head CI PASS, bind the controlled environment to a bounded DEV-001
+  SEMANTIQ qualification mission on an RVSC work branch, require tests and commit
+  evidence, then hand the result to QA-001 Quinn.
