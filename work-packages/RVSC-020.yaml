@@ -12,7 +12,9 @@ objective: >
 allowed_paths:
   - golden-core/DANIEL_GOLDEN_CORE_V1.md
   - controller/engineering_environment.py
+  - controller/engineering_runner.py
   - tests/test_engineering_environment.py
+  - tests/test_engineering_runner.py
   - work-packages/RVSC-020.yaml
 acceptance_criteria:
   - Golden Core defines judgment, ethics, authorization, evidence, recovery, learning, collaboration, and escalation.
@@ -21,8 +23,10 @@ acceptance_criteria:
   - Path traversal is rejected.
   - Command execution uses argv with shell disabled and executable allow-list enforcement.
   - Controlled staging rejects files outside work-package scope.
+  - Mission preflight requires the exact work branch and a clean repository.
+  - Validation commands are predetermined by the mission runner and produce return-code evidence.
   - Git status, diff, branch, staging, and commit primitives are available for bounded engineering missions.
-  - File evidence includes SHA-256 and byte size.
+  - File evidence includes SHA-256 and byte size; commit evidence captures the resulting SHA.
   - Tests are compatible with the repository's unittest-based CI and require no undeclared pytest dependency.
   - RVSC CI passes on the exact RVSC-020 head before A4 is marked PASS.
 qualification_boundary: >
