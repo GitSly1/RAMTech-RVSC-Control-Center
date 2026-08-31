@@ -129,7 +129,20 @@ class ControlledEngineeringEnvironment:
         return self.run(("git", "status", "--short"))
 
     def git_diff(self) -> CommandResult:
-        return self.run(("git", "diff", "--"))
+        """Return observable content for both tracked and untracked worktree changes.
+
+        Plain ``git diff`` omits untracked files. Golden-Agent evidence must not report
+        a clean/empty diff after creating an in-scope file, so append explicit
+        untracked-file markers from Git status while keeping the operation read-only.
+        """
+        tracked = self.run(("git", "diff", "--"))
+        if tracked.returncode != 0:
+            return tracked
+        untracked = self.run(("git", "ls-files", "--others", "--exclude-standard"))
+        if untracked.returncode != 0:
+            return untracked
+        markers = "".join(f"untracked:{line}\n" for line in untracked.stdout.splitlines() if line.strip())
+        return CommandResult(tracked.argv, 0, tracked.stdout + markers, tracked.stderr + untracked.stderr)
 
     def git_current_branch(self) -> CommandResult:
         return self.run(("git", "branch", "--show-current"))
