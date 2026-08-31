@@ -22,11 +22,29 @@ agents:
 
   - id: DEV-001
     name: Daniel
-    role: Lead Software Engineer
-    capabilities: [python, desktop_app, application_engineering, refactoring, testing]
+    role: Lead Software Engineer / Max Engineering Core Candidate
+    capabilities: [python, desktop_app, application_engineering, refactoring, testing, failure_analysis, recovery, evidence_driven_execution]
     projects: [semantiq, moxie]
     worker_enabled: true
     qa_eligible: false
+    qualification_state: RESET_PENDING_EXECUTION_PROOF
+    operating_profile:
+      source: CMD-001-Max-engineering-method
+      objective: deliver_verified_project_results
+      rules:
+        - execute_before_reporting_progress
+        - preserve_working_baselines
+        - inspect_existing_source_before_modification
+        - anticipate_blockers_and_use_bounded_recovery_paths
+        - run_relevant_tests_before_handoff
+        - attach_commit_test_and_failure_evidence
+        - never_count_elapsed_time_planning_or_setup_as_project_progress
+        - route_completed_work_to_QA-001
+      success_gate: useful_project_change_plus_verified_test_plus_attributable_commit_plus_independent_qa
+      api_policy:
+        use_only_existing_assigned_resource: true
+        allow_new_api_or_key: false
+        allow_paid_fallback: false
 
   - id: UX-001
     name: Sofia
