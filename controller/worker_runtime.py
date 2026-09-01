@@ -14,6 +14,14 @@ class WorkerState(str, Enum):
     BLOCKED = "blocked"
 
 
+class WorkerSignalType(str, Enum):
+    HEARTBEAT = "heartbeat"
+    CHECKPOINT = "checkpoint"
+    COMPLETION = "completion"
+    STALL = "stall"
+    BLOCKED = "blocked"
+
+
 @dataclass(frozen=True)
 class Agent:
     agent_id: str
@@ -35,6 +43,16 @@ class WorkPackage:
 
 
 @dataclass(frozen=True)
+class WorkerSignal:
+    signal_type: WorkerSignalType
+    wp_id: str
+    agent_id: str
+    checkpoint: str | None = None
+    evidence: tuple[str, ...] = ()
+    failure_reason: str | None = None
+
+
+@dataclass(frozen=True)
 class WorkerExecution:
     wp_id: str
     agent_id: str
@@ -42,6 +60,7 @@ class WorkerExecution:
     attempt: int = 0
     evidence: tuple[str, ...] = ()
     failure_reason: str | None = None
+    last_checkpoint: str | None = None
 
 
 class WorkerRuntimeError(ValueError):
@@ -79,6 +98,43 @@ def start_execution(execution: WorkerExecution) -> WorkerExecution:
     )
 
 
+def heartbeat_signal(execution: WorkerExecution) -> WorkerSignal:
+    return WorkerSignal(
+        signal_type=WorkerSignalType.HEARTBEAT,
+        wp_id=execution.wp_id,
+        agent_id=execution.agent_id,
+        checkpoint=execution.last_checkpoint,
+        evidence=execution.evidence,
+        failure_reason=execution.failure_reason,
+    )
+
+
+def checkpoint_execution(
+    execution: WorkerExecution,
+    checkpoint: str,
+    evidence: Sequence[str] = (),
+) -> tuple[WorkerExecution, WorkerSignal]:
+    if execution.state is not WorkerState.EXECUTING:
+        raise WorkerRuntimeError("checkpoint requires executing state")
+    normalized_checkpoint = checkpoint.strip()
+    if not normalized_checkpoint:
+        raise WorkerRuntimeError("checkpoint name is required")
+    normalized_evidence = tuple(str(item).strip() for item in evidence if str(item).strip())
+    updated = replace(
+        execution,
+        last_checkpoint=normalized_checkpoint,
+        evidence=execution.evidence + normalized_evidence,
+    )
+    signal = WorkerSignal(
+        signal_type=WorkerSignalType.CHECKPOINT,
+        wp_id=updated.wp_id,
+        agent_id=updated.agent_id,
+        checkpoint=normalized_checkpoint,
+        evidence=normalized_evidence,
+    )
+    return updated, signal
+
+
 def deliver_evidence(execution: WorkerExecution, evidence: Sequence[str]) -> WorkerExecution:
     if execution.state is not WorkerState.EXECUTING:
         raise WorkerRuntimeError("evidence can only be delivered from executing")
@@ -88,10 +144,35 @@ def deliver_evidence(execution: WorkerExecution, evidence: Sequence[str]) -> Wor
     return replace(execution, state=WorkerState.EVIDENCE_DELIVERED, evidence=normalized)
 
 
+def completion_signal(execution: WorkerExecution) -> WorkerSignal:
+    if execution.state not in {WorkerState.EVIDENCE_DELIVERED, WorkerState.QA_ACCEPTED}:
+        raise WorkerRuntimeError("completion signal requires delivered or QA-accepted evidence")
+    return WorkerSignal(
+        signal_type=WorkerSignalType.COMPLETION,
+        wp_id=execution.wp_id,
+        agent_id=execution.agent_id,
+        checkpoint=execution.last_checkpoint,
+        evidence=execution.evidence,
+    )
+
+
 def block_execution(execution: WorkerExecution, reason: str) -> WorkerExecution:
     if not reason.strip():
         raise WorkerRuntimeError("blocked execution requires a reason")
     return replace(execution, state=WorkerState.BLOCKED, failure_reason=reason)
+
+
+def block_signal(execution: WorkerExecution, stalled: bool = False) -> WorkerSignal:
+    if execution.state is not WorkerState.BLOCKED:
+        raise WorkerRuntimeError("block signal requires blocked state")
+    return WorkerSignal(
+        signal_type=WorkerSignalType.STALL if stalled else WorkerSignalType.BLOCKED,
+        wp_id=execution.wp_id,
+        agent_id=execution.agent_id,
+        checkpoint=execution.last_checkpoint,
+        evidence=execution.evidence,
+        failure_reason=execution.failure_reason,
+    )
 
 
 def retry_allowed(execution: WorkerExecution, max_attempts: int) -> bool:
