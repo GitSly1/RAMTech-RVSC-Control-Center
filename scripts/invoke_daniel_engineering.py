@@ -15,14 +15,16 @@ def main() -> int:
 
     request = WorkerRequest(
         agent_id="DEV-001",
-        wp_id="SEM-DANIEL-001",
+        wp_id="SEM-DANIEL-002",
         project="SEMANTIQ",
         repository="GitSly1/RAMTech-SEMANTIQ",
         base_branch="rvsc/SEM-003-rtudes-baseline-import",
-        work_branch="rvsc/SEM-DANIEL-001-reproduction",
+        work_branch="rvsc/SEM-DANIEL-002-runtime-proof",
         objective=(
-            "Implement strict X.Y.Z semantic-version parsing for SEMANTIQ identity, add an immutable orderable "
-            "SemanticVersion value object, export the new API, and add regression tests while preserving existing identity behavior."
+            "Independently reproduce the strict X.Y.Z semantic-version enhancement from the clean SEM-003 baseline: "
+            "add an immutable orderable SemanticVersion value object, export the new API, and add regression tests while "
+            "preserving existing identity behavior. This run must create fresh attributable implementation evidence rather "
+            "than relying on the older SEM-DANIEL-001 artifact."
         ),
         allowed_paths=(
             "src/semantiq/identity.py",
@@ -30,6 +32,7 @@ def main() -> int:
             "tests/test_identity.py",
         ),
         acceptance_criteria=(
+            "mission starts from the SEM-003 baseline, not the older qualification branch",
             "only authorized files are modified",
             "canonical X.Y.Z versions parse into integer components",
             "non-canonical versions are rejected",
@@ -37,7 +40,7 @@ def main() -> int:
             "new API is publicly exported",
             "compile validation passes",
             "SEMANTIQ unit tests pass",
-            "DEV-001 commit is created and pushed",
+            "DEV-001 commit is created and pushed to the fresh runtime-proof branch",
             "attributable execution evidence is returned",
         ),
     )
