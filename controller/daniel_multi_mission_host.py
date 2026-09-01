@@ -5,7 +5,7 @@ import os
 import threading
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from typing import Any, Callable
 
 from . import daniel_worker_host as legacy
 
@@ -24,6 +24,8 @@ _RUNTIME_STATE: dict[str, Any] = {
     "last_run_id": None,
     "last_activity": None,
     "last_result": None,
+    "last_checkpoint": None,
+    "checkpoint_evidence": (),
 }
 
 
@@ -35,6 +37,10 @@ def _set_runtime_state(**updates: Any) -> None:
     with _STATE_LOCK:
         _RUNTIME_STATE.update(updates)
         _RUNTIME_STATE["last_activity"] = _utc_now()
+
+
+def _checkpoint(name: str, evidence: tuple[str, ...] = ()) -> None:
+    _set_runtime_state(last_checkpoint=name, checkpoint_evidence=tuple(evidence))
 
 
 def health_payload() -> dict[str, Any]:
@@ -53,6 +59,8 @@ def health_payload() -> dict[str, Any]:
         "last_run_id": state["last_run_id"],
         "last_activity": state["last_activity"],
         "last_result": state["last_result"],
+        "last_checkpoint": state["last_checkpoint"],
+        "checkpoint_evidence": list(state["checkpoint_evidence"]),
         "supported_missions": [legacy.SEM_DANIEL_WP, SEM_DANIEL_003_WP],
     }
 
@@ -64,6 +72,9 @@ def _execute_003(api_key: str, mission: dict[str, Any], run_id: str, started: st
         raise ValueError(f"{SEM_DANIEL_003_WP} requires branch {SEM_DANIEL_003_BRANCH}")
     if tuple(mission.get("allowed_paths", ())) != SEM_DANIEL_003_ALLOWED:
         raise ValueError(f"{SEM_DANIEL_003_WP} allowed path contract mismatch")
+
+    def report_checkpoint(name: str, evidence: tuple[str, ...]) -> None:
+        _checkpoint(name, evidence)
 
     with _EXECUTION_LOCK:
         original = (
@@ -77,7 +88,7 @@ def _execute_003(api_key: str, mission: dict[str, Any], run_id: str, started: st
             legacy.SEM_DANIEL_BASE_BRANCH = SEM_DANIEL_003_BASE_BRANCH
             legacy.SEM_DANIEL_BRANCH = SEM_DANIEL_003_BRANCH
             legacy.SEM_DANIEL_ALLOWED = SEM_DANIEL_003_ALLOWED
-            return legacy._execute_sem_daniel(api_key, mission, run_id, started)
+            return legacy._execute_sem_daniel(api_key, mission, run_id, started, checkpoint=report_checkpoint)
         finally:
             (
                 legacy.SEM_DANIEL_WP,
@@ -97,7 +108,7 @@ def execute_payload(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Daniel host only accepts DEV-001")
 
     wp_id = str(mission.get("wp_id", "")).strip() or "unknown"
-    _set_runtime_state(active_mission=wp_id, last_result="acknowledged")
+    _set_runtime_state(active_mission=wp_id, last_result="acknowledged", last_checkpoint="mission_acknowledged", checkpoint_evidence=())
     try:
         if mission.get("wp_id") != SEM_DANIEL_003_WP:
             with _EXECUTION_LOCK:
@@ -114,8 +125,8 @@ def execute_payload(payload: dict[str, Any]) -> dict[str, Any]:
         result = _execute_003(api_key, mission, run_id, started)
         _set_runtime_state(last_result="success" if result.get("success") else "failed")
         return result
-    except Exception:
-        _set_runtime_state(last_result="failed")
+    except Exception as exc:
+        _set_runtime_state(last_result="failed", last_checkpoint="execution_failed", checkpoint_evidence=(f"failure:{exc}",))
         raise
     finally:
         _set_runtime_state(active_mission=None)
@@ -160,6 +171,7 @@ class DanielMultiMissionHandler(BaseHTTPRequestHandler):
 def main() -> None:
     host = os.environ.get("RVSC_DANIEL_HOST", "127.0.0.1")
     port = int(os.environ.get("RVSC_DANIEL_MULTI_PORT", "8768"))
+    _checkpoint("worker_started")
     print(f"DEV-001 Daniel multi-mission host listening on http://{host}:{port}/execute")
     print(f"DEV-001 Daniel health available on http://{host}:{port}/health")
     ThreadingHTTPServer((host, port), DanielMultiMissionHandler).serve_forever()
