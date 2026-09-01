@@ -5,6 +5,10 @@ import os
 from .execution_bridge import ExecutionBroker, HttpJsonWorkerAdapter, ProviderConfig
 
 
+def _env_bool(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def build_broker_from_environment(prefix: str = "RVSC_PROVIDER_") -> ExecutionBroker:
     """Build a broker from a single approved provider configured by environment.
 
@@ -13,17 +17,20 @@ def build_broker_from_environment(prefix: str = "RVSC_PROVIDER_") -> ExecutionBr
       <prefix>ENDPOINT
 
     Optional:
-      <prefix>TOKEN_ENV  (name of env var containing bearer token)
+      <prefix>TOKEN_ENV
       <prefix>TIMEOUT_SECONDS
+      <prefix>REQUIRE_HEALTHCHECK
 
-    This keeps provider credentials out of repository configuration while allowing
-    the Controller to select/runtime-configure an execution provider dynamically.
+    Credentials remain outside repository configuration. Health preflight can be
+    required for observable worker services so Controller dispatch fails closed
+    before sending a mission to an unavailable or unready worker.
     """
 
     name = os.environ.get(f"{prefix}NAME", "").strip()
     endpoint = os.environ.get(f"{prefix}ENDPOINT", "").strip()
     token_env = os.environ.get(f"{prefix}TOKEN_ENV", "").strip() or None
     timeout_raw = os.environ.get(f"{prefix}TIMEOUT_SECONDS", "120").strip()
+    require_healthcheck = _env_bool(os.environ.get(f"{prefix}REQUIRE_HEALTHCHECK", "false"))
 
     if not name:
         raise ValueError(f"missing {prefix}NAME")
@@ -42,6 +49,7 @@ def build_broker_from_environment(prefix: str = "RVSC_PROVIDER_") -> ExecutionBr
                 endpoint=endpoint,
                 token_env=token_env,
                 timeout_seconds=timeout,
+                require_healthcheck=require_healthcheck,
             )
         )
     )
