@@ -2,30 +2,34 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $Root
 
-function Resolve-RvscPython {
-    $python = Get-Command python -ErrorAction SilentlyContinue
-    if ($python) { return @{ File = $python.Source; Prefix = @() } }
+$PythonExe = $null
+$PythonPrefix = @()
+$python = Get-Command python -ErrorAction SilentlyContinue
+if ($python) {
+    $PythonExe = $python.Source
+} else {
     $py = Get-Command py -ErrorAction SilentlyContinue
-    if ($py) { return @{ File = $py.Source; Prefix = @("-3") } }
-    throw "Python was not found. Install Python 3 or add python/py to PATH."
+    if ($py) {
+        $PythonExe = $py.Source
+        $PythonPrefix = @("-3")
+    }
 }
-
-function Invoke-RvscPython([string[]]$Arguments) {
-    $resolved = Resolve-RvscPython
-    & $resolved.File @($resolved.Prefix + $Arguments)
-    return $LASTEXITCODE
+if (-not $PythonExe) {
+    throw "Python was not found. Install Python 3 or add python/py to PATH."
 }
 
 Write-Host ""
 Write-Host "RVSC PORTABLE STARTUP"
 Write-Host "Project root: $Root"
+Write-Host "Python: $PythonExe"
 Write-Host ""
 
-$preflight = Invoke-RvscPython @("-m", "controller.runtime_preflight")
-if ($preflight -ne 0) {
+& $PythonExe @PythonPrefix -m controller.runtime_preflight
+$preflightExit = $LASTEXITCODE
+if ($preflightExit -ne 0) {
     Write-Host ""
     Write-Host "RVSC startup blocked by preflight. Correct the FAIL item(s) above and rerun START_RVSC.ps1."
-    exit $preflight
+    exit $preflightExit
 }
 
 $healthUrl = "http://127.0.0.1:8768/health"
@@ -40,9 +44,8 @@ New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
 $pidFile = Join-Path $stateDir "daniel.pid"
 
 if (-not $alreadyRunning) {
-    $resolved = Resolve-RvscPython
-    $args = @($resolved.Prefix + @("-m", "controller.daniel_multi_mission_host"))
-    $process = Start-Process -FilePath $resolved.File -ArgumentList $args -WorkingDirectory $Root -PassThru -WindowStyle Hidden
+    $args = @($PythonPrefix + @("-m", "controller.daniel_multi_mission_host"))
+    $process = Start-Process -FilePath $PythonExe -ArgumentList $args -WorkingDirectory $Root -PassThru -WindowStyle Hidden
     Set-Content -Path $pidFile -Value $process.Id -Encoding ascii
 
     $ready = $false
@@ -66,4 +69,5 @@ if (-not $alreadyRunning) {
 
 Write-Host "Opening RVSC Live Operations Console. Press Ctrl+C to leave the console; Daniel remains available until STOP_RVSC.ps1 is run."
 Write-Host ""
-Invoke-RvscPython @("-m", "controller.ops_console") | Out-Null
+& $PythonExe @PythonPrefix -m controller.ops_console
+exit $LASTEXITCODE
