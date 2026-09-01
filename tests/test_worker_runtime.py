@@ -5,10 +5,15 @@ from controller.worker_runtime import (
     WorkPackage,
     WorkerExecution,
     WorkerRuntimeError,
+    WorkerSignalType,
     WorkerState,
     block_execution,
+    block_signal,
+    checkpoint_execution,
+    completion_signal,
     deliver_evidence,
     dispatch_queue,
+    heartbeat_signal,
     retry_allowed,
     select_agent,
     select_qa_agent,
@@ -42,11 +47,36 @@ class WorkerRuntimeTests(unittest.TestCase):
         self.assertEqual(execution.state, WorkerState.EVIDENCE_DELIVERED)
         self.assertEqual(len(execution.evidence), 2)
 
+    def test_checkpoint_records_accomplishment_and_emits_signal(self):
+        execution = start_execution(WorkerExecution("SEM-DANIEL-003", "DEV-001", WorkerState.ASSIGNED))
+        execution, signal = checkpoint_execution(execution, "tests_passed", ["validation:unittest:returncode:0"])
+        self.assertEqual(execution.last_checkpoint, "tests_passed")
+        self.assertEqual(signal.signal_type, WorkerSignalType.CHECKPOINT)
+        self.assertEqual(signal.checkpoint, "tests_passed")
+        self.assertIn("validation:unittest:returncode:0", signal.evidence)
+        heartbeat = heartbeat_signal(execution)
+        self.assertEqual(heartbeat.signal_type, WorkerSignalType.HEARTBEAT)
+        self.assertEqual(heartbeat.checkpoint, "tests_passed")
+
+    def test_completion_requires_delivered_evidence(self):
+        execution = start_execution(WorkerExecution("SEM-DANIEL-003", "DEV-001", WorkerState.ASSIGNED))
+        execution = deliver_evidence(execution, ["commit:abc", "push:success"])
+        signal = completion_signal(execution)
+        self.assertEqual(signal.signal_type, WorkerSignalType.COMPLETION)
+        self.assertIn("push:success", signal.evidence)
+
     def test_blocked_execution_can_retry_within_policy(self):
         execution = WorkerExecution("SEM-101", "DEV-001", WorkerState.ASSIGNED)
         execution = start_execution(execution)
         execution = block_execution(execution, "transient runner failure")
         self.assertTrue(retry_allowed(execution, 3))
+
+    def test_stall_signal_preserves_failure_reason(self):
+        execution = start_execution(WorkerExecution("SEM-DANIEL-003", "DEV-001", WorkerState.ASSIGNED))
+        execution = block_execution(execution, "checkpoint timeout")
+        signal = block_signal(execution, stalled=True)
+        self.assertEqual(signal.signal_type, WorkerSignalType.STALL)
+        self.assertEqual(signal.failure_reason, "checkpoint timeout")
 
     def test_qa_is_independent_from_implementer(self):
         qa = select_qa_agent(AGENTS, "DEV-001", "semantiq")
