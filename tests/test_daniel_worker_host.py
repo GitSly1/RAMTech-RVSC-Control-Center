@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from controller import daniel_worker_host as host
@@ -43,7 +44,7 @@ class DanielWorkerHostCoreTests(unittest.TestCase):
     def test_engineering_prompt_injects_both_cores(self) -> None:
         mission = {
             "agent_id": "DEV-001",
-            "wp_id": "SEM-DANIEL-001",
+            "wp_id": "SEM-DANIEL-002",
             "objective": "Implement a bounded test feature",
             "allowed_paths": list(host.SEM_DANIEL_ALLOWED),
         }
@@ -61,12 +62,43 @@ class DanielWorkerHostCoreTests(unittest.TestCase):
 
     def test_engineering_prompt_does_not_include_api_key(self) -> None:
         sentinel_key = "sk-proj-THIS-MUST-NOT-APPEAR-IN-PROMPT"
-        mission = {"agent_id": "DEV-001", "wp_id": "SEM-DANIEL-001", "objective": "safe task"}
+        mission = {"agent_id": "DEV-001", "wp_id": "SEM-DANIEL-002", "objective": "safe task"}
         with patch.dict(os.environ, {"OPENAI_API_KEY": sentinel_key}, clear=False), patch.object(
             host, "_load_daniel_core", return_value="DANIEL CORE"
         ), patch.object(host, "_load_max_platinum_core", return_value="MAX CORE"):
             prompt = host._engineering_prompt(mission, {})
         self.assertNotIn(sentinel_key, prompt)
+
+    def test_prepare_semantiq_branch_rebuilds_proof_branch_from_baseline(self) -> None:
+        class FakeEnvironment:
+            def __init__(self) -> None:
+                self.commands: list[tuple[str, ...]] = []
+
+            def git_status(self):
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            def run(self, argv):
+                command = tuple(argv)
+                self.commands.append(command)
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        environment = FakeEnvironment()
+        host._prepare_semantiq_branch(environment)
+
+        self.assertEqual(
+            environment.commands,
+            [
+                ("git", "fetch", "origin", host.SEM_DANIEL_BASE_BRANCH),
+                (
+                    "git",
+                    "checkout",
+                    "-B",
+                    host.SEM_DANIEL_BRANCH,
+                    f"origin/{host.SEM_DANIEL_BASE_BRANCH}",
+                ),
+            ],
+        )
+        self.assertNotEqual(host.SEM_DANIEL_BRANCH, "rvsc/SEM-DANIEL-001-reproduction")
 
 
 if __name__ == "__main__":
