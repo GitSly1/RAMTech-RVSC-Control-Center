@@ -19,8 +19,9 @@ RVSC_ROOT = Path(__file__).resolve().parents[1]
 DANIEL_CORE_PATH = Path(os.environ.get("RVSC_DANIEL_CORE_PATH", str(RVSC_ROOT / "golden-core" / "DANIEL_GOLDEN_CORE_V1.md")))
 MAX_CORE_PATH = Path(os.environ.get("RVSC_MAX_CORE_PATH", str(RVSC_ROOT / "golden-core" / "MAX_PLATINUM_ENGINEERING_CORE_V1.md")))
 SEMANTIQ_REPO = Path(os.environ.get("RVSC_SEMANTIQ_REPO", r"D:\py_proj\RAMTech-SEMANTIQ"))
-SEM_DANIEL_WP = "SEM-DANIEL-001"
-SEM_DANIEL_BRANCH = "rvsc/SEM-DANIEL-001-reproduction"
+SEM_DANIEL_WP = "SEM-DANIEL-002"
+SEM_DANIEL_BASE_BRANCH = "rvsc/SEM-003-rtudes-baseline-import"
+SEM_DANIEL_BRANCH = "rvsc/SEM-DANIEL-002-runtime-proof"
 SEM_DANIEL_ALLOWED = (
     "src/semantiq/identity.py",
     "src/semantiq/__init__.py",
@@ -105,12 +106,12 @@ def _prepare_semantiq_branch(environment: ControlledEngineeringEnvironment) -> N
         raise EngineeringEnvironmentError(status.stderr.strip() or "git status failed")
     if status.stdout.strip():
         raise EngineeringEnvironmentError("SEMANTIQ repository must be clean before Daniel mission")
-    fetch = environment.run(("git", "fetch", "origin", SEM_DANIEL_BRANCH))
+    fetch = environment.run(("git", "fetch", "origin", SEM_DANIEL_BASE_BRANCH))
     if fetch.returncode != 0:
-        raise EngineeringEnvironmentError(fetch.stderr.strip() or "unable to fetch Daniel reproduction branch")
-    checkout = environment.run(("git", "checkout", "-B", SEM_DANIEL_BRANCH, f"origin/{SEM_DANIEL_BRANCH}"))
+        raise EngineeringEnvironmentError(fetch.stderr.strip() or "unable to fetch SEMANTIQ qualification baseline")
+    checkout = environment.run(("git", "checkout", "-B", SEM_DANIEL_BRANCH, f"origin/{SEM_DANIEL_BASE_BRANCH}"))
     if checkout.returncode != 0:
-        raise EngineeringEnvironmentError(checkout.stderr.strip() or checkout.stdout.strip() or "unable to checkout Daniel reproduction branch")
+        raise EngineeringEnvironmentError(checkout.stderr.strip() or checkout.stdout.strip() or "unable to create Daniel proof branch from baseline")
 
 
 def _engineering_prompt(mission: dict[str, Any], source_files: dict[str, str]) -> str:
@@ -136,6 +137,8 @@ def _engineering_prompt(mission: dict[str, Any], source_files: dict[str, str]) -
 
 
 def _execute_sem_daniel(api_key: str, mission: dict[str, Any], run_id: str, started: str) -> dict[str, Any]:
+    if mission.get("base_branch") != SEM_DANIEL_BASE_BRANCH:
+        raise ValueError(f"{SEM_DANIEL_WP} requires base branch {SEM_DANIEL_BASE_BRANCH}")
     if mission.get("work_branch") != SEM_DANIEL_BRANCH:
         raise ValueError(f"{SEM_DANIEL_WP} requires branch {SEM_DANIEL_BRANCH}")
     if tuple(mission.get("allowed_paths", ())) != SEM_DANIEL_ALLOWED:
@@ -177,7 +180,7 @@ def _execute_sem_daniel(api_key: str, mission: dict[str, Any], run_id: str, star
     evidence.extend(runner.validate())
     commit_message = proposal.get("commit_message")
     if not isinstance(commit_message, str) or not commit_message.strip():
-        commit_message = "SEM-DANIEL-001: DEV-001 independent engineering qualification"
+        commit_message = "SEM-DANIEL-002: DEV-001 independent engineering runtime proof"
     evidence.extend(runner.commit(SEM_DANIEL_ALLOWED, commit_message.strip()))
 
     push = environment.run(("git", "push", "origin", f"HEAD:refs/heads/{SEM_DANIEL_BRANCH}"))
