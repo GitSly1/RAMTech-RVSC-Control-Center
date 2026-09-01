@@ -58,6 +58,14 @@ class ControlledEngineeringEnvironment:
             pattern = pattern[: min(positions)]
         return pattern.rstrip("/")
 
+    @staticmethod
+    def _is_generated_python_artifact(path: str) -> bool:
+        normalized = path.replace("\\", "/").strip().strip("/")
+        if not normalized:
+            return False
+        parts = normalized.split("/")
+        return "__pycache__" in parts or normalized.endswith((".pyc", ".pyo"))
+
     def _is_permitted(self, candidate_rel: str) -> bool:
         for pattern in self.allowed_paths:
             if fnmatch.fnmatchcase(candidate_rel, pattern):
@@ -122,26 +130,47 @@ class ControlledEngineeringEnvironment:
         executable = Path(argv[0]).name.lower()
         if executable not in self.allowed_executables:
             raise EngineeringEnvironmentError(f"executable not allowed: {argv[0]}")
-        completed = subprocess.run(list(argv), cwd=self.repo_root, env=os.environ.copy(), text=True, capture_output=True, timeout=timeout_seconds or self.timeout_seconds, shell=False, check=False)
+        process_env = os.environ.copy()
+        if executable in {"python", "python.exe", "py", "py.exe"}:
+            process_env["PYTHONDONTWRITEBYTECODE"] = "1"
+        completed = subprocess.run(list(argv), cwd=self.repo_root, env=process_env, text=True, capture_output=True, timeout=timeout_seconds or self.timeout_seconds, shell=False, check=False)
         return CommandResult(tuple(argv), completed.returncode, completed.stdout, completed.stderr)
 
     def git_status(self) -> CommandResult:
         return self.run(("git", "status", "--short"))
 
-    def git_diff(self) -> CommandResult:
-        """Return observable content for both tracked and untracked worktree changes.
+    def git_material_status(self) -> CommandResult:
+        """Return Git status excluding only known generated Python bytecode artifacts."""
+        status = self.git_status()
+        if status.returncode != 0:
+            return status
+        material: list[str] = []
+        for line in status.stdout.splitlines():
+            if not line.strip():
+                continue
+            path = line[3:].strip() if len(line) >= 4 else line.strip()
+            if " -> " in path:
+                path = path.split(" -> ", 1)[1].strip()
+            if self._is_generated_python_artifact(path):
+                continue
+            material.append(line)
+        stdout = "\n".join(material)
+        if stdout:
+            stdout += "\n"
+        return CommandResult(status.argv, status.returncode, stdout, status.stderr)
 
-        Plain ``git diff`` omits untracked files. Golden-Agent evidence must not report
-        a clean/empty diff after creating an in-scope file, so append explicit
-        untracked-file markers from Git status while keeping the operation read-only.
-        """
+    def git_diff(self) -> CommandResult:
         tracked = self.run(("git", "diff", "--"))
         if tracked.returncode != 0:
             return tracked
         untracked = self.run(("git", "ls-files", "--others", "--exclude-standard"))
         if untracked.returncode != 0:
             return untracked
-        markers = "".join(f"untracked:{line}\n" for line in untracked.stdout.splitlines() if line.strip())
+        markers = "".join(
+            f"untracked:{line}\n"
+            for line in untracked.stdout.splitlines()
+            if line.strip() and not self._is_generated_python_artifact(line)
+        )
         return CommandResult(tracked.argv, 0, tracked.stdout + markers, tracked.stderr + untracked.stderr)
 
     def git_current_branch(self) -> CommandResult:
