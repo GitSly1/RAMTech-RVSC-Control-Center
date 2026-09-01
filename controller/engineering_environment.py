@@ -136,12 +136,12 @@ class ControlledEngineeringEnvironment:
         completed = subprocess.run(list(argv), cwd=self.repo_root, env=process_env, text=True, capture_output=True, timeout=timeout_seconds or self.timeout_seconds, shell=False, check=False)
         return CommandResult(tuple(argv), completed.returncode, completed.stdout, completed.stderr)
 
-    def git_status(self) -> CommandResult:
+    def git_raw_status(self) -> CommandResult:
         return self.run(("git", "status", "--short"))
 
-    def git_material_status(self) -> CommandResult:
-        """Return Git status excluding only known generated Python bytecode artifacts."""
-        status = self.git_status()
+    def git_status(self) -> CommandResult:
+        """Return material Git status, excluding only generated Python bytecode artifacts."""
+        status = self.git_raw_status()
         if status.returncode != 0:
             return status
         material: list[str] = []
@@ -158,6 +158,9 @@ class ControlledEngineeringEnvironment:
         if stdout:
             stdout += "\n"
         return CommandResult(status.argv, status.returncode, stdout, status.stderr)
+
+    def git_material_status(self) -> CommandResult:
+        return self.git_status()
 
     def git_diff(self) -> CommandResult:
         tracked = self.run(("git", "diff", "--"))
