@@ -10,11 +10,9 @@ class _RecordingLock:
     def __init__(self) -> None:
         self.entered = 0
         self.exited = 0
-
     def __enter__(self):
         self.entered += 1
         return self
-
     def __exit__(self, exc_type, exc, tb):
         self.exited += 1
         return False
@@ -23,21 +21,10 @@ class _RecordingLock:
 class DanielMultiMissionHostTests(unittest.TestCase):
     def setUp(self):
         with host._STATE_LOCK:
-            host._RUNTIME_STATE.update({
-                "active_mission": None,
-                "last_run_id": None,
-                "last_activity": None,
-                "last_result": None,
-            })
+            host._RUNTIME_STATE.update({"active_mission": None, "last_run_id": None, "last_activity": None, "last_result": None, "last_checkpoint": None, "checkpoint_evidence": ()})
 
     def mission(self):
-        return {
-            "agent_id": "DEV-001",
-            "wp_id": host.SEM_DANIEL_003_WP,
-            "base_branch": host.SEM_DANIEL_003_BASE_BRANCH,
-            "work_branch": host.SEM_DANIEL_003_BRANCH,
-            "allowed_paths": list(host.SEM_DANIEL_003_ALLOWED),
-        }
+        return {"agent_id": "DEV-001", "wp_id": host.SEM_DANIEL_003_WP, "base_branch": host.SEM_DANIEL_003_BASE_BRANCH, "work_branch": host.SEM_DANIEL_003_BRANCH, "allowed_paths": list(host.SEM_DANIEL_003_ALLOWED)}
 
     def test_003_contract_is_distinct_from_002(self):
         self.assertEqual(host.SEM_DANIEL_003_WP, "SEM-DANIEL-003")
@@ -59,6 +46,13 @@ class DanielMultiMissionHostTests(unittest.TestCase):
         self.assertTrue(health["ready"])
         self.assertTrue(health["credential_ready"])
         self.assertFalse(health["busy"])
+
+    def test_health_reports_checkpoint_evidence(self):
+        host._checkpoint("tests_passed", ("validation:compile:returncode:0", "validation:unittest:returncode:0"))
+        health = host.health_payload()
+        self.assertEqual(health["last_checkpoint"], "tests_passed")
+        self.assertIn("validation:unittest:returncode:0", health["checkpoint_evidence"])
+        self.assertIsNotNone(health["last_activity"])
 
     def test_health_reports_busy_active_mission(self):
         host._set_runtime_state(active_mission="SEM-DANIEL-003", last_result="acknowledged")
@@ -82,35 +76,24 @@ class DanielMultiMissionHostTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "allowed path contract mismatch"):
             host._execute_003("key", mission, "run", "start")
 
-    def test_003_reuses_controlled_execution_and_restores_002_contract(self):
+    def test_003_reuses_controlled_execution_reports_checkpoint_and_restores_002_contract(self):
         mission = self.mission()
-        original = (
-            host.legacy.SEM_DANIEL_WP,
-            host.legacy.SEM_DANIEL_BASE_BRANCH,
-            host.legacy.SEM_DANIEL_BRANCH,
-            host.legacy.SEM_DANIEL_ALLOWED,
-        )
-        with patch.object(host.legacy, "_execute_sem_daniel", return_value={"success": True}) as execute:
+        original = (host.legacy.SEM_DANIEL_WP, host.legacy.SEM_DANIEL_BASE_BRANCH, host.legacy.SEM_DANIEL_BRANCH, host.legacy.SEM_DANIEL_ALLOWED)
+
+        def execute(api_key, active_mission, run_id, started, checkpoint=None):
+            checkpoint("tests_passed", ("validation:unittest:returncode:0",))
+            return {"success": True}
+
+        with patch.object(host.legacy, "_execute_sem_daniel", side_effect=execute):
             result = host._execute_003("key", mission, "run", "start")
-            active = execute.call_args.args[1]
         self.assertTrue(result["success"])
-        self.assertEqual(active["wp_id"], "SEM-DANIEL-003")
-        self.assertEqual(
-            (
-                host.legacy.SEM_DANIEL_WP,
-                host.legacy.SEM_DANIEL_BASE_BRANCH,
-                host.legacy.SEM_DANIEL_BRANCH,
-                host.legacy.SEM_DANIEL_ALLOWED,
-            ),
-            original,
-        )
+        self.assertEqual(host.health_payload()["last_checkpoint"], "tests_passed")
+        self.assertEqual((host.legacy.SEM_DANIEL_WP, host.legacy.SEM_DANIEL_BASE_BRANCH, host.legacy.SEM_DANIEL_BRANCH, host.legacy.SEM_DANIEL_ALLOWED), original)
 
     def test_non_003_delegation_uses_shared_execution_lock(self):
         payload = {"protocol": "rvsc.worker.v1", "mission": {"agent_id": "DEV-001", "wp_id": "SEM-DANIEL-002"}}
         lock = _RecordingLock()
-        with patch.object(host, "_EXECUTION_LOCK", lock), patch.object(
-            host.legacy, "execute_payload", return_value={"success": True, "delegated": True}
-        ) as delegated:
+        with patch.object(host, "_EXECUTION_LOCK", lock), patch.object(host.legacy, "execute_payload", return_value={"success": True, "delegated": True}) as delegated:
             result = host.execute_payload(payload)
         self.assertTrue(result["delegated"])
         delegated.assert_called_once_with(payload)
@@ -126,6 +109,7 @@ class DanielMultiMissionHostTests(unittest.TestCase):
         self.assertFalse(health["busy"])
         self.assertIsNone(health["active_mission"])
         self.assertEqual(health["last_result"], "failed")
+        self.assertEqual(health["last_checkpoint"], "execution_failed")
 
 
 if __name__ == "__main__":
