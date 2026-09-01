@@ -17,6 +17,7 @@ OPENAI_URL = "https://api.openai.com/v1/responses"
 DEFAULT_MODEL = os.environ.get("RVSC_OPENAI_MODEL", "gpt-5.6")
 RVSC_ROOT = Path(__file__).resolve().parents[1]
 DANIEL_CORE_PATH = Path(os.environ.get("RVSC_DANIEL_CORE_PATH", str(RVSC_ROOT / "golden-core" / "DANIEL_GOLDEN_CORE_V1.md")))
+MAX_CORE_PATH = Path(os.environ.get("RVSC_MAX_CORE_PATH", str(RVSC_ROOT / "golden-core" / "MAX_PLATINUM_ENGINEERING_CORE_V1.md")))
 SEMANTIQ_REPO = Path(os.environ.get("RVSC_SEMANTIQ_REPO", r"D:\py_proj\RAMTech-SEMANTIQ"))
 SEM_DANIEL_WP = "SEM-DANIEL-001"
 SEM_DANIEL_BRANCH = "rvsc/SEM-DANIEL-001-reproduction"
@@ -80,14 +81,22 @@ def _json_object(text: str) -> dict[str, Any]:
     return value
 
 
-def _load_daniel_core() -> str:
+def _load_core(path: Path, label: str) -> str:
     try:
-        core = DANIEL_CORE_PATH.read_text(encoding="utf-8").strip()
+        core = path.read_text(encoding="utf-8").strip()
     except OSError as exc:
-        raise RuntimeError(f"unable to load Daniel Golden Core from {DANIEL_CORE_PATH}: {exc}") from exc
+        raise RuntimeError(f"unable to load {label} from {path}: {exc}") from exc
     if not core:
-        raise RuntimeError(f"Daniel Golden Core is empty: {DANIEL_CORE_PATH}")
+        raise RuntimeError(f"{label} is empty: {path}")
     return core
+
+
+def _load_daniel_core() -> str:
+    return _load_core(DANIEL_CORE_PATH, "Daniel Golden Core")
+
+
+def _load_max_platinum_core() -> str:
+    return _load_core(MAX_CORE_PATH, "Max Platinum Engineering Core")
 
 
 def _prepare_semantiq_branch(environment: ControlledEngineeringEnvironment) -> None:
@@ -106,16 +115,21 @@ def _prepare_semantiq_branch(environment: ControlledEngineeringEnvironment) -> N
 
 def _engineering_prompt(mission: dict[str, Any], source_files: dict[str, str]) -> str:
     golden_core = _load_daniel_core()
+    max_core = _load_max_platinum_core()
     return (
-        "You are DEV-001 Daniel, Lead Software Engineer inside RVSC. The following Golden Agent Core is your governing operating doctrine for this mission. "
-        "Apply it as executable engineering behavior, not as material to summarize or repeat. Mission scope and explicit runtime restrictions override any broader capability language in the core.\n\n"
+        "You are DEV-001 Daniel, Lead Software Engineer inside RVSC. The Daniel Golden Agent Core defines your identity and operating policy. "
+        "The Max Platinum Engineering Core defines the engineering reasoning and execution methodology you must apply. "
+        "Use both cores as executable behavior; do not summarize, quote, or repeat them in your response. "
+        "Mission scope, explicit runtime restrictions, repository authorization, and safety constraints override any broader capability language in either core. "
+        "Never expose credentials, secrets, environment values, or authorization material in generated files, summaries, evidence, or logs.\n\n"
         f"DANIEL GOLDEN AGENT CORE:\n{golden_core}\n\n"
+        f"MAX PLATINUM ENGINEERING CORE:\n{max_core}\n\n"
         "Perform the bounded engineering mission below. You are not being asked for an acknowledgement. "
-        "Independently inspect the supplied baseline evidence, reason about the smallest general solution, preserve unrelated working behavior, and produce the implementation. "
+        "Independently inspect the supplied baseline evidence, identify the actual requirement and regression surface, reason about the smallest general solution, preserve unrelated working behavior, and produce the implementation. "
         "Do not claim tests, commits, filesystem actions, QA, or other execution that you cannot perform; the controlled RVSC runtime applies your proposal and captures those results. "
         "Return ONLY valid JSON with exactly these top-level keys: files, commit_message, engineering_summary. "
         "files must be an object whose keys are exactly the authorized file paths and whose values are the COMPLETE replacement UTF-8 file contents. "
-        "Do not use markdown fences. The engineering_summary must state the reasoning behind the implementation and any remaining uncertainty without fabricating evidence.\n\n"
+        "Do not use markdown fences. The engineering_summary must explain the implementation reasoning, risks considered, and any remaining uncertainty without fabricating evidence.\n\n"
         f"MISSION:\n{json.dumps(mission, indent=2)}\n\n"
         f"BASELINE FILES:\n{json.dumps(source_files, indent=2)}"
     )
@@ -186,6 +200,8 @@ def _execute_sem_daniel(api_key: str, mission: dict[str, Any], run_id: str, star
         f"provider_status:{status}",
         f"golden_core:{DANIEL_CORE_PATH.name}",
         "golden_core_injected:true",
+        f"max_platinum_core:{MAX_CORE_PATH.name}",
+        "max_platinum_core_injected:true",
         "execution_mode:model_proposal_controlled_apply_validate_commit_push",
     ))
     summary = str(proposal.get("engineering_summary") or "DEV-001 completed controlled SEMANTIQ engineering qualification")
