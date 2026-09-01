@@ -1,0 +1,219 @@
+from __future__ import annotations
+
+import json
+import os
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import asdict, dataclass
+from typing import Callable, Mapping
+
+from .adapters import WorkerAdapter, WorkerRequest, WorkerResult
+
+
+class ExecutionBridgeError(RuntimeError):
+    """Raised when a configured execution provider cannot be invoked safely."""
+
+
+@dataclass(frozen=True)
+class ProviderConfig:
+    name: str
+    endpoint: str
+    token_env: str | None = None
+    timeout_seconds: int = 120
+    require_healthcheck: bool = False
+
+    def validate(self) -> None:
+        if not self.name.strip():
+            raise ValueError("provider requires a name")
+        if not self.endpoint.startswith(("http://", "https://")):
+            raise ValueError("provider endpoint must be http(s)")
+        if self.timeout_seconds <= 0:
+            raise ValueError("provider timeout must be positive")
+
+
+@dataclass(frozen=True)
+class ProviderResponse:
+    status: int
+    body: bytes
+
+
+@dataclass(frozen=True)
+class WorkerHealth:
+    reachable: bool
+    ready: bool
+    worker: str | None = None
+    status: str | None = None
+    active_mission: str | None = None
+    last_activity: str | None = None
+    reason: str | None = None
+
+
+Transport = Callable[[urllib.request.Request, int], ProviderResponse]
+
+
+def _default_transport(request: urllib.request.Request, timeout: int) -> ProviderResponse:
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return ProviderResponse(status=int(response.status), body=response.read())
+    except urllib.error.HTTPError as exc:
+        return ProviderResponse(status=int(exc.code), body=exc.read())
+    except urllib.error.URLError as exc:
+        raise ExecutionBridgeError(f"provider transport failed: {exc.reason}") from exc
+
+
+def _worker_error_result(provider: str, response: ProviderResponse) -> WorkerResult:
+    summary = f"provider returned HTTP {response.status}"
+    evidence: tuple[str, ...] = (f"provider:{provider}", f"http_status:{response.status}")
+    retryable = response.status >= 500 or response.status == 429
+    try:
+        data = json.loads(response.body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return WorkerResult(success=False, summary=summary, evidence=evidence, retryable=retryable)
+    if not isinstance(data, Mapping):
+        return WorkerResult(success=False, summary=summary, evidence=evidence, retryable=retryable)
+    worker_summary = data.get("summary")
+    if isinstance(worker_summary, str) and worker_summary.strip():
+        summary = worker_summary.strip()
+    worker_evidence = data.get("evidence")
+    if isinstance(worker_evidence, list) and all(isinstance(item, str) for item in worker_evidence):
+        evidence = tuple(item for item in worker_evidence if item.strip()) + evidence
+    if isinstance(data.get("retryable"), bool):
+        retryable = bool(data["retryable"])
+    return WorkerResult(success=False, summary=summary, evidence=evidence, retryable=retryable)
+
+
+class HttpJsonWorkerAdapter:
+    """Provider-neutral bridge from RVSC WorkerRequest to an external worker runtime."""
+
+    def __init__(self, config: ProviderConfig, transport: Transport | None = None) -> None:
+        config.validate()
+        self.config = config
+        self.name = config.name
+        self._transport = transport or _default_transport
+
+    def _headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        if self.config.token_env:
+            token = os.environ.get(self.config.token_env)
+            if not token:
+                raise ExecutionBridgeError(
+                    f"provider credential missing from environment: {self.config.token_env}"
+                )
+            headers["Authorization"] = f"Bearer {token}"
+        return headers
+
+    def health(self) -> WorkerHealth:
+        parsed = urllib.parse.urlsplit(self.config.endpoint)
+        health_url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "/health", "", ""))
+        request = urllib.request.Request(health_url, headers=self._headers(), method="GET")
+        try:
+            response = self._transport(request, min(self.config.timeout_seconds, 10))
+        except ExecutionBridgeError as exc:
+            return WorkerHealth(reachable=False, ready=False, reason=str(exc))
+        if response.status < 200 or response.status >= 300:
+            return WorkerHealth(
+                reachable=True,
+                ready=False,
+                reason=f"health endpoint returned HTTP {response.status}",
+            )
+        try:
+            data = json.loads(response.body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return WorkerHealth(reachable=True, ready=False, reason="health endpoint returned invalid JSON")
+        if not isinstance(data, Mapping):
+            return WorkerHealth(reachable=True, ready=False, reason="health payload must be an object")
+        return WorkerHealth(
+            reachable=True,
+            ready=bool(data.get("ready", False)),
+            worker=str(data["worker"]) if data.get("worker") is not None else None,
+            status=str(data["status"]) if data.get("status") is not None else None,
+            active_mission=str(data["active_mission"]) if data.get("active_mission") is not None else None,
+            last_activity=str(data["last_activity"]) if data.get("last_activity") is not None else None,
+            reason=None if data.get("ready") else "worker reported not ready",
+        )
+
+    def execute(self, request: WorkerRequest) -> WorkerResult:
+        if self.config.require_healthcheck:
+            health = self.health()
+            if not health.reachable:
+                return WorkerResult(
+                    success=False,
+                    summary=health.reason or "worker is unreachable",
+                    evidence=(f"provider:{self.config.name}", "preflight:unreachable"),
+                    retryable=True,
+                )
+            if not health.ready:
+                evidence = [f"provider:{self.config.name}", "preflight:not_ready"]
+                if health.status:
+                    evidence.append(f"worker_status:{health.status}")
+                if health.active_mission:
+                    evidence.append(f"active_mission:{health.active_mission}")
+                return WorkerResult(
+                    success=False,
+                    summary=health.reason or "worker reported not ready",
+                    evidence=tuple(evidence),
+                    retryable=True,
+                )
+
+        payload = {
+            "protocol": "rvsc.worker.v1",
+            "provider": self.config.name,
+            "mission": asdict(request),
+        }
+        http_request = urllib.request.Request(
+            self.config.endpoint,
+            data=json.dumps(payload).encode("utf-8"),
+            headers=self._headers(),
+            method="POST",
+        )
+        response = self._transport(http_request, self.config.timeout_seconds)
+        if response.status < 200 or response.status >= 300:
+            return _worker_error_result(self.config.name, response)
+        try:
+            data = json.loads(response.body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ExecutionBridgeError("provider returned invalid JSON") from exc
+        if not isinstance(data, Mapping):
+            raise ExecutionBridgeError("provider response must be a JSON object")
+        if not isinstance(data.get("success"), bool):
+            raise ExecutionBridgeError("provider response requires boolean success")
+        summary = data.get("summary")
+        if not isinstance(summary, str) or not summary.strip():
+            raise ExecutionBridgeError("provider response requires summary")
+        evidence_raw = data.get("evidence", [])
+        if not isinstance(evidence_raw, list) or not all(isinstance(item, str) for item in evidence_raw):
+            raise ExecutionBridgeError("provider evidence must be a list of strings")
+        evidence = tuple(item for item in evidence_raw if item.strip()) + (
+            f"provider:{self.config.name}",
+            "protocol:rvsc.worker.v1",
+        )
+        return WorkerResult(
+            success=data["success"],
+            summary=summary.strip(),
+            evidence=evidence,
+            retryable=bool(data.get("retryable", False)),
+        )
+
+
+class ExecutionBroker:
+    """Dynamic registry/router for approved real worker execution providers."""
+
+    def __init__(self) -> None:
+        self._providers: dict[str, WorkerAdapter] = {}
+
+    def register(self, adapter: WorkerAdapter) -> None:
+        name = getattr(adapter, "name", "")
+        if not name:
+            raise ValueError("execution provider requires a name")
+        self._providers[name] = adapter
+
+    def providers(self) -> tuple[str, ...]:
+        return tuple(sorted(self._providers))
+
+    def execute(self, provider: str, request: WorkerRequest) -> WorkerResult:
+        try:
+            adapter = self._providers[provider]
+        except KeyError as exc:
+            raise ExecutionBridgeError(f"execution provider not registered: {provider}") from exc
+        return adapter.execute(request)

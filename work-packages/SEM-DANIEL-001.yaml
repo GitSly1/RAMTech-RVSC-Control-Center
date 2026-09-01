@@ -1,0 +1,34 @@
+id: SEM-DANIEL-001
+title: Daniel independent SEMANTIQ engineering reproduction
+priority: P0-CRITICAL
+project: SEMANTIQ
+agent_id: DEV-001
+qa_agent: QA-001
+repository: GitSly1/RAMTech-SEMANTIQ
+base_branch: rvsc/SEM-003-rtudes-baseline-import
+work_branch: rvsc/SEM-DANIEL-001-reproduction
+objective: >
+  Extend the SEMANTIQ product identity API with a strict MAJOR.MINOR.PATCH semantic
+  version value object/parser. Preserve existing identity behavior, expose the new API
+  publicly, reject malformed/non-strict versions, make parsed versions comparable, and
+  add automated regression tests.
+allowed_paths:
+  - src/semantiq/identity.py
+  - src/semantiq/__init__.py
+  - tests/test_identity.py
+acceptance_criteria:
+  - Existing PRODUCT_NAME, ProductIdentity, __version__, and get_product_identity behavior remains intact.
+  - Strict MAJOR.MINOR.PATCH parsing is available through the public semantiq API.
+  - Parsed versions expose numeric major, minor, and patch components.
+  - Parsed versions compare in semantic major/minor/patch order.
+  - Invalid forms including missing components, prefixes, prerelease suffixes, leading-zero components, and empty input are rejected.
+  - python -m compileall -q src tests passes.
+  - python -m unittest discover -s tests -p 'test_*.py' -v passes.
+  - DEV-001 produces an attributable commit on the exact work branch.
+  - Evidence contains changed paths, file hashes, validation return codes, and commit SHA.
+qualification_rule: >
+  The reference implementation on rvsc/SEM-DANIEL-001-qualification must not be used as
+  an implementation source during the reproduction mission. DEV-001 must reason from
+  the stated requirements and the SEM-003 baseline. A5 is awarded only to an execution
+  attributable to DEV-001 through the controlled engineering runtime, not to Max-authored
+  or GitHub-console edits.
