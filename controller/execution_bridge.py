@@ -49,6 +49,33 @@ def _default_transport(request: urllib.request.Request, timeout: int) -> Provide
         raise ExecutionBridgeError(f"provider transport failed: {exc.reason}") from exc
 
 
+def _worker_error_result(provider: str, response: ProviderResponse) -> WorkerResult:
+    summary = f"provider returned HTTP {response.status}"
+    evidence: tuple[str, ...] = (f"provider:{provider}", f"http_status:{response.status}")
+    retryable = response.status >= 500 or response.status == 429
+
+    try:
+        data = json.loads(response.body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return WorkerResult(success=False, summary=summary, evidence=evidence, retryable=retryable)
+
+    if not isinstance(data, Mapping):
+        return WorkerResult(success=False, summary=summary, evidence=evidence, retryable=retryable)
+
+    worker_summary = data.get("summary")
+    if isinstance(worker_summary, str) and worker_summary.strip():
+        summary = worker_summary.strip()
+
+    worker_evidence = data.get("evidence")
+    if isinstance(worker_evidence, list) and all(isinstance(item, str) for item in worker_evidence):
+        evidence = tuple(item for item in worker_evidence if item.strip()) + evidence
+
+    if isinstance(data.get("retryable"), bool):
+        retryable = bool(data["retryable"])
+
+    return WorkerResult(success=False, summary=summary, evidence=evidence, retryable=retryable)
+
+
 class HttpJsonWorkerAdapter:
     """Provider-neutral bridge from RVSC WorkerRequest to an external worker runtime.
 
@@ -93,12 +120,7 @@ class HttpJsonWorkerAdapter:
         )
         response = self._transport(http_request, self.config.timeout_seconds)
         if response.status < 200 or response.status >= 300:
-            return WorkerResult(
-                success=False,
-                summary=f"provider returned HTTP {response.status}",
-                evidence=(f"provider:{self.config.name}", f"http_status:{response.status}"),
-                retryable=response.status >= 500 or response.status == 429,
-            )
+            return _worker_error_result(self.config.name, response)
 
         try:
             data = json.loads(response.body.decode("utf-8"))
