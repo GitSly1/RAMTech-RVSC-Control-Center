@@ -12,6 +12,7 @@ def main() -> int:
     os.environ.setdefault("RVSC_PROVIDER_NAME", "openai-daniel-local")
     os.environ.setdefault("RVSC_PROVIDER_ENDPOINT", "http://127.0.0.1:8768/execute")
     os.environ.setdefault("RVSC_PROVIDER_TIMEOUT_SECONDS", "300")
+    os.environ.setdefault("RVSC_PROVIDER_REQUIRE_HEALTHCHECK", "true")
 
     request = WorkerRequest(
         agent_id="DEV-001",
