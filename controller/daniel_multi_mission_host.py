@@ -16,6 +16,10 @@ SEM_DANIEL_003_ALLOWED = (
     "tests/test_interpretation_layer.py",
 )
 
+# The multi-mission process temporarily overrides the legacy host's bounded
+# mission constants while SEM-DANIEL-003 executes. Every path that can enter
+# legacy.execute_payload or legacy._execute_sem_daniel must share this lock so
+# another request in this same process cannot observe those temporary values.
 _EXECUTION_LOCK = threading.Lock()
 
 
@@ -28,8 +32,9 @@ def _execute_003(api_key: str, mission: dict[str, Any], run_id: str, started: st
         raise ValueError(f"{SEM_DANIEL_003_WP} allowed path contract mismatch")
 
     # Reuse the already-proven controlled engineering implementation without
-    # changing SEM-DANIEL-002. The lock prevents mission-contract globals from
-    # being observed concurrently by another request.
+    # changing its normal SEM-DANIEL-002 contract. The lock protects the
+    # temporary mission-contract override from all requests handled by this
+    # multi-mission process.
     with _EXECUTION_LOCK:
         original = (
             legacy.SEM_DANIEL_WP,
@@ -62,7 +67,11 @@ def execute_payload(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Daniel host only accepts DEV-001")
 
     if mission.get("wp_id") != SEM_DANIEL_003_WP:
-        return legacy.execute_payload(payload)
+        # Serialize delegation with SEM-DANIEL-003's temporary overrides.
+        # Without this, a concurrent SEM-DANIEL-002 request could observe the
+        # 003 constants and be misrouted to acknowledgement-only behavior.
+        with _EXECUTION_LOCK:
+            return legacy.execute_payload(payload)
 
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     if not api_key:
