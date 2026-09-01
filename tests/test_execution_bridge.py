@@ -81,6 +81,26 @@ class ExecutionBridgeTests(unittest.TestCase):
         self.assertTrue(result.retryable)
         self.assertIn("http_status:503", result.evidence)
 
+    def test_structured_worker_failure_preserves_root_cause(self):
+        body = json.dumps(
+            {
+                "success": False,
+                "summary": "SEMANTIQ repository must be clean before Daniel mission",
+                "evidence": ["worker_host:daniel"],
+                "retryable": False,
+            }
+        ).encode("utf-8")
+        adapter = HttpJsonWorkerAdapter(
+            ProviderConfig(name="primary", endpoint="https://worker.example/run"),
+            transport=lambda request, timeout: ProviderResponse(status=500, body=body),
+        )
+        result = adapter.execute(REQUEST)
+        self.assertFalse(result.success)
+        self.assertEqual(result.summary, "SEMANTIQ repository must be clean before Daniel mission")
+        self.assertFalse(result.retryable)
+        self.assertIn("worker_host:daniel", result.evidence)
+        self.assertIn("http_status:500", result.evidence)
+
     def test_invalid_provider_response_is_rejected(self):
         adapter = HttpJsonWorkerAdapter(
             ProviderConfig(name="primary", endpoint="https://worker.example/run"),
