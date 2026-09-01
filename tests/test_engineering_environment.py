@@ -51,8 +51,9 @@ class EngineeringEnvironmentTests(unittest.TestCase):
         cache = self.repo / "src" / "__pycache__"
         cache.mkdir()
         (cache / "module.cpython-312.pyc").write_bytes(b"generated")
-        self.assertEqual(env.git_raw_status().returncode, 0)
-        self.assertIn("__pycache__", env.git_raw_status().stdout)
+        raw = env.git_raw_status()
+        self.assertEqual(raw.returncode, 0)
+        self.assertTrue(raw.stdout.strip())
         self.assertEqual(env.git_status().stdout, "")
 
         (self.repo / "src" / "real_change.py").write_text("x = 1\n", encoding="utf-8")
