@@ -1,0 +1,35 @@
+id: RVSC-019
+title: Real worker execution bridge
+priority: P0-CRITICAL
+project: RVSC-Control-Center
+owner: CMD-001
+pilot_agent: DEV-001
+qa_agent: QA-001
+objective: >
+  Provide a provider-neutral execution broker that can invoke an approved external
+  worker runtime using a bounded RVSC WorkerRequest and return structured evidence.
+allowed_paths:
+  - controller/execution_bridge.py
+  - controller/provider_loader.py
+  - controller/daniel_worker_host.py
+  - scripts/invoke_daniel.py
+  - tests/test_execution_bridge.py
+  - work-packages/RVSC-019.yaml
+acceptance_criteria:
+  - Provider registry routes requests dynamically by provider name.
+  - HTTP JSON adapter preserves worker identity, project, branch, allowed paths, objective, and acceptance criteria.
+  - Credentials are read only from an environment variable and missing credentials fail closed.
+  - Non-2xx responses are returned as failed WorkerResult with retryability classification.
+  - Invalid provider responses are rejected explicitly.
+  - Successful responses append provider and protocol evidence.
+  - Local Daniel execution host accepts only rvsc.worker.v1 DEV-001 missions and uses OPENAI_API_KEY only from the environment.
+  - Live invocation evidence includes run id, timestamps, provider response id, model, work package, project, and branch.
+  - Unit tests pass in RVSC CI.
+qualification_boundary: >
+  Passing this work package proves the bridge and local execution-host contract.
+  DEV-001 becomes EXECUTING only after the local host accepts a live bounded Daniel
+  mission through RVSC and returns attributable completed-provider evidence.
+next_gate: >
+  Run the Daniel host on the authorized machine with OPENAI_API_KEY already loaded,
+  invoke DEV-001 through scripts/invoke_daniel.py, capture the live run id/timestamps,
+  then issue a bounded SEMANTIQ engineering mission and hand exact evidence to QA-001.
