@@ -11,6 +11,11 @@ from typing import Any
 
 EVENT_LOG = Path(os.environ.get("RVSC_EVENT_LOG", ".rvsc/activity.jsonl"))
 
+LIVENESS_ACTIONS = {"HEARTBEAT"}
+MATERIAL_ACTIONS = {"ACK", "CHECKPOINT", "COMPLETION", "BLOCK", "STALL", "RETRY", "ESCALATE", "QA", "DISPATCH"}
+MATERIAL_STATUSES = {"ACKNOWLEDGED", "WORKING", "CHECKPOINT", "COMPLETED", "BLOCKED", "STALLED", "FAILED", "ESCALATE", "RETRYING", "QA"}
+TERMINAL_ALERT_STATUSES = {"BLOCKED", "STALLED", "FAILED", "ESCALATE"}
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -50,31 +55,104 @@ def read_events(path: Path = EVENT_LOG, limit: int = 30) -> list[dict[str, Any]]
     return events
 
 
-def system_state(events: list[dict[str, Any]], *, now: datetime | None = None, idle_seconds: int = 300) -> tuple[str, str]:
-    if not events:
-        return "IDLE", "No recorded RVSC activity"
-    latest = events[-1]
-    raw = str(latest.get("timestamp", ""))
+def _parse_timestamp(event: dict[str, Any]) -> datetime | None:
+    raw = str(event.get("timestamp", ""))
     try:
         stamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
-        return "UNKNOWN", "Latest event has invalid timestamp"
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp.astimezone(timezone.utc)
+
+
+def _age_seconds(event: dict[str, Any], current: datetime) -> int | None:
+    stamp = _parse_timestamp(event)
+    if stamp is None:
+        return None
+    return max(0, int((current - stamp).total_seconds()))
+
+
+def _is_heartbeat(event: dict[str, Any]) -> bool:
+    return str(event.get("action", "")).upper() in LIVENESS_ACTIONS
+
+
+def _is_material(event: dict[str, Any]) -> bool:
+    action = str(event.get("action", "")).upper()
+    status = str(event.get("status", "")).upper()
+    return not _is_heartbeat(event) and (action in MATERIAL_ACTIONS or status in MATERIAL_STATUSES)
+
+
+def telemetry_snapshot(events: list[dict[str, Any]], *, now: datetime | None = None) -> dict[str, Any]:
     current = now or datetime.now(timezone.utc)
-    age = max(0, int((current - stamp).total_seconds()))
-    status = str(latest.get("status", "")).upper()
-    if status in {"BLOCKED", "STALLED", "FAILED", "ESCALATE"}:
-        return status, f"Latest material event {age}s ago"
-    if age > idle_seconds:
-        return "IDLE", f"No material event for {age}s"
-    return "ACTIVE", f"Last material event {age}s ago"
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    current = current.astimezone(timezone.utc)
+
+    heartbeat = next((event for event in reversed(events) if _is_heartbeat(event)), None)
+    material = next((event for event in reversed(events) if _is_material(event)), None)
+    checkpoint = next((event for event in reversed(events) if str(event.get("action", "")).upper() == "CHECKPOINT"), None)
+    return {
+        "heartbeat": heartbeat,
+        "heartbeat_age": _age_seconds(heartbeat, current) if heartbeat else None,
+        "material": material,
+        "material_age": _age_seconds(material, current) if material else None,
+        "checkpoint": checkpoint,
+        "checkpoint_age": _age_seconds(checkpoint, current) if checkpoint else None,
+    }
+
+
+def system_state(events: list[dict[str, Any]], *, now: datetime | None = None, idle_seconds: int = 300, checkpoint_stall_seconds: int | None = None) -> tuple[str, str]:
+    if not events:
+        return "IDLE", "No recorded RVSC activity"
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    current = current.astimezone(timezone.utc)
+    snapshot = telemetry_snapshot(events, now=current)
+    material = snapshot["material"]
+    heartbeat = snapshot["heartbeat"]
+
+    if material is None:
+        if heartbeat is not None:
+            return "IDLE", f"Heartbeat seen {snapshot['heartbeat_age']}s ago; no material progress recorded"
+        return "IDLE", "No material RVSC activity recorded"
+
+    material_age = snapshot["material_age"]
+    if material_age is None:
+        return "UNKNOWN", "Latest material event has invalid timestamp"
+
+    status = str(material.get("status", "")).upper()
+    if status in TERMINAL_ALERT_STATUSES:
+        return status, f"Latest material event {material_age}s ago"
+
+    stall_after = checkpoint_stall_seconds if checkpoint_stall_seconds is not None else idle_seconds
+    if heartbeat is not None and snapshot["heartbeat_age"] is not None and snapshot["heartbeat_age"] <= idle_seconds:
+        checkpoint = snapshot["checkpoint"]
+        checkpoint_age = snapshot["checkpoint_age"]
+        if checkpoint is not None and checkpoint_age is not None and checkpoint_age > stall_after:
+            checkpoint_name = str(checkpoint.get("detail") or checkpoint.get("status") or "checkpoint")
+            return "STALLED", f"Heartbeat fresh ({snapshot['heartbeat_age']}s); checkpoint '{checkpoint_name}' stale for {checkpoint_age}s"
+        if checkpoint is None and material_age > stall_after:
+            return "STALLED", f"Heartbeat fresh ({snapshot['heartbeat_age']}s); no checkpoint progress for {material_age}s"
+
+    if material_age > idle_seconds:
+        return "IDLE", f"No material event for {material_age}s"
+    return "ACTIVE", f"Last material event {material_age}s ago"
 
 
 def render(events: list[dict[str, Any]]) -> str:
     state, reason = system_state(events)
+    snapshot = telemetry_snapshot(events)
+    heartbeat_age = snapshot["heartbeat_age"]
+    checkpoint_age = snapshot["checkpoint_age"]
+    checkpoint = snapshot["checkpoint"]
+    checkpoint_name = str(checkpoint.get("detail") or checkpoint.get("status") or "-") if checkpoint else "-"
     rows = [
         "=" * 78,
         "RVSC LIVE OPERATIONS CONSOLE",
         f"Updated: {utc_now()}   System: {state}   {reason}",
+        f"Heartbeat age: {heartbeat_age if heartbeat_age is not None else '-'}s   Checkpoint: {checkpoint_name}   Checkpoint age: {checkpoint_age if checkpoint_age is not None else '-'}s",
         "=" * 78,
         "TIME       ACTOR        ACTION           STATUS       WORK PACKAGE / DETAIL",
         "-" * 78,
