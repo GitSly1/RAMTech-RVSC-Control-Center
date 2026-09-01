@@ -39,7 +39,7 @@ class EngineeringMissionRunner:
         actual = branch.stdout.strip()
         if actual != self.request.work_branch:
             raise EngineeringEnvironmentError(f"branch mismatch: expected {self.request.work_branch}, got {actual or '<detached>'}")
-        status = self.environment.git_status()
+        status = self.environment.git_material_status()
         if status.returncode != 0:
             raise EngineeringEnvironmentError(status.stderr.strip() or "git status failed")
         if status.stdout.strip():
