@@ -79,6 +79,9 @@ class WorkerHealth:
     active_mission: str | None = None
     last_checkpoint: str | None = None
     last_activity: str | None = None
+    last_heartbeat_at: str | None = None
+    last_checkpoint_at: str | None = None
+    mission_acknowledged_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -177,7 +180,12 @@ def _parse_activity(value: str | None) -> datetime | None:
 
 
 def watchdog_decision(execution: WorkerExecution, health: WorkerHealth, *, now: datetime, checkpoint_timeout_seconds: int, max_attempts: int) -> WatchdogDecision:
-    """Evaluate observable worker health without treating heartbeat as progress."""
+    """Evaluate liveness and mission progress independently.
+
+    last_heartbeat_at/last_activity indicate worker liveness. last_checkpoint_at
+    indicates mission progress. A fresh heartbeat must never conceal a stale
+    checkpoint. last_activity remains a compatibility fallback for older workers.
+    """
     if checkpoint_timeout_seconds <= 0:
         raise WorkerRuntimeError("checkpoint timeout must be positive")
     if not health.reachable:
@@ -191,14 +199,14 @@ def watchdog_decision(execution: WorkerExecution, health: WorkerHealth, *, now: 
     if not health.busy or health.active_mission != execution.wp_id:
         action = WatchdogAction.RETRY if execution.attempt < max_attempts else WatchdogAction.ESCALATE
         return WatchdogDecision(action, "worker did not acknowledge active mission")
-    activity = _parse_activity(health.last_activity)
-    if activity is None:
-        return WatchdogDecision(WatchdogAction.STALL, "worker has no observable activity timestamp")
+    checkpoint_activity = _parse_activity(health.last_checkpoint_at or health.last_activity)
+    if checkpoint_activity is None:
+        return WatchdogDecision(WatchdogAction.STALL, "worker has no observable checkpoint timestamp")
     normalized_now = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
-    age = (normalized_now.astimezone(timezone.utc) - activity).total_seconds()
+    age = (normalized_now.astimezone(timezone.utc) - checkpoint_activity).total_seconds()
     if age > checkpoint_timeout_seconds:
         return WatchdogDecision(WatchdogAction.STALL, f"checkpoint stale for {int(age)} seconds")
-    return WatchdogDecision(WatchdogAction.HEALTHY, f"checkpoint activity observed {int(max(age, 0))} seconds ago")
+    return WatchdogDecision(WatchdogAction.HEALTHY, f"checkpoint progress observed {int(max(age, 0))} seconds ago")
 
 
 def select_qa_agent(agents: Iterable[Agent], implementer_id: str, project: str) -> Agent:
