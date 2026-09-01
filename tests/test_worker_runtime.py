@@ -55,7 +55,10 @@ class WorkerRuntimeTests(unittest.TestCase):
     def test_watchdog_heartbeat_is_not_progress_when_checkpoint_is_stale(self):
         now = datetime(2026, 9, 1, 18, 0, tzinfo=timezone.utc)
         execution = start_execution(WorkerExecution("SEM-DANIEL-003", "DEV-001", WorkerState.ASSIGNED))
-        health = WorkerHealth(True, False, True, "SEM-DANIEL-003", "proposal_received", (now - timedelta(minutes=11)).isoformat())
+        health = WorkerHealth(
+            True, False, True, "SEM-DANIEL-003", "proposal_received",
+            now.isoformat(), now.isoformat(), (now - timedelta(minutes=11)).isoformat(), now.isoformat(),
+        )
         decision = watchdog_decision(execution, health, now=now, checkpoint_timeout_seconds=600, max_attempts=3)
         self.assertEqual(decision.action, WatchdogAction.STALL)
         self.assertIn("stale", decision.reason)
@@ -78,7 +81,15 @@ class WorkerRuntimeTests(unittest.TestCase):
     def test_watchdog_recent_checkpoint_is_healthy(self):
         now = datetime(2026, 9, 1, 18, 0, tzinfo=timezone.utc)
         execution = start_execution(WorkerExecution("SEM-DANIEL-003", "DEV-001", WorkerState.ASSIGNED))
-        health = WorkerHealth(True, False, True, "SEM-DANIEL-003", "tests_passed", (now - timedelta(seconds=30)).isoformat())
+        recent = (now - timedelta(seconds=30)).isoformat()
+        health = WorkerHealth(True, False, True, "SEM-DANIEL-003", "tests_passed", now.isoformat(), now.isoformat(), recent, now.isoformat())
+        decision = watchdog_decision(execution, health, now=now, checkpoint_timeout_seconds=600, max_attempts=3)
+        self.assertEqual(decision.action, WatchdogAction.HEALTHY)
+
+    def test_legacy_worker_activity_remains_compatible(self):
+        now = datetime(2026, 9, 1, 18, 0, tzinfo=timezone.utc)
+        execution = start_execution(WorkerExecution("SEM-DANIEL-003", "DEV-001", WorkerState.ASSIGNED))
+        health = WorkerHealth(True, False, True, "SEM-DANIEL-003", "tests_passed", (now - timedelta(seconds=15)).isoformat())
         decision = watchdog_decision(execution, health, now=now, checkpoint_timeout_seconds=600, max_attempts=3)
         self.assertEqual(decision.action, WatchdogAction.HEALTHY)
 
