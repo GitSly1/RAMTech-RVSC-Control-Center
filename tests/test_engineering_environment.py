@@ -46,6 +46,34 @@ class EngineeringEnvironmentTests(unittest.TestCase):
         self.assertEqual(status.returncode, 0)
         self.assertIn("docs/", status.stdout)
 
+    def test_git_status_ignores_generated_python_cache_only(self) -> None:
+        env = ControlledEngineeringEnvironment(self.repo, allowed_paths=("docs/**",), allowed_executables=("git",))
+        cache = self.repo / "src" / "__pycache__"
+        cache.mkdir()
+        (cache / "module.cpython-312.pyc").write_bytes(b"generated")
+        self.assertEqual(env.git_raw_status().returncode, 0)
+        self.assertIn("__pycache__", env.git_raw_status().stdout)
+        self.assertEqual(env.git_status().stdout, "")
+
+        (self.repo / "src" / "real_change.py").write_text("x = 1\n", encoding="utf-8")
+        material = env.git_status()
+        self.assertIn("src/real_change.py", material.stdout)
+        self.assertNotIn("__pycache__", material.stdout)
+
+    def test_git_status_still_blocks_modified_tracked_file(self) -> None:
+        tracked = self.repo / "docs" / "tracked.md"
+        tracked.write_text("baseline\n", encoding="utf-8")
+        subprocess.run(["git", "add", "docs/tracked.md"], cwd=self.repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "baseline"],
+            cwd=self.repo,
+            check=True,
+            capture_output=True,
+        )
+        tracked.write_text("changed\n", encoding="utf-8")
+        env = ControlledEngineeringEnvironment(self.repo, allowed_paths=("docs/**",), allowed_executables=("git",))
+        self.assertIn("docs/tracked.md", env.git_status().stdout)
+
     def test_search_is_scoped(self) -> None:
         (self.repo / "docs" / "allowed.md").write_text("golden evidence", encoding="utf-8")
         (self.repo / "src" / "hidden.py").write_text("golden evidence", encoding="utf-8")
