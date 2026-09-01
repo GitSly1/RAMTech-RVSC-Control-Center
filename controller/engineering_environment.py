@@ -137,7 +137,7 @@ class ControlledEngineeringEnvironment:
         return CommandResult(tuple(argv), completed.returncode, completed.stdout, completed.stderr)
 
     def git_raw_status(self) -> CommandResult:
-        return self.run(("git", "status", "--short"))
+        return self.run(("git", "status", "--short", "--untracked-files=all"))
 
     def git_status(self) -> CommandResult:
         """Return material Git status, excluding only generated Python bytecode artifacts."""
