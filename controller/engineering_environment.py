@@ -94,7 +94,7 @@ class ControlledEngineeringEnvironment:
     def write_text(self, relative_path: str, content: str) -> FileEvidence:
         target = self._resolve(relative_path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
+        target.write_text(content, encoding="utf-8", newline="")
         return self.file_evidence(relative_path)
 
     def file_evidence(self, relative_path: str) -> FileEvidence:
