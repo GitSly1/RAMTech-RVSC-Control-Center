@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from . import daniel_multi_mission_host as daniel
+from .runtime_state_store import DurableRuntimeStateStore
 
 
 RVSC_ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +24,8 @@ _RUNTIME_STATE: dict[str, Any] = {
     "last_result": None,
     "last_checkpoint": None,
     "checkpoint_evidence": (),
+    "recovery_required": False,
+    "recovered_checkpoint": None,
 }
 
 
@@ -59,12 +62,6 @@ def _list(value: str) -> tuple[str, ...]:
 
 
 def load_agents(path: Path = AGENT_REGISTRY) -> tuple[RegisteredAgent, ...]:
-    """
-    Parse the constrained RVSC agent registry without introducing a PyYAML
-    runtime dependency.
-
-    This intentionally parses only the fields required by the worker host.
-    """
     text = path.read_text(encoding="utf-8")
     agents: list[RegisteredAgent] = []
     current: dict[str, Any] | None = None
@@ -72,17 +69,13 @@ def load_agents(path: Path = AGENT_REGISTRY) -> tuple[RegisteredAgent, ...]:
 
     for raw in text.splitlines():
         stripped = raw.strip()
-
         if stripped == "agents:":
             inside_agents = True
             continue
-
         if stripped == "policies:":
             break
-
         if not inside_agents or not stripped or stripped.startswith("#"):
             continue
-
         if stripped.startswith("- id:"):
             if current:
                 agents.append(
@@ -97,14 +90,11 @@ def load_agents(path: Path = AGENT_REGISTRY) -> tuple[RegisteredAgent, ...]:
                 )
             current = {"id": _scalar(stripped.split(":", 1)[1])}
             continue
-
         if current is None or ":" not in stripped:
             continue
-
         key, value = stripped.split(":", 1)
         key = key.strip()
         value = value.strip()
-
         if key in {"name", "role"}:
             current[key] = _scalar(value)
         elif key == "projects":
@@ -123,7 +113,6 @@ def load_agents(path: Path = AGENT_REGISTRY) -> tuple[RegisteredAgent, ...]:
                 qa_eligible=bool(current.get("qa_eligible", False)),
             )
         )
-
     return tuple(agents)
 
 
@@ -138,27 +127,11 @@ def get_agent(agent_id: str) -> RegisteredAgent:
 def validate_worker(agent: RegisteredAgent, project: str | None = None) -> None:
     if not agent.worker_enabled:
         raise ValueError(f"{agent.agent_id} is not worker-enabled")
-
     if project:
         normalized_project = project.strip().lower()
         allowed = {item.lower() for item in agent.projects}
         if normalized_project not in allowed:
-            raise ValueError(
-                f"{agent.agent_id} is not authorized for project {project}"
-            )
-
-
-def _set_runtime_state(**updates: Any) -> None:
-    with _STATE_LOCK:
-        _RUNTIME_STATE.update(updates)
-        _RUNTIME_STATE["last_activity"] = _utc_now()
-
-
-def _checkpoint(name: str, evidence: tuple[str, ...] = ()) -> None:
-    _set_runtime_state(
-        last_checkpoint=name,
-        checkpoint_evidence=tuple(evidence),
-    )
+            raise ValueError(f"{agent.agent_id} is not authorized for project {project}")
 
 
 def configured_agent() -> RegisteredAgent:
@@ -168,14 +141,72 @@ def configured_agent() -> RegisteredAgent:
     return agent
 
 
-def health_payload() -> dict[str, Any]:
-    agent = configured_agent()
+def _state_store() -> DurableRuntimeStateStore:
+    root = Path(os.environ.get("RVSC_RUNTIME_STATE_DIR", str(RVSC_ROOT / ".rvsc" / "runtime")))
+    return DurableRuntimeStateStore(root)
 
+
+def _snapshot_state() -> dict[str, Any]:
     with _STATE_LOCK:
         state = dict(_RUNTIME_STATE)
+    state["checkpoint_evidence"] = list(state.get("checkpoint_evidence", ()))
+    return state
 
+
+def _persist_runtime_state() -> None:
+    agent = configured_agent()
+    _state_store().save(agent.agent_id, _snapshot_state())
+
+
+def _set_runtime_state(*, persist: bool = True, **updates: Any) -> None:
+    with _STATE_LOCK:
+        _RUNTIME_STATE.update(updates)
+        _RUNTIME_STATE["last_activity"] = _utc_now()
+    if persist:
+        _persist_runtime_state()
+
+
+def _checkpoint(name: str, evidence: tuple[str, ...] = ()) -> None:
+    _set_runtime_state(last_checkpoint=name, checkpoint_evidence=tuple(evidence))
+
+
+def _restore_runtime_state() -> bool:
+    agent = configured_agent()
+    restored = _state_store().load(agent.agent_id)
+    if restored is None:
+        return False
+
+    known = set(_RUNTIME_STATE)
+    filtered = {key: value for key, value in restored.items() if key in known}
+    filtered["checkpoint_evidence"] = tuple(filtered.get("checkpoint_evidence", ()))
+    previous_checkpoint = filtered.get("last_checkpoint")
+    interrupted = bool(filtered.get("active_mission"))
+
+    with _STATE_LOCK:
+        _RUNTIME_STATE.update(filtered)
+        if interrupted:
+            _RUNTIME_STATE["recovery_required"] = True
+            _RUNTIME_STATE["recovered_checkpoint"] = previous_checkpoint
+            _RUNTIME_STATE["last_checkpoint"] = "runtime_recovered"
+            evidence = list(_RUNTIME_STATE.get("checkpoint_evidence", ()))
+            if previous_checkpoint:
+                evidence.append(f"recovered_checkpoint:{previous_checkpoint}")
+            evidence.append("durable_state:restored")
+            _RUNTIME_STATE["checkpoint_evidence"] = tuple(evidence)
+        else:
+            _RUNTIME_STATE["recovery_required"] = False
+            _RUNTIME_STATE["recovered_checkpoint"] = previous_checkpoint
+        _RUNTIME_STATE["last_activity"] = _utc_now()
+
+    _persist_runtime_state()
+    return True
+
+
+def health_payload() -> dict[str, Any]:
+    agent = configured_agent()
+    with _STATE_LOCK:
+        state = dict(_RUNTIME_STATE)
     credential_ready = bool(os.environ.get("OPENAI_API_KEY", "").strip())
-
     return {
         "protocol": "rvsc.worker.health.v1",
         "worker": agent.agent_id,
@@ -186,6 +217,7 @@ def health_payload() -> dict[str, Any]:
             agent.worker_enabled
             and credential_ready
             and state["active_mission"] is None
+            and not state["recovery_required"]
         ),
         "credential_ready": credential_ready,
         "worker_enabled": agent.worker_enabled,
@@ -198,59 +230,54 @@ def health_payload() -> dict[str, Any]:
         "last_result": state["last_result"],
         "last_checkpoint": state["last_checkpoint"],
         "checkpoint_evidence": list(state["checkpoint_evidence"]),
+        "recovery_required": state["recovery_required"],
+        "recovered_checkpoint": state["recovered_checkpoint"],
+        "durable_state": True,
     }
 
 
 def execute_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if payload.get("protocol") != "rvsc.worker.v1":
         raise ValueError("unsupported protocol")
-
     mission = payload.get("mission")
     if not isinstance(mission, dict):
         raise ValueError("mission must be an object")
-
     requested_id = str(mission.get("agent_id", "")).strip()
     if not requested_id:
         raise ValueError("mission agent_id is required")
 
     configured = configured_agent()
-
     if requested_id != configured.agent_id:
-        raise ValueError(
-            f"worker configured for {configured.agent_id}, "
-            f"mission requested {requested_id}"
-        )
-
+        raise ValueError(f"worker configured for {configured.agent_id}, mission requested {requested_id}")
     project = str(mission.get("project", "")).strip()
     validate_worker(configured, project or None)
 
-    wp_id = str(mission.get("wp_id", "")).strip() or "unknown"
+    with _STATE_LOCK:
+        recovery_required = bool(_RUNTIME_STATE["recovery_required"])
+        active_mission = _RUNTIME_STATE["active_mission"]
+    if recovery_required:
+        raise RuntimeError(
+            f"durable recovery required for interrupted mission {active_mission}; refusing duplicate dispatch"
+        )
 
+    wp_id = str(mission.get("wp_id", "")).strip() or "unknown"
     _set_runtime_state(
         active_mission=wp_id,
         last_result="acknowledged",
         last_checkpoint="mission_acknowledged",
         checkpoint_evidence=(),
+        recovery_required=False,
+        recovered_checkpoint=None,
     )
 
     try:
-        # Preserve the already-qualified Daniel mission runtime unchanged.
         if configured.agent_id == "DEV-001":
             result = daniel.execute_payload(payload)
-            _set_runtime_state(
-                last_result="success" if result.get("success") else "failed"
-            )
+            _set_runtime_state(last_result="success" if result.get("success") else "failed")
             return result
-
-        # Other agents are now valid executable worker identities, but their
-        # mission-specific runners are intentionally introduced separately.
-        # This prevents a generic host from silently pretending that a worker
-        # performed engineering or QA that has no controlled runner yet.
         raise RuntimeError(
-            f"{configured.agent_id} worker identity is active but no "
-            f"controlled mission runner is registered for work package {wp_id}"
+            f"{configured.agent_id} worker identity is active but no controlled mission runner is registered for work package {wp_id}"
         )
-
     except Exception as exc:
         _set_runtime_state(
             last_result="failed",
@@ -258,7 +285,6 @@ def execute_payload(payload: dict[str, Any]) -> dict[str, Any]:
             checkpoint_evidence=(f"failure:{exc}",),
         )
         raise
-
     finally:
         _set_runtime_state(active_mission=None)
 
@@ -282,25 +308,18 @@ class GenericWorkerHandler(BaseHTTPRequestHandler):
         if self.path != "/execute":
             self.send_error(404)
             return
-
         try:
             length = int(self.headers.get("Content-Length", "0"))
-            payload = json.loads(
-                self.rfile.read(length).decode("utf-8")
-            )
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
             result = execute_payload(payload)
             self._send_json(200, result)
-
         except Exception as exc:
-            self._send_json(
-                500,
-                {
-                    "success": False,
-                    "summary": str(exc),
-                    "evidence": ["worker_host:rvsc-generic"],
-                    "retryable": False,
-                },
-            )
+            self._send_json(500, {
+                "success": False,
+                "summary": str(exc),
+                "evidence": ["worker_host:rvsc-generic"],
+                "retryable": False,
+            })
 
     def log_message(self, fmt: str, *args: Any) -> None:
         print(f"[RVSCGenericWorker] {fmt % args}")
@@ -311,21 +330,21 @@ def main() -> None:
     host = os.environ.get("RVSC_WORKER_HOST", "127.0.0.1")
     port = int(os.environ.get("RVSC_WORKER_PORT", "8770"))
 
-    _checkpoint("worker_started")
+    restored = _restore_runtime_state()
+    with _STATE_LOCK:
+        recovery_required = bool(_RUNTIME_STATE["recovery_required"])
+        active_mission = _RUNTIME_STATE["active_mission"]
+    if not restored:
+        _checkpoint("worker_started")
+    elif not recovery_required:
+        _checkpoint("worker_restarted", ("durable_state:restored",))
 
-    print(
-        f"{agent.agent_id} {agent.name} generic worker host listening "
-        f"on http://{host}:{port}/execute"
-    )
-    print(
-        f"{agent.agent_id} {agent.name} health available "
-        f"on http://{host}:{port}/health"
-    )
+    print(f"{agent.agent_id} {agent.name} generic worker host listening on http://{host}:{port}/execute")
+    print(f"{agent.agent_id} {agent.name} health available on http://{host}:{port}/health")
+    if recovery_required:
+        print(f"{agent.agent_id} durable recovery required for interrupted mission {active_mission}")
 
-    ThreadingHTTPServer(
-        (host, port),
-        GenericWorkerHandler,
-    ).serve_forever()
+    ThreadingHTTPServer((host, port), GenericWorkerHandler).serve_forever()
 
 
 if __name__ == "__main__":
