@@ -137,6 +137,7 @@ class GenericWorkerHostTests(unittest.TestCase):
              patch("controller.generic_worker_host._checkpoint"):
             result = automatic_qa_handoff(noah, mission, engineering)
         self.assertTrue(result["success"])
+        self.assertTrue(result["qa_handoff"]["success"])
         self.assertEqual(result["verdict"], "QA_ACCEPTED")
         self.assertEqual(result["qa_evidence"], qa["evidence"])
         qa_mission = dispatch.call_args.args[0]["mission"]
