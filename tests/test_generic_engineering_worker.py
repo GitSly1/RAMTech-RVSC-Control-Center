@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
-from controller.generic_engineering_worker import _repo_root, _validations, _worker_request
+from controller.engineering_environment import EngineeringEnvironmentError
+from controller.generic_engineering_worker import _configure_git_identity, _repo_root, _validations, _worker_request
 
 
 class GenericEngineeringWorkerTests(unittest.TestCase):
@@ -47,6 +48,26 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
     def test_repo_root_rejects_unknown_project(self):
         with self.assertRaises(ValueError):
             _repo_root({"project": "unknown"})
+
+    def test_git_identity_is_agent_specific_and_repository_local(self):
+        environment = Mock()
+        environment.run.return_value = Mock(returncode=0, stdout="", stderr="")
+
+        _configure_git_identity(environment, "OPS-001", "Noah")
+
+        self.assertEqual(environment.run.call_args_list, [
+            call(("git", "config", "--local", "user.name", "OPS-001 Noah")),
+            call(("git", "config", "--local", "user.email", "ops-001@rvsc.local")),
+        ])
+
+    def test_git_identity_configuration_failure_stops_execution(self):
+        environment = Mock()
+        environment.run.return_value = Mock(returncode=1, stdout="", stderr="configuration failed")
+
+        with self.assertRaisesRegex(EngineeringEnvironmentError, "configuration failed"):
+            _configure_git_identity(environment, "OPS-001", "Noah")
+
+        environment.run.assert_called_once_with(("git", "config", "--local", "user.name", "OPS-001 Noah"))
 
 
 if __name__ == "__main__":

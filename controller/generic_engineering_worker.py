@@ -142,6 +142,22 @@ def _prepare_branch(environment: ControlledEngineeringEnvironment, request: Work
         raise EngineeringEnvironmentError(checkout.stderr.strip() or checkout.stdout.strip() or "unable to create mission branch")
 
 
+def _configure_git_identity(
+    environment: ControlledEngineeringEnvironment,
+    agent_id: str,
+    agent_name: str,
+) -> None:
+    normalized_agent_id = agent_id.strip()
+    identity_name = f"{normalized_agent_id} {agent_name.strip()}".strip()
+    identity_email = f"{normalized_agent_id.lower()}@rvsc.local"
+    for setting, value in (("user.name", identity_name), ("user.email", identity_email)):
+        result = environment.run(("git", "config", "--local", setting, value))
+        if result.returncode != 0:
+            raise EngineeringEnvironmentError(
+                result.stderr.strip() or result.stdout.strip() or f"unable to configure repository-local Git {setting}"
+            )
+
+
 def _engineering_prompt(agent_id: str, agent_name: str, role: str, mission: dict[str, Any], source_files: dict[str, str]) -> str:
     max_core = _load_text(MAX_CORE_PATH, "Max Platinum Engineering Core")
     return (
@@ -178,6 +194,7 @@ def execute_mission(
     runner = EngineeringMissionRunner(request, _repo_root(mission), validations=_validations(mission))
     environment = runner.environment
     _prepare_branch(environment, request)
+    _configure_git_identity(environment, agent_id, agent_name)
     evidence = list(runner.preflight())
     if checkpoint:
         checkpoint("preflight_passed", tuple(evidence) + (f"run_id:{run_id}",))
