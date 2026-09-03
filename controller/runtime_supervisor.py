@@ -23,6 +23,15 @@ REPOSITORY_ENV_KEYS = (
     "RVSC_MOXIE_REPO",
 )
 
+QA_ROUTING_ENV_KEYS = (
+    "RVSC_QA_ENDPOINT",
+    "RVSC_QA_URL",
+    "RVSC_QA_WORKER_ENDPOINT",
+    "RVSC_QA_WORKER_URL",
+)
+
+DEFAULT_QA_ENDPOINT = "http://127.0.0.1:8771/execute"
+
 
 class RuntimeSupervisorError(RuntimeError):
     """Base error raised by the runtime supervisor."""
@@ -102,7 +111,7 @@ class RuntimeSupervisor:
         self,
         configs: Optional[Iterable[WorkerConfig]] = None,
         repository_mappings: Optional[Mapping[str, str]] = None,
-        qa_endpoint: str = "http://127.0.0.1:8771",
+        qa_endpoint: str = DEFAULT_QA_ENDPOINT,
         worker_module: str = "controller.generic_worker_host",
         max_restarts: int = 3,
         health_timeout: float = 1.0,
@@ -183,13 +192,11 @@ class RuntimeSupervisor:
         )
         if config.role == "engineering":
             environment.update(
-                {
-                    "RVSC_QA_ENDPOINT": self.qa_endpoint,
-                    "RVSC_QA_URL": self.qa_endpoint,
-                    "RVSC_QA_WORKER_ENDPOINT": self.qa_endpoint,
-                    "RVSC_QA_WORKER_URL": self.qa_endpoint,
-                }
+                {key: self.qa_endpoint for key in QA_ROUTING_ENV_KEYS}
             )
+        else:
+            for key in QA_ROUTING_ENV_KEYS:
+                environment.pop(key, None)
         return command, environment
 
     def start(self, worker: Any) -> WorkerStatus:
@@ -425,7 +432,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("action", nargs="?", choices=("run", "status"), default="run")
     parser.add_argument("--poll-interval", type=float, default=1.0)
     parser.add_argument("--max-restarts", type=int, default=3)
-    parser.add_argument("--qa-endpoint", default="http://127.0.0.1:8771")
+    parser.add_argument("--qa-endpoint", default=DEFAULT_QA_ENDPOINT)
     parser.add_argument("--worker-module", default="controller.generic_worker_host")
     return parser
 

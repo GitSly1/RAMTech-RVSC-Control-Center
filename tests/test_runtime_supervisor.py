@@ -1,8 +1,12 @@
+import os
 import subprocess
 import sys
 import unittest
+from unittest import mock
 
 from controller.runtime_supervisor import (
+    DEFAULT_QA_ENDPOINT,
+    QA_ROUTING_ENV_KEYS,
     RuntimeConflictError,
     RuntimeSupervisor,
     golden_team_configs,
@@ -80,13 +84,14 @@ class RuntimeSupervisorTests(unittest.TestCase):
         )
 
     def test_launch_propagates_identity_repositories_and_qa_endpoint(self):
+        qa_endpoint = "http://qa.internal:8771/execute"
         supervisor = self.harness.supervisor(
             repository_mappings={
                 "RVSC_RVSC_REPO": "/repos/rvsc",
                 "RVSC_SEMANTIQ_REPO": "/repos/semantiq",
                 "RVSC_MOXIE_REPO": "/repos/moxie",
             },
-            qa_endpoint="http://qa.internal:8771",
+            qa_endpoint=qa_endpoint,
         )
         supervisor.start("OPS-001")
         process = self.harness.processes[0]
@@ -102,10 +107,32 @@ class RuntimeSupervisorTests(unittest.TestCase):
         self.assertEqual(process.env["RVSC_RVSC_REPO"], "/repos/rvsc")
         self.assertEqual(process.env["RVSC_SEMANTIQ_REPO"], "/repos/semantiq")
         self.assertEqual(process.env["RVSC_MOXIE_REPO"], "/repos/moxie")
-        self.assertEqual(process.env["RVSC_QA_ENDPOINT"], "http://qa.internal:8771")
+        for key in QA_ROUTING_ENV_KEYS:
+            self.assertEqual(process.env.get(key), qa_endpoint, key)
 
-        _, quinn_environment = supervisor.build_launch("QA-001")
-        self.assertNotIn("RVSC_QA_ENDPOINT", quinn_environment)
+    def test_default_qa_endpoint_is_execute_endpoint(self):
+        supervisor = self.harness.supervisor()
+        _, environment = supervisor.build_launch("DEV-001")
+        self.assertEqual(DEFAULT_QA_ENDPOINT, "http://127.0.0.1:8771/execute")
+        for key in QA_ROUTING_ENV_KEYS:
+            self.assertEqual(environment.get(key), DEFAULT_QA_ENDPOINT, key)
+
+    def test_qa_launch_removes_inherited_routing_and_preserves_other_environment(self):
+        inherited = {key: "http://inherited.invalid/execute" for key in QA_ROUTING_ENV_KEYS}
+        inherited["RVSC_TEST_CREDENTIAL"] = "sensitive-test-value"
+        with mock.patch.dict(os.environ, inherited, clear=False):
+            supervisor = self.harness.supervisor(
+                repository_mappings={"RVSC_RVSC_REPO": "/repos/rvsc"}
+            )
+            _, environment = supervisor.build_launch("QA-001")
+
+        for key in QA_ROUTING_ENV_KEYS:
+            self.assertNotIn(key, environment, key)
+        self.assertIn("RVSC_TEST_CREDENTIAL", environment)
+        self.assertEqual(environment.get("RVSC_RVSC_REPO"), "/repos/rvsc")
+        self.assertEqual(environment.get("RVSC_AGENT_ROLE"), "qa")
+        self.assertEqual(environment.get("RVSC_WORKER_AGENT_ID"), "QA-001")
+        self.assertEqual(environment.get("RVSC_WORKER_PORT"), "8771")
 
     def test_matching_healthy_worker_is_not_duplicated_or_owned(self):
         self.harness.health["DEV-001"] = {
