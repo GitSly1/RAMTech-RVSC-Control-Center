@@ -45,15 +45,7 @@ class DurableRuntimeStateStoreTests(unittest.TestCase):
     def test_secrets_are_removed_or_redacted_before_persistence(self):
         with tempfile.TemporaryDirectory() as temp:
             store = DurableRuntimeStateStore(temp)
-            path = store.save("OPS-001", {
-                "recovery_context": {
-                    "wp_id": "RVSC-029B",
-                    "api_key": "sk-super-secret-value",
-                    "headers": {"Authorization": "Bearer hidden-token"},
-                    "nested": {"password": "hidden", "note": "Authorization: Bearer another-token"},
-                },
-                "checkpoint_evidence": ("failure: api_key=hidden-value",),
-            })
+            path = store.save("OPS-001", {"recovery_context": {"wp_id": "RVSC-029B", "api_key": "sk-super-secret-value", "headers": {"Authorization": "Bearer hidden-token"}, "nested": {"password": "hidden", "note": "Authorization: Bearer another-token"}}, "checkpoint_evidence": ("failure: api_key=hidden-value",)})
             raw = path.read_text(encoding="utf-8")
             restored = store.load("OPS-001")
             self.assertNotIn("sk-super-secret-value", raw)
@@ -62,6 +54,16 @@ class DurableRuntimeStateStoreTests(unittest.TestCase):
             self.assertNotIn("api_key", restored["recovery_context"])
             self.assertNotIn("headers", restored["recovery_context"])
             self.assertNotIn("password", restored["recovery_context"]["nested"])
+
+    def test_recovery_lifecycle_and_result_round_trip(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = DurableRuntimeStateStore(temp)
+            result = {"run_id": "RUN-1", "commit_sha": "a" * 40, "pushed": False}
+            store.save("OPS-001", {"recovery_required": True, "lifecycle_state": "recovering", "engineering_result": result, "qa_dispatch_started": False})
+            restored = store.load("OPS-001")
+            self.assertTrue(restored["recovery_required"])
+            self.assertEqual(restored["lifecycle_state"], "recovering")
+            self.assertEqual(restored["engineering_result"], result)
 
     def test_malformed_state_fails_closed(self):
         with tempfile.TemporaryDirectory() as temp:

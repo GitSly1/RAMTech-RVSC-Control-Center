@@ -8,13 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-
 PROTOCOL = "rvsc.runtime.state.v1"
-_SENSITIVE_KEYS = frozenset({
-    "api_key", "apikey", "access_token", "refresh_token", "token", "password",
-    "passwd", "secret", "client_secret", "private_key", "credential", "credentials",
-    "authorization", "authorization_header", "cookie", "set_cookie", "headers",
-})
+_SENSITIVE_KEYS = frozenset({"api_key", "apikey", "access_token", "refresh_token", "token", "password", "passwd", "secret", "client_secret", "private_key", "credential", "credentials", "authorization", "authorization_header", "cookie", "set_cookie", "headers"})
 _SECRET_PATTERNS = (
     re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b"),
@@ -38,7 +33,6 @@ def _sanitize_string(value: str) -> str:
 
 
 def sanitize_for_persistence(value: Any) -> Any:
-    """Return a JSON-compatible copy with credential-bearing fields removed."""
     if isinstance(value, dict):
         sanitized: dict[str, Any] = {}
         for raw_key, item in value.items():
@@ -57,8 +51,6 @@ def sanitize_for_persistence(value: Any) -> Any:
 
 
 class DurableRuntimeStateStore:
-    """Persist sanitized worker runtime state atomically outside tracked source files."""
-
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root).expanduser().resolve()
         self._lock = threading.Lock()
@@ -71,12 +63,7 @@ class DurableRuntimeStateStore:
 
     def save(self, agent_id: str, state: dict[str, Any]) -> Path:
         path = self._path(agent_id)
-        payload = {
-            "protocol": PROTOCOL,
-            "agent_id": agent_id.strip().upper(),
-            "saved_at": _utc_now(),
-            "state": sanitize_for_persistence(state),
-        }
+        payload = {"protocol": PROTOCOL, "agent_id": agent_id.strip().upper(), "saved_at": _utc_now(), "state": sanitize_for_persistence(state)}
         with self._lock:
             path.parent.mkdir(parents=True, exist_ok=True)
             temp = path.with_suffix(path.suffix + ".tmp")

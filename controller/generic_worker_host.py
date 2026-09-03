@@ -13,6 +13,7 @@ from urllib import error, request
 
 from . import daniel_multi_mission_host as daniel
 from .generic_engineering_worker import execute_mission as execute_generic_engineering
+from .generic_engineering_worker import recover_controlled_workspace, resume_persisted_engineering_result
 from .generic_qa_worker import execute_mission as execute_generic_qa
 from .runtime_state_store import DurableRuntimeStateStore, sanitize_for_persistence
 from .work_package_controller import QA_ACCEPTED, QA_REJECTED, QAHandoffError, build_qa_mission, engineering_commit_sha, validate_qa_result
@@ -21,6 +22,7 @@ RVSC_ROOT = Path(__file__).resolve().parents[1]
 AGENT_REGISTRY = RVSC_ROOT / "config" / "agents.yaml"
 _STATE_LOCK = threading.Lock()
 _EXECUTION_LOCK = threading.Lock()
+_RECOVERY_THREAD: threading.Thread | None = None
 _RUNTIME_STATE: dict[str, Any] = {
     "active_mission": None,
     "active_run_id": None,
@@ -41,6 +43,8 @@ _RUNTIME_STATE: dict[str, Any] = {
 }
 LEGACY_DANIEL_WP_IDS = frozenset({"SEM-DANIEL-002", "SEM-DANIEL-003"})
 _RECOVERY_REQUIRED_FIELDS = ("agent_id", "project", "repository", "wp_id", "run_id")
+_CLEAN_REEXECUTION_CHECKPOINTS = frozenset({"mission_acknowledged", "preflight_passed", "proposal_received"})
+_WORKSPACE_RESTORE_CHECKPOINTS = frozenset({"implementation_applied", "tests_passed"})
 
 
 @dataclass(frozen=True)
@@ -130,22 +134,14 @@ def configured_agent() -> RegisteredAgent:
 def select_registered_qa_agent(implementer_id: str, project: str) -> RegisteredAgent:
     implementer = implementer_id.strip().upper()
     normalized_project = project.strip().lower()
-    candidates = [
-        agent for agent in load_agents()
-        if agent.worker_enabled
-        and agent.qa_eligible
-        and agent.agent_id.strip().upper() != implementer
-        and normalized_project in {item.strip().lower() for item in agent.projects}
-    ]
+    candidates = [agent for agent in load_agents() if agent.worker_enabled and agent.qa_eligible and agent.agent_id.strip().upper() != implementer and normalized_project in {item.strip().lower() for item in agent.projects}]
     if not candidates:
         raise QAHandoffError("missing QA candidate")
     return sorted(candidates, key=lambda item: item.agent_id)[0]
 
 
 def is_legacy_daniel_mission(mission: dict[str, Any]) -> bool:
-    """Keep historical qualification contracts on Daniel's legacy handlers."""
-    wp_id = str(mission.get("wp_id", "")).strip().upper()
-    return wp_id in LEGACY_DANIEL_WP_IDS
+    return str(mission.get("wp_id", "")).strip().upper() in LEGACY_DANIEL_WP_IDS
 
 
 def _state_store() -> DurableRuntimeStateStore:
@@ -206,7 +202,23 @@ def _validate_recovery_context(context: Any, digest: Any = None) -> dict[str, An
 
 
 def _restore_runtime_state() -> bool:
-    restored = _state_store().load(configured_agent().agent_id)
+    try:
+        restored = _state_store().load(configured_agent().agent_id)
+    except ValueError as exc:
+        with _STATE_LOCK:
+            _RUNTIME_STATE.update({
+                "active_mission": None,
+                "active_run_id": None,
+                "recovery_required": True,
+                "lifecycle_state": "recovery_failed",
+                "last_result": "failed",
+                "last_checkpoint": "recovery_failed",
+                "checkpoint_evidence": (f"recovery_refused:{exc}",),
+                "recovery_attempted": True,
+                "terminal_recovery": {"wp_id": None, "run_id": None, "result": "recovery_failed", "completed_at": _utc_now()},
+                "last_activity": _utc_now(),
+            })
+        return True
     if restored is None:
         return False
     filtered = {key: value for key, value in restored.items() if key in _RUNTIME_STATE}
@@ -221,6 +233,10 @@ def _restore_runtime_state() -> bool:
                 raise ValueError("persisted recovery identity mismatch")
             if context["agent_id"].strip().upper() != configured_agent().agent_id.upper():
                 raise ValueError("persisted recovery agent mismatch")
+            if filtered.get("qa_dispatch_started"):
+                raise ValueError("QA dispatch result is unknown")
+            if filtered.get("recovery_attempted") or filtered.get("lifecycle_state") in {"recovering", "recovery_failed"}:
+                raise ValueError("previous recovery was interrupted or failed")
         except ValueError as exc:
             recovery_error = str(exc)
     with _STATE_LOCK:
@@ -232,10 +248,11 @@ def _restore_runtime_state() -> bool:
             if previous_checkpoint:
                 evidence.append(f"recovered_checkpoint:{previous_checkpoint}")
             evidence.append("durable_state:restored")
-            if recovery_error or filtered.get("recovery_attempted") or filtered.get("lifecycle_state") == "recovering":
+            if recovery_error:
                 _RUNTIME_STATE["lifecycle_state"] = "recovery_failed"
                 _RUNTIME_STATE["last_checkpoint"] = "recovery_failed"
-                evidence.append(f"recovery_refused:{recovery_error or 'previous recovery was interrupted'}")
+                _RUNTIME_STATE["recovery_attempted"] = True
+                evidence.append(f"recovery_refused:{recovery_error}")
             else:
                 _RUNTIME_STATE["lifecycle_state"] = "recovery_required"
                 _RUNTIME_STATE["last_checkpoint"] = "runtime_recovered"
@@ -320,16 +337,7 @@ def _qa_failure_result(engineering_result: dict[str, Any], mission: dict[str, An
     commit_sha = engineering_commit_sha(engineering_result)
     project = str(mission.get("project") or engineering_result.get("project") or "").strip()
     repository = str(mission.get("repository") or engineering_result.get("repository") or "").strip()
-    handoff: dict[str, Any] = {
-        "success": False,
-        "classification": exc.category,
-        "summary": str(exc),
-        "retryable": exc.retryable,
-        "engineering_project": project,
-        "engineering_repository": repository,
-        "engineering_branch": branch,
-        "engineering_commit_sha": commit_sha,
-    }
+    handoff: dict[str, Any] = {"success": False, "classification": exc.category, "summary": str(exc), "retryable": exc.retryable, "engineering_project": project, "engineering_repository": repository, "engineering_branch": branch, "engineering_commit_sha": commit_sha}
     if exc.http_status is not None:
         handoff["http_status"] = exc.http_status
     if exc.response is not None:
@@ -348,23 +356,7 @@ def automatic_qa_handoff(implementer: RegisteredAgent, mission: dict[str, Any], 
         return _qa_failure_result(engineering_result, mission, exc)
     except Exception as exc:
         return _qa_failure_result(engineering_result, mission, QAHandoffError(str(exc)))
-    combined = {
-        **engineering_result,
-        "success": verdict == QA_ACCEPTED,
-        "verdict": verdict,
-        "qa_evidence": list(evidence),
-        "qa_handoff": {
-            "success": verdict == QA_ACCEPTED,
-            "classification": "qa_accepted" if verdict == QA_ACCEPTED else "qa_rejected",
-            "qa_agent_id": qa_agent.agent_id,
-            "verdict": verdict,
-            "evidence": list(evidence),
-            "engineering_project": qa_mission["engineering_project"],
-            "engineering_repository": qa_mission["engineering_repository"],
-            "engineering_branch": qa_mission["engineering_branch"],
-            "engineering_commit_sha": qa_mission["engineering_commit_sha"],
-        },
-    }
+    combined = {**engineering_result, "success": verdict == QA_ACCEPTED, "verdict": verdict, "qa_evidence": list(evidence), "qa_handoff": {"success": verdict == QA_ACCEPTED, "classification": "qa_accepted" if verdict == QA_ACCEPTED else "qa_rejected", "qa_agent_id": qa_agent.agent_id, "verdict": verdict, "evidence": list(evidence), "engineering_project": qa_mission["engineering_project"], "engineering_repository": qa_mission["engineering_repository"], "engineering_branch": qa_mission["engineering_branch"], "engineering_commit_sha": qa_mission["engineering_commit_sha"]}}
     if verdict == QA_REJECTED:
         combined["summary"] = "automatic QA rejected the engineering result; progression blocked"
         _checkpoint("qa_rejected", evidence)
@@ -373,12 +365,29 @@ def automatic_qa_handoff(implementer: RegisteredAgent, mission: dict[str, Any], 
     return combined
 
 
+def _persist_engineering_result(result: dict[str, Any]) -> None:
+    if not isinstance(result, dict):
+        raise ValueError("engineering result must be an object")
+    _set_runtime_state(engineering_result=result, last_run_id=result.get("run_id"), last_checkpoint="engineering_result_persisted")
+
+
 def _run_worker(configured: RegisteredAgent, mission: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
     if configured.qa_eligible:
         return execute_generic_qa(agent_id=configured.agent_id, agent_name=configured.name, role=configured.role, qa_eligible=True, mission=mission, checkpoint=_checkpoint)
     if configured.agent_id == "DEV-001" and is_legacy_daniel_mission(mission):
         return daniel.execute_payload(payload)
-    return execute_generic_engineering(agent_id=configured.agent_id, agent_name=configured.name, role=configured.role, mission=mission, checkpoint=_checkpoint)
+    return execute_generic_engineering(agent_id=configured.agent_id, agent_name=configured.name, role=configured.role, mission=mission, checkpoint=_checkpoint, persist_result=_persist_engineering_result)
+
+
+def _validate_persisted_result_identity(result: dict[str, Any], mission: dict[str, Any]) -> None:
+    if str(result.get("run_id", "")).strip() != str(mission.get("run_id", "")).strip():
+        raise RuntimeError("persisted engineering result run identity mismatch")
+    if str(result.get("project", "")).strip() != str(mission.get("project", "")).strip():
+        raise RuntimeError("persisted engineering result project mismatch")
+    if str(result.get("repository", "")).strip() != str(mission.get("repository", "")).strip():
+        raise RuntimeError("persisted engineering result repository mismatch")
+    if str(result.get("work_branch", "")).strip() != str(mission.get("work_branch", "")).strip():
+        raise RuntimeError("persisted engineering result branch mismatch")
 
 
 def execute_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -424,11 +433,23 @@ def execute_payload(payload: dict[str, Any]) -> dict[str, Any]:
             _set_runtime_state(active_mission=wp_id, active_run_id=run_id or None, last_result="acknowledged", last_checkpoint="mission_acknowledged", checkpoint_evidence=(), recovery_required=False, recovered_checkpoint=None, lifecycle_state="executing", recovery_context=context, recovery_digest=digest, recovery_attempted=False, engineering_result=None, qa_dispatch_started=False, terminal_recovery=None)
 
         engineering_result = state.get("engineering_result") if recovery else None
-        if recovery and engineering_result is None and state.get("last_checkpoint") != "mission_acknowledged":
-            raise RuntimeError("interrupted operation has no proven idempotent recovery boundary")
+        if recovery and engineering_result is not None:
+            if not isinstance(engineering_result, dict):
+                raise RuntimeError("persisted engineering result is malformed")
+            _validate_persisted_result_identity(engineering_result, mission)
+            if not engineering_result.get("pushed"):
+                engineering_result = resume_persisted_engineering_result(mission, engineering_result, checkpoint=_checkpoint)
+                _persist_engineering_result(engineering_result)
         if engineering_result is None:
+            if recovery:
+                boundary = state.get("recovered_checkpoint") or state.get("last_checkpoint")
+                if boundary in _WORKSPACE_RESTORE_CHECKPOINTS:
+                    recovery_evidence = recover_controlled_workspace(mission)
+                    _checkpoint("recovery_workspace_restored", recovery_evidence + (f"run_id:{run_id}",))
+                elif boundary not in _CLEAN_REEXECUTION_CHECKPOINTS:
+                    raise RuntimeError("interrupted operation has no proven idempotent recovery boundary")
             engineering_result = _run_worker(configured, mission, payload)
-            _set_runtime_state(engineering_result=engineering_result, last_run_id=engineering_result.get("run_id") or run_id or state.get("last_run_id"), last_checkpoint="engineering_result_persisted")
+            _persist_engineering_result(engineering_result)
         if not configured.qa_eligible and engineering_result.get("success"):
             if recovery and state.get("qa_dispatch_started"):
                 raise RuntimeError("QA handoff was already dispatched; refusing duplicate QA")
@@ -459,6 +480,44 @@ def execute_payload(payload: dict[str, Any]) -> dict[str, Any]:
         raise
     finally:
         _EXECUTION_LOCK.release()
+
+
+def _automatic_recovery_payload() -> dict[str, Any] | None:
+    with _STATE_LOCK:
+        state = dict(_RUNTIME_STATE)
+    if not state.get("recovery_required") or state.get("lifecycle_state") != "recovery_required" or state.get("recovery_attempted"):
+        return None
+    context = _validate_recovery_context(state.get("recovery_context"), state.get("recovery_digest"))
+    if context["wp_id"] != state.get("active_mission") or context["run_id"] != state.get("active_run_id"):
+        raise ValueError("persisted recovery identity mismatch")
+    if context["agent_id"].strip().upper() != configured_agent().agent_id.upper():
+        raise ValueError("persisted recovery agent mismatch")
+    return {"protocol": "rvsc.worker.v1", "recovery": True, "mission": context}
+
+
+def _automatic_recovery_runner() -> None:
+    try:
+        payload = _automatic_recovery_payload()
+        if payload is not None:
+            execute_payload(payload)
+    except Exception:
+        return
+
+
+def _start_automatic_recovery() -> threading.Thread | None:
+    global _RECOVERY_THREAD
+    try:
+        payload = _automatic_recovery_payload()
+    except Exception as exc:
+        terminal = {"wp_id": _RUNTIME_STATE.get("active_mission"), "run_id": _RUNTIME_STATE.get("active_run_id"), "result": "recovery_failed", "completed_at": _utc_now()}
+        _set_runtime_state(last_result="failed", lifecycle_state="recovery_failed", recovery_required=True, recovery_attempted=True, last_checkpoint="recovery_failed", checkpoint_evidence=(f"failure:{exc}",), terminal_recovery=terminal)
+        return None
+    if payload is None:
+        return None
+    thread = threading.Thread(target=_automatic_recovery_runner, name=f"rvsc-recovery-{configured_agent().agent_id}", daemon=True)
+    _RECOVERY_THREAD = thread
+    thread.start()
+    return thread
 
 
 class GenericWorkerHandler(BaseHTTPRequestHandler):
@@ -503,11 +562,13 @@ def main() -> None:
         _checkpoint("worker_started")
     elif not recovery_required:
         _checkpoint("worker_restarted", ("durable_state:restored",))
+    server = ThreadingHTTPServer((host, port), GenericWorkerHandler)
     print(f"{agent.agent_id} {agent.name} generic worker host listening on http://{host}:{port}/execute")
     print(f"{agent.agent_id} {agent.name} health available on http://{host}:{port}/health")
     if recovery_required:
-        print(f"{agent.agent_id} durable recovery required for interrupted mission {active_mission}")
-    ThreadingHTTPServer((host, port), GenericWorkerHandler).serve_forever()
+        print(f"{agent.agent_id} automatically recovering interrupted mission {active_mission}")
+        _start_automatic_recovery()
+    server.serve_forever()
 
 
 if __name__ == "__main__":
