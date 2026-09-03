@@ -6,7 +6,7 @@ import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Iterable, Mapping, Sequence
 
 
 class EngineeringEnvironmentError(RuntimeError):
@@ -124,7 +124,13 @@ class ControlledEngineeringEnvironment:
                     hits.append(relative)
         return tuple(sorted(set(hits)))
 
-    def run(self, argv: Sequence[str], *, timeout_seconds: int | None = None) -> CommandResult:
+    def run(
+        self,
+        argv: Sequence[str],
+        *,
+        timeout_seconds: int | None = None,
+        environment_overrides: Mapping[str, str] | None = None,
+    ) -> CommandResult:
         if not argv:
             raise EngineeringEnvironmentError("command is empty")
         executable = Path(argv[0]).name.lower()
@@ -133,6 +139,8 @@ class ControlledEngineeringEnvironment:
         process_env = os.environ.copy()
         if executable in {"python", "python.exe", "py", "py.exe"}:
             process_env["PYTHONDONTWRITEBYTECODE"] = "1"
+        if environment_overrides:
+            process_env.update(environment_overrides)
         completed = subprocess.run(list(argv), cwd=self.repo_root, env=process_env, text=True, capture_output=True, timeout=timeout_seconds or self.timeout_seconds, shell=False, check=False)
         return CommandResult(tuple(argv), completed.returncode, completed.stdout, completed.stderr)
 
@@ -188,7 +196,19 @@ class ControlledEngineeringEnvironment:
             safe_paths.append(item.replace("\\", "/"))
         return self.run(("git", "add", "--", *safe_paths))
 
-    def commit(self, message: str, *, author_name: str = "DEV-001 Daniel", author_email: str = "dev-001@rvsc.local") -> CommandResult:
+    def commit(self, message: str, *, author_name: str, author_email: str) -> CommandResult:
         if not message.strip():
             raise EngineeringEnvironmentError("commit message is empty")
-        return self.run(("git", "-c", f"user.name={author_name}", "-c", f"user.email={author_email}", "commit", "-m", message))
+        normalized_name = author_name.strip()
+        normalized_email = author_email.strip()
+        if not normalized_name or not normalized_email:
+            raise EngineeringEnvironmentError("commit author name and email are required")
+        if any(character in normalized_name or character in normalized_email for character in ("\r", "\n")):
+            raise EngineeringEnvironmentError("commit identity must not contain line breaks")
+        identity_environment = {
+            "GIT_AUTHOR_NAME": normalized_name,
+            "GIT_AUTHOR_EMAIL": normalized_email,
+            "GIT_COMMITTER_NAME": normalized_name,
+            "GIT_COMMITTER_EMAIL": normalized_email,
+        }
+        return self.run(("git", "commit", "-m", message), environment_overrides=identity_environment)

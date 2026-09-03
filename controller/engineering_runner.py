@@ -68,11 +68,18 @@ class EngineeringMissionRunner:
         evidence.append(f"diff_present:{str(bool(diff.stdout.strip())).lower()}")
         return tuple(evidence)
 
-    def commit(self, changed_paths: Sequence[str], message: str) -> tuple[str, ...]:
+    def commit(
+        self,
+        changed_paths: Sequence[str],
+        message: str,
+        *,
+        author_name: str,
+        author_email: str,
+    ) -> tuple[str, ...]:
         staged = self.environment.stage(changed_paths)
         if staged.returncode != 0:
             raise EngineeringEnvironmentError(staged.stderr.strip() or "git staging failed")
-        committed = self.environment.commit(message)
+        committed = self.environment.commit(message, author_name=author_name, author_email=author_email)
         if committed.returncode != 0:
             raise EngineeringEnvironmentError(committed.stderr.strip() or committed.stdout.strip() or "git commit failed")
         head = self.environment.run(("git", "rev-parse", "HEAD"))

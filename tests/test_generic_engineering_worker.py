@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import Mock, call, patch
 
 from controller.engineering_environment import EngineeringEnvironmentError
-from controller.generic_engineering_worker import _configure_git_identity, _repo_root, _validations, _worker_request
+from controller.generic_engineering_worker import _configure_git_identity, _git_identity, _repo_root, _validations, _worker_request
 
 
 class GenericEngineeringWorkerTests(unittest.TestCase):
@@ -48,6 +48,20 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
     def test_repo_root_rejects_unknown_project(self):
         with self.assertRaises(ValueError):
             _repo_root({"project": "unknown"})
+
+    def test_git_identity_is_derived_from_executing_agent(self):
+        self.assertEqual(
+            _git_identity("OPS-001", "Noah"),
+            ("OPS-001 Noah", "ops-001@rvsc.local"),
+        )
+        self.assertEqual(
+            _git_identity("DEV-001", "Daniel"),
+            ("DEV-001 Daniel", "dev-001@rvsc.local"),
+        )
+
+    def test_git_identity_requires_agent_id(self):
+        with self.assertRaisesRegex(ValueError, "agent_id is required"):
+            _git_identity(" ", "Noah")
 
     def test_git_identity_is_agent_specific_and_repository_local(self):
         environment = Mock()

@@ -56,10 +56,26 @@ class EngineeringMissionRunnerTests(unittest.TestCase):
         evidence = runner.evidence_after_change(("docs/result.md",))
         self.assertIn("file:docs/result.md", evidence)
         self.assertIn("diff_present:true", evidence)
-        commit_evidence = runner.commit(("docs/result.md",), "TEST-001: bounded change")
+        commit_evidence = runner.commit(
+            ("docs/result.md",),
+            "TEST-001: bounded change",
+            author_name="DEV-001 Daniel",
+            author_email="dev-001@rvsc.local",
+        )
         self.assertTrue(commit_evidence[0].startswith("commit:"))
         status = runner.environment.git_status()
         self.assertEqual(status.stdout.strip(), "")
+        identity = runner.environment.run(("git", "show", "-s", "--format=%an|%ae|%cn|%ce", "HEAD"))
+        self.assertEqual(
+            identity.stdout.strip(),
+            "DEV-001 Daniel|dev-001@rvsc.local|DEV-001 Daniel|dev-001@rvsc.local",
+        )
+
+    def test_commit_fails_closed_without_explicit_agent_identity(self) -> None:
+        runner = EngineeringMissionRunner(self.request, self.repo, validations=())
+        runner.environment.write_text("docs/result.md", "qualified\n")
+        with self.assertRaises(TypeError):
+            runner.commit(("docs/result.md",), "TEST-001: missing identity")
 
     def test_branch_mismatch_fails_closed(self) -> None:
         wrong = WorkerRequest(

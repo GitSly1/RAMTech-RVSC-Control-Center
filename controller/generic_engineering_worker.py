@@ -142,14 +142,21 @@ def _prepare_branch(environment: ControlledEngineeringEnvironment, request: Work
         raise EngineeringEnvironmentError(checkout.stderr.strip() or checkout.stdout.strip() or "unable to create mission branch")
 
 
+def _git_identity(agent_id: str, agent_name: str) -> tuple[str, str]:
+    normalized_agent_id = agent_id.strip()
+    if not normalized_agent_id:
+        raise ValueError("agent_id is required for Git identity")
+    identity_name = f"{normalized_agent_id} {agent_name.strip()}".strip()
+    identity_email = f"{normalized_agent_id.lower()}@rvsc.local"
+    return identity_name, identity_email
+
+
 def _configure_git_identity(
     environment: ControlledEngineeringEnvironment,
     agent_id: str,
     agent_name: str,
 ) -> None:
-    normalized_agent_id = agent_id.strip()
-    identity_name = f"{normalized_agent_id} {agent_name.strip()}".strip()
-    identity_email = f"{normalized_agent_id.lower()}@rvsc.local"
+    identity_name, identity_email = _git_identity(agent_id, agent_name)
     for setting, value in (("user.name", identity_name), ("user.email", identity_email)):
         result = environment.run(("git", "config", "--local", setting, value))
         if result.returncode != 0:
@@ -194,7 +201,7 @@ def execute_mission(
     runner = EngineeringMissionRunner(request, _repo_root(mission), validations=_validations(mission))
     environment = runner.environment
     _prepare_branch(environment, request)
-    _configure_git_identity(environment, agent_id, agent_name)
+    author_name, author_email = _git_identity(agent_id, agent_name)
     evidence = list(runner.preflight())
     if checkpoint:
         checkpoint("preflight_passed", tuple(evidence) + (f"run_id:{run_id}",))
@@ -230,7 +237,12 @@ def execute_mission(
         checkpoint("tests_passed", validations + (f"run_id:{run_id}",))
 
     commit_message = str(proposal.get("commit_message", "")).strip() or f"{request.wp_id}: {agent_id} controlled engineering"
-    committed = runner.commit(request.allowed_paths, commit_message)
+    committed = runner.commit(
+        request.allowed_paths,
+        commit_message,
+        author_name=author_name,
+        author_email=author_email,
+    )
     evidence.extend(committed)
     if checkpoint:
         checkpoint("commit_created", committed + (f"run_id:{run_id}",))

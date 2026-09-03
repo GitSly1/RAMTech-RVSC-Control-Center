@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from controller.engineering_environment import ControlledEngineeringEnvironment, EngineeringEnvironmentError
 
@@ -86,6 +88,36 @@ class EngineeringEnvironmentTests(unittest.TestCase):
         (self.repo / "src" / "forbidden.py").write_text("x = 1\n", encoding="utf-8")
         with self.assertRaises(EngineeringEnvironmentError):
             env.stage(("src/forbidden.py",))
+
+    def test_commit_requires_explicit_identity_and_overrides_inherited_git_identity(self) -> None:
+        env = ControlledEngineeringEnvironment(self.repo, allowed_paths=("docs/**",), allowed_executables=("git",))
+        env.write_text("docs/result.md", "attributed\n")
+        staged = env.stage(("docs/result.md",))
+        self.assertEqual(staged.returncode, 0)
+
+        with self.assertRaises(TypeError):
+            env.commit("missing identity")
+
+        inherited = {
+            "GIT_AUTHOR_NAME": "DEV-001 Daniel",
+            "GIT_AUTHOR_EMAIL": "dev-001@rvsc.local",
+            "GIT_COMMITTER_NAME": "DEV-001 Daniel",
+            "GIT_COMMITTER_EMAIL": "dev-001@rvsc.local",
+        }
+        with patch.dict(os.environ, inherited, clear=False):
+            committed = env.commit(
+                "OPS-001 attributable commit",
+                author_name="OPS-001 Noah",
+                author_email="ops-001@rvsc.local",
+            )
+        self.assertEqual(committed.returncode, 0, committed.stderr)
+
+        identity = env.run(("git", "show", "-s", "--format=%an|%ae|%cn|%ce", "HEAD"))
+        self.assertEqual(identity.returncode, 0)
+        self.assertEqual(
+            identity.stdout.strip(),
+            "OPS-001 Noah|ops-001@rvsc.local|OPS-001 Noah|ops-001@rvsc.local",
+        )
 
 
 if __name__ == "__main__":
