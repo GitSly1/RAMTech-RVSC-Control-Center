@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib import error, request
+from urllib import error, parse, request
 
 from . import daniel_multi_mission_host as daniel
 from .generic_engineering_worker import execute_mission as execute_generic_engineering
@@ -45,6 +45,7 @@ LEGACY_DANIEL_WP_IDS = frozenset({"SEM-DANIEL-002", "SEM-DANIEL-003"})
 _RECOVERY_REQUIRED_FIELDS = ("agent_id", "project", "repository", "wp_id", "run_id")
 _CLEAN_REEXECUTION_CHECKPOINTS = frozenset({"mission_acknowledged", "preflight_passed", "proposal_received"})
 _WORKSPACE_RESTORE_CHECKPOINTS = frozenset({"implementation_applied", "tests_passed"})
+_MAX_HEALTH_RESPONSE_BYTES = 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -131,13 +132,93 @@ def configured_agent() -> RegisteredAgent:
     return agent
 
 
-def select_registered_qa_agent(implementer_id: str, project: str) -> RegisteredAgent:
-    implementer = implementer_id.strip().upper()
+def configured_qa_worker_endpoint() -> str:
+    endpoint = os.environ.get("RVSC_QA_WORKER_URL", "http://127.0.0.1:8771/execute").strip()
+    if not endpoint:
+        raise QAHandoffError("QA dispatch endpoint is not configured", category="transport_failure")
+    return endpoint
+
+
+def qa_health_endpoint(execution_endpoint: str) -> str:
+    try:
+        parsed = parse.urlsplit(execution_endpoint)
+        port = parsed.port
+    except (TypeError, ValueError) as exc:
+        raise QAHandoffError("QA dispatch endpoint is invalid", category="qa_endpoint_invalid") from exc
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname or port is None and not parsed.netloc:
+        raise QAHandoffError("QA dispatch endpoint is invalid", category="qa_endpoint_invalid")
+    if parsed.username is not None or parsed.password is not None or parsed.fragment:
+        raise QAHandoffError("QA dispatch endpoint is invalid", category="qa_endpoint_invalid")
+    execution_path = parsed.path.rstrip("/")
+    prefix, separator, final_segment = execution_path.rpartition("/")
+    if not separator or final_segment != "execute":
+        raise QAHandoffError("QA dispatch endpoint does not identify an execution resource", category="qa_endpoint_invalid")
+    health_path = f"{prefix}/health" if prefix else "/health"
+    return parse.urlunsplit((parsed.scheme, parsed.netloc, health_path, parsed.query, ""))
+
+
+def _qa_health_timeout() -> float:
+    try:
+        timeout = float(os.environ.get("RVSC_QA_HEALTH_TIMEOUT_SECONDS", "10"))
+    except ValueError as exc:
+        raise QAHandoffError("QA health timeout is invalid", category="qa_endpoint_invalid") from exc
+    if timeout <= 0:
+        raise QAHandoffError("QA health timeout is invalid", category="qa_endpoint_invalid")
+    return timeout
+
+
+def _fetch_qa_health(execution_endpoint: str) -> dict[str, Any]:
+    outbound = request.Request(qa_health_endpoint(execution_endpoint), method="GET")
+    try:
+        with request.urlopen(outbound, timeout=_qa_health_timeout()) as response:
+            status = response.getcode()
+            raw = response.read(_MAX_HEALTH_RESPONSE_BYTES + 1)
+    except error.HTTPError as exc:
+        raise QAHandoffError("QA health endpoint returned an HTTP error", category="transport_failure", http_status=exc.code, retryable=True) from exc
+    except QAHandoffError:
+        raise
+    except (error.URLError, TimeoutError, OSError) as exc:
+        raise QAHandoffError("QA health endpoint is unreachable", category="transport_failure", retryable=True) from exc
+    if not isinstance(status, int) or not 200 <= status < 300:
+        raise QAHandoffError("QA health endpoint did not return success", category="transport_failure", http_status=status if isinstance(status, int) else None, retryable=True)
+    if len(raw) > _MAX_HEALTH_RESPONSE_BYTES:
+        raise QAHandoffError("QA health response is malformed", category="qa_endpoint_invalid")
+    try:
+        decoded = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
+        raise QAHandoffError("QA health response is malformed", category="qa_endpoint_invalid") from exc
+    if not isinstance(decoded, dict):
+        raise QAHandoffError("QA health response is malformed", category="qa_endpoint_invalid")
+    return decoded
+
+
+def select_registered_qa_agent(implementer_id: str, project: str, execution_endpoint: str | None = None) -> RegisteredAgent:
+    health = _fetch_qa_health(execution_endpoint or configured_qa_worker_endpoint())
+    if health.get("protocol") != "rvsc.worker.health.v1" or health.get("service") != "rvsc-generic-worker":
+        raise QAHandoffError("QA health response uses an unsupported protocol", category="qa_endpoint_invalid")
+    live_id = health.get("worker")
+    if not isinstance(live_id, str) or not live_id.strip():
+        raise QAHandoffError("QA health response has no worker identity", category="qa_endpoint_invalid")
+    if health.get("ready") is not True:
+        raise QAHandoffError("QA endpoint worker is unavailable", category="transport_failure", retryable=True)
+    if health.get("worker_enabled") is not True or health.get("qa_eligible") is not True:
+        raise QAHandoffError("QA endpoint worker is not worker-enabled and QA-eligible", category="qa_endpoint_invalid")
+
+    normalized_live_id = live_id.strip().upper()
+    matches = [agent for agent in load_agents() if agent.agent_id.strip().upper() == normalized_live_id]
+    if len(matches) != 1:
+        raise QAHandoffError("QA endpoint worker identity is not uniquely registered", category="qa_endpoint_invalid")
+    agent = matches[0]
+    if agent.agent_id.strip().upper() == implementer_id.strip().upper():
+        raise QAHandoffError("QA endpoint worker is not independent from the implementer", category="qa_endpoint_invalid")
+    if not agent.worker_enabled:
+        raise QAHandoffError("QA endpoint worker is not worker-enabled", category="qa_endpoint_invalid")
+    if not agent.qa_eligible:
+        raise QAHandoffError("QA endpoint worker is not QA-eligible", category="qa_endpoint_invalid")
     normalized_project = project.strip().lower()
-    candidates = [agent for agent in load_agents() if agent.worker_enabled and agent.qa_eligible and agent.agent_id.strip().upper() != implementer and normalized_project in {item.strip().lower() for item in agent.projects}]
-    if not candidates:
-        raise QAHandoffError("missing QA candidate")
-    return sorted(candidates, key=lambda item: item.agent_id)[0]
+    if not normalized_project or normalized_project not in {item.strip().lower() for item in agent.projects}:
+        raise QAHandoffError("QA endpoint worker is not authorized for the engineering project", category="qa_endpoint_invalid")
+    return agent
 
 
 def is_legacy_daniel_mission(mission: dict[str, Any]) -> bool:
@@ -311,11 +392,9 @@ def _decode_qa_response(raw: bytes, *, http_status: int | None = None) -> dict[s
     return decoded
 
 
-def dispatch_qa_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    endpoint = os.environ.get("RVSC_QA_WORKER_URL", "http://127.0.0.1:8771/execute").strip()
-    if not endpoint:
-        raise QAHandoffError("QA dispatch endpoint is not configured", category="transport_failure")
-    outbound = request.Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
+def dispatch_qa_payload(payload: dict[str, Any], *, endpoint: str | None = None) -> dict[str, Any]:
+    selected_endpoint = endpoint or configured_qa_worker_endpoint()
+    outbound = request.Request(selected_endpoint, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
     timeout = float(os.environ.get("RVSC_QA_DISPATCH_TIMEOUT_SECONDS", "300"))
     try:
         with request.urlopen(outbound, timeout=timeout) as response:
@@ -347,10 +426,11 @@ def _qa_failure_result(engineering_result: dict[str, Any], mission: dict[str, An
 
 def automatic_qa_handoff(implementer: RegisteredAgent, mission: dict[str, Any], engineering_result: dict[str, Any]) -> dict[str, Any]:
     try:
-        qa_agent = select_registered_qa_agent(implementer.agent_id, str(mission.get("project", "")))
+        endpoint = configured_qa_worker_endpoint()
+        qa_agent = select_registered_qa_agent(implementer.agent_id, str(mission.get("project", "")), endpoint)
         qa_mission = build_qa_mission(engineering_mission=mission, engineering_result=engineering_result, qa_agent_id=qa_agent.agent_id)
         _checkpoint("qa_handoff_dispatching", (f"qa_agent:{qa_agent.agent_id}", f"engineering_commit:{qa_mission['engineering_commit_sha']}", f"engineering_branch:{qa_mission['engineering_branch']}"))
-        qa_result = dispatch_qa_payload({"protocol": "rvsc.worker.v1", "mission": qa_mission})
+        qa_result = dispatch_qa_payload({"protocol": "rvsc.worker.v1", "mission": qa_mission}, endpoint=endpoint)
         verdict, evidence = validate_qa_result(qa_result)
     except QAHandoffError as exc:
         return _qa_failure_result(engineering_result, mission, exc)
