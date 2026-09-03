@@ -28,6 +28,10 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _validations({})
 
+    def test_validations_reject_empty_argv(self):
+        with self.assertRaises(ValueError):
+            _validations({"validation_commands": [{"name": "empty", "argv": []}]})
+
     def test_validations_allow_python_and_git(self):
         checks = _validations({"validation_commands": [
             {"name": "unit", "argv": ["python", "-m", "unittest", "discover"]},
