@@ -167,6 +167,17 @@ class GenericWorkerHostTests(unittest.TestCase):
         self.assertFalse(result["success"])
         self.assertIn("missing QA candidate", result["summary"])
 
+    def test_automatic_handoff_fails_closed_rather_than_self_reviewing(self):
+        noah = RegisteredAgent("OPS-001", "Noah", "DevOps", ("rvsc",), True, True)
+        mission = {"agent_id": "OPS-001", "project": "rvsc", "work_branch": "rvsc/test"}
+        engineering = {"success": True, "commit_sha": "0123456789abcdef", "pushed": True}
+        with patch("controller.generic_worker_host.load_agents", return_value=(noah,)), \
+             patch("controller.generic_worker_host.dispatch_qa_payload") as dispatch:
+            result = automatic_qa_handoff(noah, mission, engineering)
+        self.assertFalse(result["success"])
+        self.assertIn("missing QA candidate", result["summary"])
+        dispatch.assert_not_called()
+
     def test_automatic_handoff_fails_closed_on_dispatch_failure(self):
         noah = RegisteredAgent("OPS-001", "Noah", "DevOps", ("rvsc",), True, False)
         quinn = RegisteredAgent("QA-001", "Quinn", "QA", ("rvsc",), True, True)
