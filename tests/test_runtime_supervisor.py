@@ -1,4 +1,5 @@
 import subprocess
+import sys
 import unittest
 
 from controller.runtime_supervisor import (
@@ -89,8 +90,14 @@ class RuntimeSupervisorTests(unittest.TestCase):
         )
         supervisor.start("OPS-001")
         process = self.harness.processes[0]
-        self.assertIn("OPS-001", process.command)
-        self.assertIn("8770", process.command)
+        self.assertEqual(
+            process.command,
+            [sys.executable, "-m", "controller.generic_worker_host"],
+        )
+        self.assertNotIn("--agent-id", process.command)
+        self.assertNotIn("--port", process.command)
+        self.assertEqual(process.env["RVSC_WORKER_AGENT_ID"], "OPS-001")
+        self.assertEqual(process.env["RVSC_WORKER_PORT"], "8770")
         self.assertEqual(process.env["RVSC_AGENT_ID"], "OPS-001")
         self.assertEqual(process.env["RVSC_RVSC_REPO"], "/repos/rvsc")
         self.assertEqual(process.env["RVSC_SEMANTIQ_REPO"], "/repos/semantiq")

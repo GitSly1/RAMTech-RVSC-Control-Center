@@ -103,7 +103,7 @@ class RuntimeSupervisor:
         configs: Optional[Iterable[WorkerConfig]] = None,
         repository_mappings: Optional[Mapping[str, str]] = None,
         qa_endpoint: str = "http://127.0.0.1:8771",
-        worker_module: str = "controller.worker_host",
+        worker_module: str = "controller.generic_worker_host",
         max_restarts: int = 3,
         health_timeout: float = 1.0,
         process_factory: Optional[Callable[..., Any]] = None,
@@ -167,15 +167,7 @@ class RuntimeSupervisor:
         if config.command:
             command = list(config.command)
         else:
-            command = [
-                sys.executable,
-                "-m",
-                self.worker_module,
-                "--agent-id",
-                config.agent_id,
-                "--port",
-                str(config.port),
-            ]
+            command = [sys.executable, "-m", self.worker_module]
 
         environment = os.environ.copy()
         environment.update(self.repository_mappings)
@@ -434,7 +426,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--poll-interval", type=float, default=1.0)
     parser.add_argument("--max-restarts", type=int, default=3)
     parser.add_argument("--qa-endpoint", default="http://127.0.0.1:8771")
-    parser.add_argument("--worker-module", default="controller.worker_host")
+    parser.add_argument("--worker-module", default="controller.generic_worker_host")
     return parser
 
 
