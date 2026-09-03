@@ -59,6 +59,12 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
             ("DEV-001 Daniel", "dev-001@rvsc.local"),
         )
 
+    def test_noah_git_identity_does_not_reuse_daniel_attribution(self):
+        self.assertNotEqual(
+            _git_identity("OPS-001", "Noah"),
+            _git_identity("DEV-001", "Daniel"),
+        )
+
     def test_git_identity_requires_agent_id(self):
         with self.assertRaisesRegex(ValueError, "agent_id is required"):
             _git_identity(" ", "Noah")
