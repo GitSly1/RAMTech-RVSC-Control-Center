@@ -21,7 +21,8 @@ class WorkerRuntimeTests(unittest.TestCase):
 
     def test_rejects_unmatched_capability(self):
         wp = WorkPackage("SEM-102", "semantiq", frozenset({"database"}), "rvsc/SEM-102", ("db/**",), 0)
-        with self.assertRaises(WorkerRuntimeError): select_agent(AGENTS, wp)
+        with self.assertRaises(WorkerRuntimeError):
+            select_agent(AGENTS, wp)
 
     def test_execution_moves_to_evidence(self):
         execution = start_execution(WorkerExecution("SEM-101", "DEV-001", WorkerState.ASSIGNED))
@@ -85,9 +86,18 @@ class WorkerRuntimeTests(unittest.TestCase):
     def test_qa_is_independent_from_implementer(self):
         self.assertEqual(select_qa_agent(AGENTS, "DEV-001", "semantiq").agent_id, "QA-001")
 
+    def test_qa_selection_is_case_insensitive(self):
+        self.assertEqual(select_qa_agent(AGENTS, "dev-001", "SEMANTIQ").agent_id, "QA-001")
+
+    def test_implementer_cannot_select_itself_as_only_qa(self):
+        agents = (Agent("QA-001", "Quinn", frozenset({"qa"}), frozenset({"rvsc"}), qa_eligible=True),)
+        with self.assertRaisesRegex(WorkerRuntimeError, "independent QA"):
+            select_qa_agent(agents, "qa-001", "rvsc")
+
     def test_dispatch_queue_honors_project_priority(self):
         queue = dispatch_queue({"mox": WorkPackage("MOX-002", "moxie", frozenset(), "rvsc/MOX-002", ("docs/**",), 1), "sem": WorkPackage("SEM-003", "semantiq", frozenset(), "rvsc/SEM-003", ("**",), 0)})
         self.assertEqual(tuple(item.wp_id for item in queue), ("SEM-003", "MOX-002"))
 
 
-if __name__ == "__main__": unittest.main()
+if __name__ == "__main__":
+    unittest.main()

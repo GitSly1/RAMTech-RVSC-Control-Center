@@ -202,7 +202,15 @@ def watchdog_decision(execution: WorkerExecution, health: WorkerHealth, *, now: 
 
 
 def select_qa_agent(agents: Iterable[Agent], implementer_id: str, project: str) -> Agent:
-    candidates = [agent for agent in agents if agent.worker_enabled and agent.qa_eligible and agent.agent_id != implementer_id and project in agent.projects]
+    normalized_implementer = implementer_id.strip().upper()
+    normalized_project = project.strip().lower()
+    candidates = [
+        agent for agent in agents
+        if agent.worker_enabled
+        and agent.qa_eligible
+        and agent.agent_id.strip().upper() != normalized_implementer
+        and normalized_project in {item.strip().lower() for item in agent.projects}
+    ]
     if not candidates:
         raise WorkerRuntimeError("no independent QA agent available")
     return sorted(candidates, key=lambda item: item.agent_id)[0]

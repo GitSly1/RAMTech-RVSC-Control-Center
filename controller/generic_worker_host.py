@@ -8,11 +8,13 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib import request
 
 from . import daniel_multi_mission_host as daniel
 from .generic_engineering_worker import execute_mission as execute_generic_engineering
 from .generic_qa_worker import execute_mission as execute_generic_qa
 from .runtime_state_store import DurableRuntimeStateStore
+from .work_package_controller import QA_ACCEPTED, QA_REJECTED, QAHandoffError, build_qa_mission, validate_qa_result
 
 RVSC_ROOT = Path(__file__).resolve().parents[1]
 AGENT_REGISTRY = RVSC_ROOT / "config" / "agents.yaml"
@@ -23,6 +25,7 @@ _RUNTIME_STATE: dict[str, Any] = {
     "recovery_required": False, "recovered_checkpoint": None,
 }
 
+
 @dataclass(frozen=True)
 class RegisteredAgent:
     agent_id: str
@@ -32,14 +35,18 @@ class RegisteredAgent:
     worker_enabled: bool
     qa_eligible: bool
 
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
 
 def _scalar(value: str) -> str:
     return value.strip().strip('"').strip("'")
 
+
 def _bool(value: str) -> bool:
     return _scalar(value).lower() == "true"
+
 
 def _list(value: str) -> tuple[str, ...]:
     text = value.strip()
@@ -47,6 +54,7 @@ def _list(value: str) -> tuple[str, ...]:
         return ()
     body = text[1:-1].strip()
     return tuple(_scalar(item) for item in body.split(",")) if body else ()
+
 
 def load_agents(path: Path = AGENT_REGISTRY) -> tuple[RegisteredAgent, ...]:
     text = path.read_text(encoding="utf-8")
@@ -81,6 +89,7 @@ def load_agents(path: Path = AGENT_REGISTRY) -> tuple[RegisteredAgent, ...]:
         agents.append(RegisteredAgent(current["id"], current.get("name", ""), current.get("role", ""), tuple(current.get("projects", ())), bool(current.get("worker_enabled", False)), bool(current.get("qa_eligible", False))))
     return tuple(agents)
 
+
 def get_agent(agent_id: str) -> RegisteredAgent:
     normalized = agent_id.strip().upper()
     for agent in load_agents():
@@ -88,19 +97,38 @@ def get_agent(agent_id: str) -> RegisteredAgent:
             return agent
     raise ValueError(f"unregistered RVSC agent: {agent_id}")
 
+
 def validate_worker(agent: RegisteredAgent, project: str | None = None) -> None:
     if not agent.worker_enabled:
         raise ValueError(f"{agent.agent_id} is not worker-enabled")
     if project and project.strip().lower() not in {item.lower() for item in agent.projects}:
         raise ValueError(f"{agent.agent_id} is not authorized for project {project}")
 
+
 def configured_agent() -> RegisteredAgent:
     agent = get_agent(os.environ.get("RVSC_WORKER_AGENT_ID", "DEV-001"))
     validate_worker(agent)
     return agent
 
+
+def select_registered_qa_agent(implementer_id: str, project: str) -> RegisteredAgent:
+    normalized_implementer = implementer_id.strip().upper()
+    normalized_project = project.strip().lower()
+    candidates = [
+        agent for agent in load_agents()
+        if agent.worker_enabled
+        and agent.qa_eligible
+        and agent.agent_id.strip().upper() != normalized_implementer
+        and normalized_project in {item.strip().lower() for item in agent.projects}
+    ]
+    if not candidates:
+        raise QAHandoffError("missing QA candidate")
+    return sorted(candidates, key=lambda item: item.agent_id)[0]
+
+
 def _state_store() -> DurableRuntimeStateStore:
     return DurableRuntimeStateStore(Path(os.environ.get("RVSC_RUNTIME_STATE_DIR", str(RVSC_ROOT / ".rvsc" / "runtime"))))
+
 
 def _snapshot_state() -> dict[str, Any]:
     with _STATE_LOCK:
@@ -108,8 +136,10 @@ def _snapshot_state() -> dict[str, Any]:
     state["checkpoint_evidence"] = list(state.get("checkpoint_evidence", ()))
     return state
 
+
 def _persist_runtime_state() -> None:
     _state_store().save(configured_agent().agent_id, _snapshot_state())
+
 
 def _set_runtime_state(*, persist: bool = True, **updates: Any) -> None:
     with _STATE_LOCK:
@@ -118,12 +148,14 @@ def _set_runtime_state(*, persist: bool = True, **updates: Any) -> None:
     if persist:
         _persist_runtime_state()
 
+
 def _checkpoint(name: str, evidence: tuple[str, ...] = ()) -> None:
     run_id = next((item.split(":", 1)[1] for item in evidence if item.startswith("run_id:")), None)
     updates: dict[str, Any] = {"last_checkpoint": name, "checkpoint_evidence": tuple(evidence)}
     if run_id:
         updates["last_run_id"] = run_id
     _set_runtime_state(**updates)
+
 
 def _restore_runtime_state() -> bool:
     restored = _state_store().load(configured_agent().agent_id)
@@ -152,6 +184,7 @@ def _restore_runtime_state() -> bool:
     _persist_runtime_state()
     return True
 
+
 def health_payload() -> dict[str, Any]:
     agent = configured_agent()
     with _STATE_LOCK:
@@ -172,6 +205,59 @@ def health_payload() -> dict[str, Any]:
         "durable_state": True, "generic_engineering": not agent.qa_eligible,
         "generic_qa": agent.qa_eligible, "execution_path": execution_path,
     }
+
+
+def dispatch_qa_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    endpoint = os.environ.get("RVSC_QA_WORKER_URL", "http://127.0.0.1:8771/execute").strip()
+    if not endpoint:
+        raise QAHandoffError("QA dispatch endpoint is not configured")
+    encoded = json.dumps(payload).encode("utf-8")
+    outbound = request.Request(endpoint, data=encoded, headers={"Content-Type": "application/json"}, method="POST")
+    timeout = float(os.environ.get("RVSC_QA_DISPATCH_TIMEOUT_SECONDS", "300"))
+    with request.urlopen(outbound, timeout=timeout) as response:
+        body = response.read().decode("utf-8")
+    decoded = json.loads(body)
+    if not isinstance(decoded, dict):
+        raise QAHandoffError("malformed QA dispatch response")
+    return decoded
+
+
+def automatic_qa_handoff(implementer: RegisteredAgent, mission: dict[str, Any], engineering_result: dict[str, Any]) -> dict[str, Any]:
+    try:
+        qa_agent = select_registered_qa_agent(implementer.agent_id, str(mission.get("project", "")))
+        qa_mission = build_qa_mission(engineering_mission=mission, engineering_result=engineering_result, qa_agent_id=qa_agent.agent_id)
+        _checkpoint("qa_handoff_dispatching", (f"qa_agent:{qa_agent.agent_id}", f"engineering_commit:{qa_mission['engineering_commit_sha']}", f"engineering_branch:{qa_mission['engineering_branch']}"))
+        qa_result = dispatch_qa_payload({"protocol": "rvsc.worker.v1", "mission": qa_mission})
+        verdict, evidence = validate_qa_result(qa_result)
+    except Exception as exc:
+        return {
+            **engineering_result,
+            "success": False,
+            "qa_handoff": {"success": False, "summary": str(exc)},
+            "summary": f"engineering completed but automatic QA handoff blocked progression: {exc}",
+        }
+
+    combined = {
+        **engineering_result,
+        "success": verdict == QA_ACCEPTED,
+        "verdict": verdict,
+        "qa_evidence": list(evidence),
+        "qa_handoff": {
+            "success": verdict == QA_ACCEPTED,
+            "qa_agent_id": qa_agent.agent_id,
+            "verdict": verdict,
+            "evidence": list(evidence),
+            "engineering_branch": qa_mission["engineering_branch"],
+            "engineering_commit_sha": qa_mission["engineering_commit_sha"],
+        },
+    }
+    if verdict == QA_REJECTED:
+        combined["summary"] = "automatic QA rejected the engineering result; progression blocked"
+        _checkpoint("qa_rejected", evidence)
+    else:
+        _checkpoint("qa_accepted", evidence)
+    return combined
+
 
 def execute_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if payload.get("protocol") != "rvsc.worker.v1":
@@ -201,6 +287,8 @@ def execute_payload(payload: dict[str, Any]) -> dict[str, Any]:
             result = daniel.execute_payload(payload)
         else:
             result = execute_generic_engineering(agent_id=configured.agent_id, agent_name=configured.name, role=configured.role, mission=mission, checkpoint=_checkpoint)
+        if not configured.qa_eligible and result.get("success"):
+            result = automatic_qa_handoff(configured, mission, result)
         _set_runtime_state(last_result="success" if result.get("success") else "failed", last_run_id=result.get("run_id") or _RUNTIME_STATE.get("last_run_id"))
         return result
     except Exception as exc:
@@ -208,6 +296,7 @@ def execute_payload(payload: dict[str, Any]) -> dict[str, Any]:
         raise
     finally:
         _set_runtime_state(active_mission=None)
+
 
 class GenericWorkerHandler(BaseHTTPRequestHandler):
     def _send_json(self, status: int, payload: dict[str, Any]) -> None:
@@ -217,21 +306,27 @@ class GenericWorkerHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
         self.wfile.write(encoded)
+
     def do_GET(self) -> None:
         if self.path != "/health":
-            self.send_error(404); return
+            self.send_error(404)
+            return
         self._send_json(200, health_payload())
+
     def do_POST(self) -> None:
         if self.path != "/execute":
-            self.send_error(404); return
+            self.send_error(404)
+            return
         try:
             length = int(self.headers.get("Content-Length", "0"))
             result = execute_payload(json.loads(self.rfile.read(length).decode("utf-8")))
             self._send_json(200, result)
         except Exception as exc:
             self._send_json(500, {"success": False, "summary": str(exc), "evidence": ["worker_host:rvsc-generic"], "retryable": False})
+
     def log_message(self, fmt: str, *args: Any) -> None:
         print(f"[RVSCGenericWorker] {fmt % args}")
+
 
 def main() -> None:
     agent = configured_agent()
@@ -250,6 +345,7 @@ def main() -> None:
     if recovery_required:
         print(f"{agent.agent_id} durable recovery required for interrupted mission {active_mission}")
     ThreadingHTTPServer((host, port), GenericWorkerHandler).serve_forever()
+
 
 if __name__ == "__main__":
     main()

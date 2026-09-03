@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import Iterable
+from typing import Any, Iterable
 
 ALLOWED_TRANSITIONS = {
     "draft": {"ready"},
@@ -22,11 +22,18 @@ REQUIRED_HANDOFF_KEYS = {
     "commit_or_pr",
 }
 
+QA_ACCEPTED = "QA_ACCEPTED"
+QA_REJECTED = "QA_REJECTED"
+
 
 @dataclass(frozen=True)
 class GateResult:
     eligible: bool
     reasons: tuple[str, ...]
+
+
+class QAHandoffError(ValueError):
+    pass
 
 
 def transition_allowed(current: str, requested: str) -> bool:
@@ -70,6 +77,102 @@ def validate_handoff(handoff_report: dict) -> list[str]:
     if not handoff_report.get("commit_or_pr"):
         errors.append("handoff must report commit_or_pr")
     return errors
+
+
+def _first_text(values: Iterable[Any]) -> str:
+    for value in values:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def engineering_commit_sha(result: dict[str, Any]) -> str:
+    git = result.get("git") if isinstance(result.get("git"), dict) else {}
+    handoff = result.get("handoff") if isinstance(result.get("handoff"), dict) else {}
+    commit = _first_text((result.get("commit_sha"), result.get("commit"), git.get("commit_sha"), git.get("commit"), handoff.get("commit_sha")))
+    if commit:
+        return commit
+    evidence = result.get("evidence")
+    if isinstance(evidence, (list, tuple)):
+        for item in evidence:
+            text = str(item).strip()
+            for prefix in ("commit_sha:", "commit:"):
+                if text.lower().startswith(prefix):
+                    return text.split(":", 1)[1].strip()
+    return ""
+
+
+def engineering_push_succeeded(result: dict[str, Any]) -> bool:
+    for key in ("pushed", "push_success"):
+        if result.get(key) is True:
+            return True
+    push = result.get("push")
+    if push is True:
+        return True
+    if isinstance(push, str) and push.strip().lower() in {"success", "succeeded", "pushed", "true"}:
+        return True
+    if isinstance(push, dict) and (push.get("success") is True or str(push.get("status", "")).lower() in {"success", "succeeded", "pushed"}):
+        return True
+    evidence = result.get("evidence")
+    if isinstance(evidence, (list, tuple)):
+        return any(str(item).strip().lower() in {"push:success", "push:succeeded", "pushed:true"} for item in evidence)
+    return False
+
+
+def build_qa_mission(*, engineering_mission: dict[str, Any], engineering_result: dict[str, Any], qa_agent_id: str) -> dict[str, Any]:
+    implementer_id = str(engineering_mission.get("agent_id", "")).strip()
+    if not qa_agent_id.strip():
+        raise QAHandoffError("missing QA candidate")
+    if qa_agent_id.strip().upper() == implementer_id.upper():
+        raise QAHandoffError("implementer cannot be selected as QA")
+    if not engineering_result.get("success"):
+        raise QAHandoffError("engineering execution was not successful")
+
+    branch = _first_text((engineering_result.get("work_branch"), engineering_result.get("branch"), engineering_mission.get("work_branch"), engineering_mission.get("branch")))
+    commit_sha = engineering_commit_sha(engineering_result)
+    if not branch:
+        raise QAHandoffError("missing engineering branch evidence")
+    if not commit_sha:
+        raise QAHandoffError("missing engineering commit evidence")
+    expected_branch = _first_text((engineering_mission.get("work_branch"), engineering_mission.get("branch")))
+    result_branch = _first_text((engineering_result.get("work_branch"), engineering_result.get("branch")))
+    if expected_branch and result_branch and expected_branch != result_branch:
+        raise QAHandoffError("engineering branch evidence does not match mission")
+    if not engineering_push_succeeded(engineering_result):
+        raise QAHandoffError("missing successful push evidence")
+
+    qa_mission = dict(engineering_mission)
+    qa_mission.update({
+        "agent_id": qa_agent_id.strip(),
+        "mission_type": "qa",
+        "qa_mode": "independent_review",
+        "implementer_id": implementer_id,
+        "engineering_run_id": engineering_result.get("run_id"),
+        "engineering_branch": branch,
+        "engineering_commit_sha": commit_sha,
+        "work_branch": branch,
+        "authorized_paths": list(engineering_mission.get("authorized_paths") or engineering_mission.get("allowed_paths") or ()),
+        "allowed_paths": list(engineering_mission.get("allowed_paths") or engineering_mission.get("authorized_paths") or ()),
+        "validation_commands": list(engineering_mission.get("validation_commands") or ()),
+    })
+    return qa_mission
+
+
+def validate_qa_result(result: Any) -> tuple[str, tuple[str, ...]]:
+    if not isinstance(result, dict):
+        raise QAHandoffError("malformed QA dispatch result")
+    verdict = result.get("verdict")
+    if verdict not in {QA_ACCEPTED, QA_REJECTED}:
+        raise QAHandoffError("malformed QA evidence: valid verdict missing")
+    evidence_value = result.get("evidence")
+    if not isinstance(evidence_value, (list, tuple)):
+        raise QAHandoffError("malformed QA evidence: evidence bundle missing")
+    evidence = tuple(str(item).strip() for item in evidence_value if str(item).strip())
+    if not evidence:
+        raise QAHandoffError("malformed QA evidence: evidence bundle empty")
+    if result.get("success") is not True:
+        raise QAHandoffError("QA dispatch failed")
+    return verdict, evidence
 
 
 def evaluate_merge_eligibility(
