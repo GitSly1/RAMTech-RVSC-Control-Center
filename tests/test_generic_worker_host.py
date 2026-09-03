@@ -143,6 +143,7 @@ class GenericWorkerHostTests(unittest.TestCase):
         qa_mission = dispatch.call_args.args[0]["mission"]
         self.assertEqual(qa_mission["engineering_branch"], mission["work_branch"])
         self.assertEqual(qa_mission["engineering_commit_sha"], engineering["commit_sha"])
+        self.assertEqual(qa_mission["reviewed_commit_sha"], engineering["commit_sha"])
         self.assertEqual(qa_mission["allowed_paths"], mission["allowed_paths"])
         self.assertEqual(qa_mission["validation_commands"], mission["validation_commands"])
 
