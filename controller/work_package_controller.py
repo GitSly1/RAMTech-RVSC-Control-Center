@@ -14,14 +14,7 @@ ALLOWED_TRANSITIONS = {
     "rejected": {"in_progress", "closed"},
     "closed": set(),
 }
-
-REQUIRED_HANDOFF_KEYS = {
-    "files_changed",
-    "validation_results",
-    "risks",
-    "commit_or_pr",
-}
-
+REQUIRED_HANDOFF_KEYS = {"files_changed", "validation_results", "risks", "commit_or_pr"}
 QA_ACCEPTED = "QA_ACCEPTED"
 QA_REJECTED = "QA_REJECTED"
 
@@ -46,12 +39,10 @@ def _normalize(path: str) -> str:
 
 def path_allowed(path: str, allowed_paths: Iterable[str], forbidden_paths: Iterable[str]) -> bool:
     candidate = _normalize(path)
-
     for forbidden in forbidden_paths:
-        forbidden = _normalize(forbidden.rstrip("*"))
-        if candidate == forbidden or candidate.startswith(forbidden.rstrip("/") + "/"):
+        prefix = _normalize(forbidden.rstrip("*"))
+        if candidate == prefix or candidate.startswith(prefix.rstrip("/") + "/"):
             return False
-
     for allowed in allowed_paths:
         prefix = _normalize(allowed.rstrip("*"))
         if candidate == prefix or candidate.startswith(prefix.rstrip("/") + "/"):
@@ -60,16 +51,11 @@ def path_allowed(path: str, allowed_paths: Iterable[str], forbidden_paths: Itera
 
 
 def validate_scope(changed_files: Iterable[str], allowed_paths: Iterable[str], forbidden_paths: Iterable[str]) -> list[str]:
-    violations = []
-    for path in changed_files:
-        if not path_allowed(path, allowed_paths, forbidden_paths):
-            violations.append(path)
-    return violations
+    return [path for path in changed_files if not path_allowed(path, allowed_paths, forbidden_paths)]
 
 
 def validate_handoff(handoff_report: dict) -> list[str]:
-    missing = sorted(REQUIRED_HANDOFF_KEYS - set(handoff_report))
-    errors = [f"missing handoff field: {item}" for item in missing]
+    errors = [f"missing handoff field: {item}" for item in sorted(REQUIRED_HANDOFF_KEYS - set(handoff_report))]
     if not handoff_report.get("files_changed"):
         errors.append("handoff must report files_changed")
     if not handoff_report.get("validation_results"):
@@ -103,20 +89,15 @@ def engineering_commit_sha(result: dict[str, Any]) -> str:
 
 
 def engineering_push_succeeded(result: dict[str, Any]) -> bool:
-    for key in ("pushed", "push_success"):
-        if result.get(key) is True:
-            return True
-    push = result.get("push")
-    if push is True:
+    if result.get("pushed") is True or result.get("push_success") is True or result.get("push") is True:
         return True
+    push = result.get("push")
     if isinstance(push, str) and push.strip().lower() in {"success", "succeeded", "pushed", "true"}:
         return True
     if isinstance(push, dict) and (push.get("success") is True or str(push.get("status", "")).lower() in {"success", "succeeded", "pushed"}):
         return True
     evidence = result.get("evidence")
-    if isinstance(evidence, (list, tuple)):
-        return any(str(item).strip().lower() in {"push:success", "push:succeeded", "pushed:true"} for item in evidence)
-    return False
+    return isinstance(evidence, (list, tuple)) and any(str(item).strip().lower() in {"push:success", "push:succeeded", "pushed:true"} for item in evidence)
 
 
 def build_qa_mission(*, engineering_mission: dict[str, Any], engineering_result: dict[str, Any], qa_agent_id: str) -> dict[str, Any]:
@@ -141,6 +122,13 @@ def build_qa_mission(*, engineering_mission: dict[str, Any], engineering_result:
     if not engineering_push_succeeded(engineering_result):
         raise QAHandoffError("missing successful push evidence")
 
+    project = _first_text((engineering_mission.get("project"), engineering_result.get("project")))
+    repository = _first_text((engineering_mission.get("repository"), engineering_result.get("repository")))
+    if not project:
+        raise QAHandoffError("missing engineering project")
+    if not repository:
+        raise QAHandoffError("missing engineering repository")
+
     qa_mission = dict(engineering_mission)
     qa_mission.update({
         "agent_id": qa_agent_id.strip(),
@@ -148,9 +136,13 @@ def build_qa_mission(*, engineering_mission: dict[str, Any], engineering_result:
         "qa_mode": "independent_review",
         "implementer_id": implementer_id,
         "engineering_run_id": engineering_result.get("run_id"),
+        "engineering_project": project,
+        "engineering_repository": repository,
         "engineering_branch": branch,
         "engineering_commit_sha": commit_sha,
         "reviewed_commit_sha": commit_sha,
+        "project": project,
+        "repository": repository,
         "work_branch": branch,
         "authorized_paths": list(engineering_mission.get("authorized_paths") or engineering_mission.get("allowed_paths") or ()),
         "allowed_paths": list(engineering_mission.get("allowed_paths") or engineering_mission.get("authorized_paths") or ()),
@@ -176,58 +168,22 @@ def validate_qa_result(result: Any) -> tuple[str, tuple[str, ...]]:
     return verdict, evidence
 
 
-def evaluate_merge_eligibility(
-    *,
-    status: str,
-    target_repository: str,
-    actual_repository: str,
-    base_branch: str,
-    work_branch: str,
-    changed_files: Iterable[str],
-    allowed_paths: Iterable[str],
-    forbidden_paths: Iterable[str],
-    acceptance_results: dict[str, bool],
-    validation_results: dict[str, bool],
-    handoff_report: dict,
-    pr_exists: bool,
-    pr_mergeable: bool,
-    review_approved: bool,
-    qa_accepted: bool,
-) -> GateResult:
+def evaluate_merge_eligibility(*, status: str, target_repository: str, actual_repository: str, base_branch: str, work_branch: str, changed_files: Iterable[str], allowed_paths: Iterable[str], forbidden_paths: Iterable[str], acceptance_results: dict[str, bool], validation_results: dict[str, bool], handoff_report: dict, pr_exists: bool, pr_mergeable: bool, review_approved: bool, qa_accepted: bool) -> GateResult:
     reasons: list[str] = []
-
-    if status != "review":
-        reasons.append("work package must be in review state")
-    if target_repository != actual_repository:
-        reasons.append("repository does not match work package target")
-    if base_branch != "main":
-        reasons.append("base branch must remain main")
-    if not work_branch.startswith("rvsc/"):
-        reasons.append("work branch must use rvsc/ prefix")
-    if work_branch == base_branch:
-        reasons.append("direct development on base branch is prohibited")
-
+    if status != "review": reasons.append("work package must be in review state")
+    if target_repository != actual_repository: reasons.append("repository does not match work package target")
+    if base_branch != "main": reasons.append("base branch must remain main")
+    if not work_branch.startswith("rvsc/"): reasons.append("work branch must use rvsc/ prefix")
+    if work_branch == base_branch: reasons.append("direct development on base branch is prohibited")
     violations = validate_scope(changed_files, allowed_paths, forbidden_paths)
-    if violations:
-        reasons.append("out-of-scope paths: " + ", ".join(sorted(violations)))
-
-    failed_acceptance = sorted(k for k, passed in acceptance_results.items() if not passed)
-    if failed_acceptance:
-        reasons.append("acceptance criteria failed: " + ", ".join(failed_acceptance))
-
-    failed_validation = sorted(k for k, passed in validation_results.items() if not passed)
-    if failed_validation:
-        reasons.append("validation failed: " + ", ".join(failed_validation))
-
+    if violations: reasons.append("out-of-scope paths: " + ", ".join(sorted(violations)))
+    failed_acceptance = sorted(key for key, passed in acceptance_results.items() if not passed)
+    if failed_acceptance: reasons.append("acceptance criteria failed: " + ", ".join(failed_acceptance))
+    failed_validation = sorted(key for key, passed in validation_results.items() if not passed)
+    if failed_validation: reasons.append("validation failed: " + ", ".join(failed_validation))
     reasons.extend(validate_handoff(handoff_report))
-
-    if not pr_exists:
-        reasons.append("pull request evidence missing")
-    if not pr_mergeable:
-        reasons.append("pull request is not mergeable")
-    if not review_approved:
-        reasons.append("required review approval missing")
-    if not qa_accepted:
-        reasons.append("QA acceptance missing")
-
+    if not pr_exists: reasons.append("pull request evidence missing")
+    if not pr_mergeable: reasons.append("pull request is not mergeable")
+    if not review_approved: reasons.append("required review approval missing")
+    if not qa_accepted: reasons.append("QA acceptance missing")
     return GateResult(eligible=not reasons, reasons=tuple(reasons))

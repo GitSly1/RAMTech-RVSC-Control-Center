@@ -20,9 +20,14 @@ RVSC_ROOT = Path(__file__).resolve().parents[1]
 AGENT_REGISTRY = RVSC_ROOT / "config" / "agents.yaml"
 _STATE_LOCK = threading.Lock()
 _RUNTIME_STATE: dict[str, Any] = {
-    "active_mission": None, "last_run_id": None, "last_activity": None,
-    "last_result": None, "last_checkpoint": None, "checkpoint_evidence": (),
-    "recovery_required": False, "recovered_checkpoint": None,
+    "active_mission": None,
+    "last_run_id": None,
+    "last_activity": None,
+    "last_result": None,
+    "last_checkpoint": None,
+    "checkpoint_evidence": (),
+    "recovery_required": False,
+    "recovered_checkpoint": None,
 }
 
 
@@ -77,8 +82,7 @@ def load_agents(path: Path = AGENT_REGISTRY) -> tuple[RegisteredAgent, ...]:
             continue
         if current is None or ":" not in stripped:
             continue
-        key, value = stripped.split(":", 1)
-        key, value = key.strip(), value.strip()
+        key, value = (item.strip() for item in stripped.split(":", 1))
         if key in {"name", "role"}:
             current[key] = _scalar(value)
         elif key == "projects":
@@ -112,13 +116,13 @@ def configured_agent() -> RegisteredAgent:
 
 
 def select_registered_qa_agent(implementer_id: str, project: str) -> RegisteredAgent:
-    normalized_implementer = implementer_id.strip().upper()
+    implementer = implementer_id.strip().upper()
     normalized_project = project.strip().lower()
     candidates = [
         agent for agent in load_agents()
         if agent.worker_enabled
         and agent.qa_eligible
-        and agent.agent_id.strip().upper() != normalized_implementer
+        and agent.agent_id.strip().upper() != implementer
         and normalized_project in {item.strip().lower() for item in agent.projects}
     ]
     if not candidates:
@@ -126,8 +130,15 @@ def select_registered_qa_agent(implementer_id: str, project: str) -> RegisteredA
     return sorted(candidates, key=lambda item: item.agent_id)[0]
 
 
+def is_legacy_daniel_mission(mission: dict[str, Any]) -> bool:
+    """Keep historical qualification contracts on Daniel's legacy handlers."""
+    wp_id = str(mission.get("wp_id", "")).strip().upper()
+    return wp_id.startswith("SEM-DANIEL-")
+
+
 def _state_store() -> DurableRuntimeStateStore:
-    return DurableRuntimeStateStore(Path(os.environ.get("RVSC_RUNTIME_STATE_DIR", str(RVSC_ROOT / ".rvsc" / "runtime"))))
+    default = RVSC_ROOT / ".rvsc" / "runtime"
+    return DurableRuntimeStateStore(Path(os.environ.get("RVSC_RUNTIME_STATE_DIR", str(default))))
 
 
 def _snapshot_state() -> dict[str, Any]:
@@ -161,25 +172,21 @@ def _restore_runtime_state() -> bool:
     restored = _state_store().load(configured_agent().agent_id)
     if restored is None:
         return False
-    known = set(_RUNTIME_STATE)
-    filtered = {key: value for key, value in restored.items() if key in known}
+    filtered = {key: value for key, value in restored.items() if key in _RUNTIME_STATE}
     filtered["checkpoint_evidence"] = tuple(filtered.get("checkpoint_evidence", ()))
     previous_checkpoint = filtered.get("last_checkpoint")
     interrupted = bool(filtered.get("active_mission"))
     with _STATE_LOCK:
         _RUNTIME_STATE.update(filtered)
+        _RUNTIME_STATE["recovery_required"] = interrupted
+        _RUNTIME_STATE["recovered_checkpoint"] = previous_checkpoint
         if interrupted:
-            _RUNTIME_STATE["recovery_required"] = True
-            _RUNTIME_STATE["recovered_checkpoint"] = previous_checkpoint
             _RUNTIME_STATE["last_checkpoint"] = "runtime_recovered"
             evidence = list(_RUNTIME_STATE.get("checkpoint_evidence", ()))
             if previous_checkpoint:
                 evidence.append(f"recovered_checkpoint:{previous_checkpoint}")
             evidence.append("durable_state:restored")
             _RUNTIME_STATE["checkpoint_evidence"] = tuple(evidence)
-        else:
-            _RUNTIME_STATE["recovery_required"] = False
-            _RUNTIME_STATE["recovered_checkpoint"] = previous_checkpoint
         _RUNTIME_STATE["last_activity"] = _utc_now()
     _persist_runtime_state()
     return True
@@ -192,18 +199,29 @@ def health_payload() -> dict[str, Any]:
     credential_ready = bool(os.environ.get("OPENAI_API_KEY", "").strip())
     execution_path = "independent_qa" if agent.qa_eligible else "generic_engineering"
     return {
-        "protocol": "rvsc.worker.health.v1", "worker": agent.agent_id, "name": agent.name,
-        "role": agent.role, "service": "rvsc-generic-worker",
+        "protocol": "rvsc.worker.health.v1",
+        "worker": agent.agent_id,
+        "name": agent.name,
+        "role": agent.role,
+        "service": "rvsc-generic-worker",
         "ready": agent.worker_enabled and credential_ready and state["active_mission"] is None and not state["recovery_required"],
-        "credential_ready": credential_ready, "worker_enabled": agent.worker_enabled,
-        "qa_eligible": agent.qa_eligible, "projects": list(agent.projects),
-        "busy": state["active_mission"] is not None, "active_mission": state["active_mission"],
-        "last_run_id": state["last_run_id"], "last_activity": state["last_activity"],
-        "last_result": state["last_result"], "last_checkpoint": state["last_checkpoint"],
+        "credential_ready": credential_ready,
+        "worker_enabled": agent.worker_enabled,
+        "qa_eligible": agent.qa_eligible,
+        "projects": list(agent.projects),
+        "busy": state["active_mission"] is not None,
+        "active_mission": state["active_mission"],
+        "last_run_id": state["last_run_id"],
+        "last_activity": state["last_activity"],
+        "last_result": state["last_result"],
+        "last_checkpoint": state["last_checkpoint"],
         "checkpoint_evidence": list(state["checkpoint_evidence"]),
-        "recovery_required": state["recovery_required"], "recovered_checkpoint": state["recovered_checkpoint"],
-        "durable_state": True, "generic_engineering": not agent.qa_eligible,
-        "generic_qa": agent.qa_eligible, "execution_path": execution_path,
+        "recovery_required": state["recovery_required"],
+        "recovered_checkpoint": state["recovered_checkpoint"],
+        "durable_state": True,
+        "generic_engineering": not agent.qa_eligible,
+        "generic_qa": agent.qa_eligible,
+        "execution_path": execution_path,
     }
 
 
@@ -211,12 +229,10 @@ def dispatch_qa_payload(payload: dict[str, Any]) -> dict[str, Any]:
     endpoint = os.environ.get("RVSC_QA_WORKER_URL", "http://127.0.0.1:8771/execute").strip()
     if not endpoint:
         raise QAHandoffError("QA dispatch endpoint is not configured")
-    encoded = json.dumps(payload).encode("utf-8")
-    outbound = request.Request(endpoint, data=encoded, headers={"Content-Type": "application/json"}, method="POST")
+    outbound = request.Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
     timeout = float(os.environ.get("RVSC_QA_DISPATCH_TIMEOUT_SECONDS", "300"))
     with request.urlopen(outbound, timeout=timeout) as response:
-        body = response.read().decode("utf-8")
-    decoded = json.loads(body)
+        decoded = json.loads(response.read().decode("utf-8"))
     if not isinstance(decoded, dict):
         raise QAHandoffError("malformed QA dispatch response")
     return decoded
@@ -278,12 +294,13 @@ def execute_payload(payload: dict[str, Any]) -> dict[str, Any]:
         active_mission = _RUNTIME_STATE["active_mission"]
     if recovery_required:
         raise RuntimeError(f"durable recovery required for interrupted mission {active_mission}; refusing duplicate dispatch")
+
     wp_id = str(mission.get("wp_id", "")).strip() or "unknown"
     _set_runtime_state(active_mission=wp_id, last_result="acknowledged", last_checkpoint="mission_acknowledged", checkpoint_evidence=(), recovery_required=False, recovered_checkpoint=None)
     try:
         if configured.qa_eligible:
-            result = execute_generic_qa(agent_id=configured.agent_id, agent_name=configured.name, role=configured.role, qa_eligible=configured.qa_eligible, mission=mission, checkpoint=_checkpoint)
-        elif configured.agent_id == "DEV-001":
+            result = execute_generic_qa(agent_id=configured.agent_id, agent_name=configured.name, role=configured.role, qa_eligible=True, mission=mission, checkpoint=_checkpoint)
+        elif configured.agent_id == "DEV-001" and is_legacy_daniel_mission(mission):
             result = daniel.execute_payload(payload)
         else:
             result = execute_generic_engineering(agent_id=configured.agent_id, agent_name=configured.name, role=configured.role, mission=mission, checkpoint=_checkpoint)

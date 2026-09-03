@@ -17,8 +17,13 @@ OPENAI_URL = "https://api.openai.com/v1/responses"
 DEFAULT_MODEL = os.environ.get("RVSC_OPENAI_MODEL", "gpt-5.6")
 RVSC_ROOT = Path(__file__).resolve().parents[1]
 MAX_CORE_PATH = Path(os.environ.get("RVSC_MAX_CORE_PATH", str(RVSC_ROOT / "golden-core" / "MAX_PLATINUM_ENGINEERING_CORE_V1.md")))
-
 CheckpointReporter = Callable[[str, tuple[str, ...]], None]
+
+_PROJECT_REPOSITORIES = {
+    "rvsc": ("RVSC_RVSC_REPO", RVSC_ROOT),
+    "semantiq": ("RVSC_SEMANTIQ_REPO", Path(r"D:\Py_Proj\RAMTech-SEMANTIQ")),
+    "moxie": ("RVSC_MOXIE_REPO", Path(r"D:\Py_Proj\RAMTech-MOXIE")),
+}
 
 
 def _utc_now() -> str:
@@ -27,12 +32,7 @@ def _utc_now() -> str:
 
 def _openai_call(api_key: str, prompt: str) -> dict[str, Any]:
     body = json.dumps({"model": DEFAULT_MODEL, "input": prompt}).encode("utf-8")
-    req = urllib.request.Request(
-        OPENAI_URL,
-        data=body,
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        method="POST",
-    )
+    req = urllib.request.Request(OPENAI_URL, data=body, headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=180) as response:
             return json.loads(response.read().decode("utf-8"))
@@ -45,22 +45,19 @@ def _openai_call(api_key: str, prompt: str) -> dict[str, Any]:
 
 def _response_text(response: dict[str, Any]) -> str:
     for item in response.get("output", []):
-        if item.get("type") != "message":
-            continue
-        for content in item.get("content", []):
-            if content.get("type") == "output_text" and isinstance(content.get("text"), str):
-                return content["text"]
+        if item.get("type") == "message":
+            for content in item.get("content", []):
+                if content.get("type") == "output_text" and isinstance(content.get("text"), str):
+                    return content["text"]
     raise RuntimeError("provider response did not contain output_text")
 
 
 def _json_object(text: str) -> dict[str, Any]:
     candidate = text.strip()
     if candidate.startswith("```"):
-        lines = candidate.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
+        lines = candidate.splitlines()[1:]
         if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
+            lines.pop()
         candidate = "\n".join(lines).strip()
     value = json.loads(candidate)
     if not isinstance(value, dict):
@@ -94,19 +91,11 @@ def _worker_request(mission: dict[str, Any]) -> WorkerRequest:
 
 def _repo_root(mission: dict[str, Any]) -> Path:
     project = str(mission.get("project", "")).strip().lower()
-    env_name = {
-        "rvsc": "RVSC_RVSC_REPO",
-        "semantiq": "RVSC_SEMANTIQ_REPO",
-        "moxie": "RVSC_MOXIE_REPO",
-    }.get(project)
-    if env_name is None:
+    mapping = _PROJECT_REPOSITORIES.get(project)
+    if mapping is None:
         raise ValueError(f"no controlled repository mapping for project {project or '<missing>'}")
-    defaults = {
-        "rvsc": RVSC_ROOT,
-        "semantiq": Path(r"D:\Py_Proj\RAMTech-SEMANTIQ"),
-        "moxie": Path(r"D:\Py_Proj\RAMTech-MOXIE"),
-    }
-    return Path(os.environ.get(env_name, str(defaults[project]))).resolve()
+    env_name, default = mapping
+    return Path(os.environ.get(env_name, str(default))).resolve()
 
 
 def _validations(mission: dict[str, Any]) -> tuple[ValidationCommand, ...]:
@@ -143,50 +132,32 @@ def _prepare_branch(environment: ControlledEngineeringEnvironment, request: Work
 
 
 def _git_identity(agent_id: str, agent_name: str) -> tuple[str, str]:
-    normalized_agent_id = agent_id.strip()
-    if not normalized_agent_id:
+    normalized = agent_id.strip()
+    if not normalized:
         raise ValueError("agent_id is required for Git identity")
-    identity_name = f"{normalized_agent_id} {agent_name.strip()}".strip()
-    identity_email = f"{normalized_agent_id.lower()}@rvsc.local"
-    return identity_name, identity_email
+    return f"{normalized} {agent_name.strip()}".strip(), f"{normalized.lower()}@rvsc.local"
 
 
-def _configure_git_identity(
-    environment: ControlledEngineeringEnvironment,
-    agent_id: str,
-    agent_name: str,
-) -> None:
+def _configure_git_identity(environment: ControlledEngineeringEnvironment, agent_id: str, agent_name: str) -> None:
     identity_name, identity_email = _git_identity(agent_id, agent_name)
     for setting, value in (("user.name", identity_name), ("user.email", identity_email)):
         result = environment.run(("git", "config", "--local", setting, value))
         if result.returncode != 0:
-            raise EngineeringEnvironmentError(
-                result.stderr.strip() or result.stdout.strip() or f"unable to configure repository-local Git {setting}"
-            )
+            raise EngineeringEnvironmentError(result.stderr.strip() or result.stdout.strip() or f"unable to configure repository-local Git {setting}")
 
 
 def _engineering_prompt(agent_id: str, agent_name: str, role: str, mission: dict[str, Any], source_files: dict[str, str]) -> str:
     max_core = _load_text(MAX_CORE_PATH, "Max Platinum Engineering Core")
     return (
-        f"You are {agent_id} {agent_name}, serving as {role} inside RVSC. "
-        "Operate only within the supplied mission contract. The Max Platinum Engineering Core defines the engineering methodology you must apply; do not quote or summarize it. "
-        "Mission scope, repository authorization, allowed paths, and safety restrictions override all broader capability language. Never expose credentials or secrets.\n\n"
+        f"You are {agent_id} {agent_name}, serving as {role} inside RVSC. Operate only within the supplied mission contract. "
+        "The Max Platinum Engineering Core defines the engineering methodology you must apply; do not quote or summarize it. Mission scope, repository authorization, allowed paths, and safety restrictions override all broader capability language. Never expose credentials or secrets.\n\n"
         f"MAX PLATINUM ENGINEERING CORE:\n{max_core}\n\n"
-        "Perform the bounded engineering mission. Independently inspect the supplied baseline files, implement the smallest general solution that satisfies the acceptance criteria, and preserve unrelated behavior. "
-        "Do not claim filesystem actions, tests, commits, pushes, or QA; the controlled runtime performs and records those actions. Return ONLY valid JSON with exactly these top-level keys: files, commit_message, engineering_summary. "
-        "files must contain exactly the authorized file paths, each mapped to COMPLETE replacement UTF-8 content. No markdown fences.\n\n"
+        "Perform the bounded engineering mission. Independently inspect the supplied baseline files, implement the smallest general solution that satisfies the acceptance criteria, and preserve unrelated behavior. Do not claim filesystem actions, tests, commits, pushes, or QA; the controlled runtime performs and records those actions. Return ONLY valid JSON with exactly these top-level keys: files, commit_message, engineering_summary. files must contain exactly the authorized file paths, each mapped to COMPLETE replacement UTF-8 content. No markdown fences.\n\n"
         f"MISSION:\n{json.dumps(mission, indent=2)}\n\nBASELINE FILES:\n{json.dumps(source_files, indent=2)}"
     )
 
 
-def execute_mission(
-    *,
-    agent_id: str,
-    agent_name: str,
-    role: str,
-    mission: dict[str, Any],
-    checkpoint: CheckpointReporter | None = None,
-) -> dict[str, Any]:
+def execute_mission(*, agent_id: str, agent_name: str, role: str, mission: dict[str, Any], checkpoint: CheckpointReporter | None = None) -> dict[str, Any]:
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is not set")
@@ -201,6 +172,7 @@ def execute_mission(
     runner = EngineeringMissionRunner(request, _repo_root(mission), validations=_validations(mission))
     environment = runner.environment
     _prepare_branch(environment, request)
+    _configure_git_identity(environment, agent_id, agent_name)
     author_name, author_email = _git_identity(agent_id, agent_name)
     evidence = list(runner.preflight())
     if checkpoint:
@@ -237,38 +209,26 @@ def execute_mission(
         checkpoint("tests_passed", validations + (f"run_id:{run_id}",))
 
     commit_message = str(proposal.get("commit_message", "")).strip() or f"{request.wp_id}: {agent_id} controlled engineering"
-    committed = runner.commit(
-        request.allowed_paths,
-        commit_message,
-        author_name=author_name,
-        author_email=author_email,
-    )
+    committed = runner.commit(request.allowed_paths, commit_message, author_name=author_name, author_email=author_email)
     evidence.extend(committed)
+    commit_result = environment.run(("git", "rev-parse", "HEAD"))
+    if commit_result.returncode != 0 or not commit_result.stdout.strip():
+        raise EngineeringEnvironmentError(commit_result.stderr.strip() or "unable to resolve created commit")
+    commit_sha = commit_result.stdout.strip()
     if checkpoint:
-        checkpoint("commit_created", committed + (f"run_id:{run_id}",))
+        checkpoint("commit_created", committed + (f"commit_sha:{commit_sha}", f"run_id:{run_id}"))
     push = environment.run(("git", "push", "origin", f"HEAD:refs/heads/{request.work_branch}"))
     if push.returncode != 0:
         raise EngineeringEnvironmentError(push.stderr.strip() or push.stdout.strip() or "git push failed")
-    evidence.append("push:success")
+    evidence.extend((f"commit_sha:{commit_sha}", "push:success"))
     if checkpoint:
-        checkpoint("push_confirmed", ("push:success", f"run_id:{run_id}"))
+        checkpoint("push_confirmed", ("push:success", f"commit_sha:{commit_sha}", f"run_id:{run_id}"))
 
     final_status = environment.git_status()
     if final_status.returncode != 0:
         raise EngineeringEnvironmentError(final_status.stderr.strip() or "post-commit git status failed")
     clean = not bool(final_status.stdout.strip())
-    evidence.extend((
-        f"repo_clean_after:{str(clean).lower()}",
-        f"run_id:{run_id}",
-        f"started_at:{started}",
-        f"ended_at:{_utc_now()}",
-        "provider:openai",
-        f"model:{model}",
-        f"provider_response_id:{provider_response_id}",
-        f"provider_status:{provider_status}",
-        f"agent:{agent_id}",
-        "execution_mode:generic_model_proposal_controlled_apply_validate_commit_push",
-    ))
+    evidence.extend((f"repo_clean_after:{str(clean).lower()}", f"run_id:{run_id}", f"started_at:{started}", f"ended_at:{_utc_now()}", "provider:openai", f"model:{model}", f"provider_response_id:{provider_response_id}", f"provider_status:{provider_status}", f"agent:{agent_id}", "execution_mode:generic_model_proposal_controlled_apply_validate_commit_push"))
     if checkpoint:
         checkpoint("execution_completed", tuple(evidence[-10:]))
     return {
@@ -277,4 +237,9 @@ def execute_mission(
         "evidence": evidence,
         "retryable": False,
         "run_id": run_id,
+        "project": request.project,
+        "repository": request.repository,
+        "work_branch": request.work_branch,
+        "commit_sha": commit_sha,
+        "pushed": True,
     }
