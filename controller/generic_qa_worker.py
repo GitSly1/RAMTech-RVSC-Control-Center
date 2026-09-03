@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 RVSC_ROOT = Path(__file__).resolve().parents[1]
 _ALLOWED_EXECUTABLES = {"python", "python3", "py", "pytest", "git"}
@@ -19,6 +21,7 @@ _READ_ONLY_GIT_COMMANDS = {
     "show",
     "status",
 }
+_FULL_COMMIT_SHA = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})\Z")
 Checkpoint = Callable[[str, tuple[str, ...]], None]
 
 
@@ -51,19 +54,111 @@ def _reject(
     }
 
 
-def _git_value(repo_root: Path, *args: str) -> str:
+def _git_value(repo_root: Path, *args: str, timeout: int = 30) -> str:
+    environment = os.environ.copy()
+    environment["GIT_TERMINAL_PROMPT"] = "0"
     completed = subprocess.run(
         ["git", *args],
         cwd=repo_root,
         text=True,
         capture_output=True,
         check=False,
-        timeout=30,
+        timeout=timeout,
+        env=environment,
     )
     if completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip() or "unknown Git error"
         raise RuntimeError(detail)
     return completed.stdout.strip()
+
+
+def _normalized_origin_url(workspace_root: Path, origin_url: str) -> str:
+    if "://" in origin_url or re.match(r"^[^/\\]+@[^:]+:", origin_url):
+        return origin_url
+    path = Path(origin_url).expanduser()
+    if not path.is_absolute():
+        path = workspace_root / path
+    return str(path.resolve())
+
+
+@contextmanager
+def _review_repository(
+    workspace_root: Path,
+    expected_branch: str,
+    expected_commit: str,
+) -> Iterator[tuple[Path, str, str, tuple[str, ...]]]:
+    if not expected_commit:
+        branch = _git_value(workspace_root, "branch", "--show-current")
+        commit_sha = _git_value(workspace_root, "rev-parse", "HEAD")
+        if not branch or not commit_sha:
+            raise ValueError("reviewed Git branch and commit SHA are required")
+        if expected_branch and expected_branch != branch:
+            raise ValueError(f"reviewed branch mismatch: expected {expected_branch}, observed {branch}")
+        yield workspace_root, branch, commit_sha, ("target_acquisition:existing_workspace",)
+        return
+
+    if not expected_branch:
+        raise ValueError("requested review branch is required when a commit SHA is specified")
+    if not _FULL_COMMIT_SHA.fullmatch(expected_commit):
+        raise ValueError("requested commit SHA is invalid or unavailable")
+    try:
+        _git_value(workspace_root, "check-ref-format", f"refs/heads/{expected_branch}")
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        raise ValueError("requested branch is invalid or unavailable") from exc
+    try:
+        origin_url = _normalized_origin_url(
+            workspace_root,
+            _git_value(workspace_root, "remote", "get-url", "origin"),
+        )
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        raise ValueError("origin is unavailable for requested target acquisition") from exc
+
+    with tempfile.TemporaryDirectory(prefix="rvsc-qa-target-") as temporary:
+        acquired_root = Path(temporary) / "repository"
+        acquired_root.mkdir()
+        try:
+            _git_value(acquired_root, "init")
+            _git_value(acquired_root, "remote", "add", "origin", origin_url)
+            remote_ref = f"refs/remotes/origin/{expected_branch}"
+            refspec = f"+refs/heads/{expected_branch}:{remote_ref}"
+            _git_value(acquired_root, "fetch", "--no-tags", "origin", refspec, timeout=120)
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            raise ValueError("requested branch is unavailable from origin") from exc
+
+        normalized_commit = expected_commit.lower()
+        try:
+            fetched_tip = _git_value(acquired_root, "rev-parse", "--verify", f"{remote_ref}^{{commit}}").lower()
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            raise ValueError("requested branch could not be verified after fetch") from exc
+        try:
+            verified_commit = _git_value(
+                acquired_root,
+                "rev-parse",
+                "--verify",
+                f"{normalized_commit}^{{commit}}",
+            ).lower()
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            raise ValueError("requested commit SHA is invalid or unavailable") from exc
+        if verified_commit != normalized_commit:
+            raise ValueError("requested commit SHA could not be verified exactly")
+        if fetched_tip != normalized_commit:
+            raise ValueError(
+                f"requested branch/commit mismatch: origin branch tip is {fetched_tip}, not {normalized_commit}"
+            )
+        try:
+            _git_value(acquired_root, "checkout", "--detach", normalized_commit)
+            checked_out_commit = _git_value(acquired_root, "rev-parse", "HEAD").lower()
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            raise ValueError("requested commit could not be prepared for isolated QA review") from exc
+        if checked_out_commit != normalized_commit:
+            raise ValueError("acquired review target does not match the requested commit")
+
+        yield acquired_root, expected_branch, normalized_commit, (
+            "target_acquisition:origin_fetch",
+            f"target_ref:{remote_ref}",
+            "target_verification:branch_tip_matches_commit",
+            "target_checkout:detached",
+        )
 
 
 def _authorized_path(repo_root: Path, raw_path: str) -> Path:
@@ -169,86 +264,93 @@ def execute_mission(
     commit_sha: str | None = None
     validations: list[dict[str, Any]] = []
     try:
-        branch = _git_value(root, "branch", "--show-current")
-        commit_sha = _git_value(root, "rev-parse", "HEAD")
-        if not branch or not commit_sha:
-            raise ValueError("reviewed Git branch and commit SHA are required")
-        evidence.extend((f"reviewed_branch:{branch}", f"reviewed_commit_sha:{commit_sha}"))
         expected_branch = str(mission.get("work_branch", "")).strip()
-        if expected_branch and expected_branch != branch:
-            raise ValueError(f"reviewed branch mismatch: expected {expected_branch}, observed {branch}")
         expected_commit = str(mission.get("reviewed_commit_sha", mission.get("commit_sha", ""))).strip()
-        if expected_commit and expected_commit != commit_sha:
-            raise ValueError(f"reviewed commit mismatch: expected {expected_commit}, observed {commit_sha}")
+        with _review_repository(root, expected_branch, expected_commit) as target:
+            review_root, branch, commit_sha, acquisition_evidence = target
+            evidence.extend(acquisition_evidence)
+            evidence.extend((f"reviewed_branch:{branch}", f"reviewed_commit_sha:{commit_sha}"))
 
-        raw_paths = mission.get("allowed_paths")
-        if not isinstance(raw_paths, list) or not raw_paths:
-            raise ValueError("authorized review paths are required")
-        evidence_paths = mission.get("evidence_paths", [])
-        if not isinstance(evidence_paths, list):
-            raise ValueError("evidence_paths must be a list")
-        review_paths = list(raw_paths) + list(evidence_paths)
-        if not all(isinstance(item, str) for item in review_paths):
-            raise ValueError("authorized review paths must be strings")
-        for raw_path in dict.fromkeys(review_paths):
-            evidence.append(_file_evidence(root, raw_path))
+            raw_paths = mission.get("allowed_paths")
+            if not isinstance(raw_paths, list) or not raw_paths:
+                raise ValueError("authorized review paths are required")
+            evidence_paths = mission.get("evidence_paths", [])
+            if not isinstance(evidence_paths, list):
+                raise ValueError("evidence_paths must be a list")
+            review_paths = list(raw_paths) + list(evidence_paths)
+            if not all(isinstance(item, str) for item in review_paths):
+                raise ValueError("authorized review paths must be strings")
+            for raw_path in dict.fromkeys(review_paths):
+                evidence.append(_file_evidence(review_root, raw_path))
 
-        commands = _validated_commands(mission)
-        _record(checkpoint, "qa_inspection_complete", (f"run_id:{run_id}", f"branch:{branch}", f"commit:{commit_sha}"))
-        timeout = int(mission.get("validation_timeout_seconds", 900))
-        if timeout < 1 or timeout > 3600:
-            raise ValueError("validation timeout must be between 1 and 3600 seconds")
+            commands = _validated_commands(mission)
+            _record(
+                checkpoint,
+                "qa_inspection_complete",
+                (f"run_id:{run_id}", f"branch:{branch}", f"commit:{commit_sha}"),
+            )
+            timeout = int(mission.get("validation_timeout_seconds", 900))
+            if timeout < 1 or timeout > 3600:
+                raise ValueError("validation timeout must be between 1 and 3600 seconds")
 
-        with tempfile.TemporaryDirectory(prefix="rvsc-qa-") as temporary:
-            validation_root = Path(temporary) / "repository"
-            _copy_repository(root, validation_root)
-            environment = os.environ.copy()
-            environment["PYTHONDONTWRITEBYTECODE"] = "1"
-            for name, argv in commands:
-                completed = subprocess.run(
-                    argv,
-                    cwd=validation_root,
-                    text=True,
-                    capture_output=True,
-                    check=False,
-                    timeout=timeout,
-                    env=environment,
-                )
-                result = {
-                    "name": name,
-                    "argv": argv,
-                    "returncode": completed.returncode,
-                    "stdout": completed.stdout[-12000:],
-                    "stderr": completed.stderr[-12000:],
-                }
-                validations.append(result)
-                evidence.append(f"validation:{name}:exit:{completed.returncode}")
-                _record(checkpoint, "qa_validation_observed", (f"run_id:{run_id}", f"validation:{name}", f"exit:{completed.returncode}"))
-                if completed.returncode != 0:
-                    return _reject(
-                        run_id=run_id,
-                        agent_id=agent_id,
-                        branch=branch,
-                        commit_sha=commit_sha,
-                        summary=f"validation failed: {name}",
-                        evidence=evidence,
-                        validations=validations,
+            with tempfile.TemporaryDirectory(prefix="rvsc-qa-") as temporary:
+                validation_root = Path(temporary) / "repository"
+                _copy_repository(review_root, validation_root)
+                environment = os.environ.copy()
+                environment["PYTHONDONTWRITEBYTECODE"] = "1"
+                for name, argv in commands:
+                    completed = subprocess.run(
+                        argv,
+                        cwd=validation_root,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                        timeout=timeout,
+                        env=environment,
                     )
+                    result = {
+                        "name": name,
+                        "argv": argv,
+                        "returncode": completed.returncode,
+                        "stdout": completed.stdout[-12000:],
+                        "stderr": completed.stderr[-12000:],
+                    }
+                    validations.append(result)
+                    evidence.append(f"validation:{name}:exit:{completed.returncode}")
+                    _record(
+                        checkpoint,
+                        "qa_validation_observed",
+                        (f"run_id:{run_id}", f"validation:{name}", f"exit:{completed.returncode}"),
+                    )
+                    if completed.returncode != 0:
+                        return _reject(
+                            run_id=run_id,
+                            agent_id=agent_id,
+                            branch=branch,
+                            commit_sha=commit_sha,
+                            summary=f"validation failed: {name}",
+                            evidence=evidence,
+                            validations=validations,
+                        )
 
-        evidence.extend(("source_execution:isolated_copy", "verdict:QA_ACCEPTED"))
-        _record(checkpoint, "qa_accepted", (f"run_id:{run_id}", f"branch:{branch}", f"commit:{commit_sha}"))
-        return {
-            "success": True,
-            "run_id": run_id,
-            "agent_id": agent_id,
-            "verdict": "QA_ACCEPTED",
-            "reviewed_branch": branch,
-            "reviewed_commit_sha": commit_sha,
-            "summary": f"independent QA accepted {branch} at {commit_sha}",
-            "evidence": evidence,
-            "validations": validations,
-            "retryable": False,
-        }
+            evidence.extend(("source_execution:isolated_copy", "verdict:QA_ACCEPTED"))
+            _record(
+                checkpoint,
+                "qa_accepted",
+                (f"run_id:{run_id}", f"branch:{branch}", f"commit:{commit_sha}"),
+            )
+            return {
+                "success": True,
+                "run_id": run_id,
+                "agent_id": agent_id,
+                "verdict": "QA_ACCEPTED",
+                "reviewed_branch": branch,
+                "reviewed_commit_sha": commit_sha,
+                "summary": f"independent QA accepted {branch} at {commit_sha}",
+                "evidence": evidence,
+                "validations": validations,
+                "retryable": False,
+            }
     except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as exc:
         evidence.extend((f"qa_failure:{exc}", "verdict:QA_REJECTED"))
         _record(checkpoint, "qa_rejected", (f"run_id:{run_id}", f"failure:{exc}"))
