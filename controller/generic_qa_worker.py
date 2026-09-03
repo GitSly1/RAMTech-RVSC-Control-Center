@@ -4,6 +4,7 @@ import hashlib
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Callable
@@ -45,7 +46,7 @@ def _reject(
         "reviewed_commit_sha": commit_sha,
         "summary": summary,
         "evidence": evidence,
-        "validations": validations or [],
+        "validations": validations if validations is not None else [],
         "retryable": False,
     }
 
@@ -89,6 +90,15 @@ def _file_evidence(repo_root: Path, raw_path: str) -> str:
     return f"inspected:{normalized}:sha256:{digest}"
 
 
+def _is_allowed_executable(raw_executable: str) -> bool:
+    if Path(raw_executable).name.lower() in _ALLOWED_EXECUTABLES:
+        return True
+    try:
+        return Path(raw_executable).resolve() == Path(sys.executable).resolve()
+    except OSError:
+        return False
+
+
 def _validated_commands(mission: dict[str, Any]) -> list[tuple[str, list[str]]]:
     raw_commands = mission.get("validation_commands")
     if not isinstance(raw_commands, list) or not raw_commands:
@@ -102,7 +112,7 @@ def _validated_commands(mission: dict[str, Any]) -> list[tuple[str, list[str]]]:
         if not isinstance(argv, list) or not argv or not all(isinstance(item, str) and item for item in argv):
             raise ValueError(f"validation command {name} requires a non-empty string argv")
         executable = Path(argv[0]).name.lower()
-        if executable not in _ALLOWED_EXECUTABLES:
+        if not _is_allowed_executable(argv[0]):
             raise ValueError(f"validation command {name} uses uncontrolled executable {argv[0]}")
         if executable == "git":
             if len(argv) < 2 or argv[1].lower() not in _READ_ONLY_GIT_COMMANDS:
