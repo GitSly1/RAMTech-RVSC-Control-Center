@@ -29,6 +29,7 @@ _RUNTIME_STATE: dict[str, Any] = {
     "recovery_required": False,
     "recovered_checkpoint": None,
 }
+LEGACY_DANIEL_WP_IDS = frozenset({"SEM-DANIEL-002", "SEM-DANIEL-003"})
 
 
 @dataclass(frozen=True)
@@ -133,7 +134,7 @@ def select_registered_qa_agent(implementer_id: str, project: str) -> RegisteredA
 def is_legacy_daniel_mission(mission: dict[str, Any]) -> bool:
     """Keep historical qualification contracts on Daniel's legacy handlers."""
     wp_id = str(mission.get("wp_id", "")).strip().upper()
-    return wp_id.startswith("SEM-DANIEL-")
+    return wp_id in LEGACY_DANIEL_WP_IDS
 
 
 def _state_store() -> DurableRuntimeStateStore:
