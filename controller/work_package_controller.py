@@ -26,7 +26,12 @@ class GateResult:
 
 
 class QAHandoffError(ValueError):
-    pass
+    def __init__(self, message: str, *, category: str = "qa_handoff_error", response: Any = None, http_status: int | None = None, retryable: bool = False):
+        super().__init__(message)
+        self.category = category
+        self.response = response
+        self.http_status = http_status
+        self.retryable = retryable
 
 
 def transition_allowed(current: str, requested: str) -> bool:
@@ -153,18 +158,18 @@ def build_qa_mission(*, engineering_mission: dict[str, Any], engineering_result:
 
 def validate_qa_result(result: Any) -> tuple[str, tuple[str, ...]]:
     if not isinstance(result, dict):
-        raise QAHandoffError("malformed QA dispatch result")
+        raise QAHandoffError("malformed QA dispatch result", category="malformed_qa_response", response=result)
     verdict = result.get("verdict")
     if verdict not in {QA_ACCEPTED, QA_REJECTED}:
-        raise QAHandoffError("malformed QA evidence: valid verdict missing")
+        raise QAHandoffError("malformed QA evidence: valid verdict missing", category="malformed_qa_response", response=result)
     evidence_value = result.get("evidence")
     if not isinstance(evidence_value, (list, tuple)):
-        raise QAHandoffError("malformed QA evidence: evidence bundle missing")
+        raise QAHandoffError("malformed QA evidence: evidence bundle missing", category="malformed_qa_response", response=result)
     evidence = tuple(str(item).strip() for item in evidence_value if str(item).strip())
     if not evidence:
-        raise QAHandoffError("malformed QA evidence: evidence bundle empty")
+        raise QAHandoffError("malformed QA evidence: evidence bundle empty", category="malformed_qa_response", response=result)
     if result.get("success") is not True:
-        raise QAHandoffError("QA dispatch failed")
+        raise QAHandoffError("QA dispatch failed", category="qa_worker_failure", response=result)
     return verdict, evidence
 
 

@@ -8,13 +8,13 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib import request
+from urllib import error, request
 
 from . import daniel_multi_mission_host as daniel
 from .generic_engineering_worker import execute_mission as execute_generic_engineering
 from .generic_qa_worker import execute_mission as execute_generic_qa
 from .runtime_state_store import DurableRuntimeStateStore
-from .work_package_controller import QA_ACCEPTED, QA_REJECTED, QAHandoffError, build_qa_mission, validate_qa_result
+from .work_package_controller import QA_ACCEPTED, QA_REJECTED, QAHandoffError, build_qa_mission, engineering_commit_sha, validate_qa_result
 
 RVSC_ROOT = Path(__file__).resolve().parents[1]
 AGENT_REGISTRY = RVSC_ROOT / "config" / "agents.yaml"
@@ -226,17 +226,83 @@ def health_payload() -> dict[str, Any]:
     }
 
 
+def _decode_qa_response(raw: bytes, *, http_status: int | None = None) -> dict[str, Any]:
+    text = raw.decode("utf-8", errors="replace")
+    try:
+        decoded = json.loads(text)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise QAHandoffError(
+            "malformed QA dispatch response",
+            category="malformed_qa_response",
+            response=text,
+            http_status=http_status,
+        ) from exc
+    if not isinstance(decoded, dict):
+        raise QAHandoffError(
+            "malformed QA dispatch response",
+            category="malformed_qa_response",
+            response=decoded,
+            http_status=http_status,
+        )
+    return decoded
+
+
 def dispatch_qa_payload(payload: dict[str, Any]) -> dict[str, Any]:
     endpoint = os.environ.get("RVSC_QA_WORKER_URL", "http://127.0.0.1:8771/execute").strip()
     if not endpoint:
-        raise QAHandoffError("QA dispatch endpoint is not configured")
+        raise QAHandoffError("QA dispatch endpoint is not configured", category="transport_failure")
     outbound = request.Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
     timeout = float(os.environ.get("RVSC_QA_DISPATCH_TIMEOUT_SECONDS", "300"))
-    with request.urlopen(outbound, timeout=timeout) as response:
-        decoded = json.loads(response.read().decode("utf-8"))
-    if not isinstance(decoded, dict):
-        raise QAHandoffError("malformed QA dispatch response")
-    return decoded
+    try:
+        with request.urlopen(outbound, timeout=timeout) as response:
+            return _decode_qa_response(response.read(), http_status=response.getcode())
+    except error.HTTPError as exc:
+        decoded = _decode_qa_response(exc.read(), http_status=exc.code)
+        summary = decoded.get("summary")
+        detail = summary.strip() if isinstance(summary, str) and summary.strip() else str(exc.reason)
+        raise QAHandoffError(
+            f"QA worker HTTP {exc.code}: {detail}",
+            category="qa_http_error",
+            response=decoded,
+            http_status=exc.code,
+            retryable=False,
+        ) from exc
+    except QAHandoffError:
+        raise
+    except (error.URLError, TimeoutError, OSError) as exc:
+        reason = getattr(exc, "reason", exc)
+        raise QAHandoffError(
+            f"QA transport failure: {reason}",
+            category="transport_failure",
+            retryable=True,
+        ) from exc
+
+
+def _qa_failure_result(engineering_result: dict[str, Any], mission: dict[str, Any], exc: QAHandoffError) -> dict[str, Any]:
+    branch = str(engineering_result.get("work_branch") or engineering_result.get("branch") or mission.get("work_branch") or mission.get("branch") or "").strip()
+    commit_sha = engineering_commit_sha(engineering_result)
+    project = str(mission.get("project") or engineering_result.get("project") or "").strip()
+    repository = str(mission.get("repository") or engineering_result.get("repository") or "").strip()
+    handoff: dict[str, Any] = {
+        "success": False,
+        "classification": exc.category,
+        "summary": str(exc),
+        "retryable": exc.retryable,
+        "engineering_project": project,
+        "engineering_repository": repository,
+        "engineering_branch": branch,
+        "engineering_commit_sha": commit_sha,
+    }
+    if exc.http_status is not None:
+        handoff["http_status"] = exc.http_status
+    if exc.response is not None:
+        handoff["response"] = exc.response
+    return {
+        **engineering_result,
+        "success": False,
+        "qa_handoff": handoff,
+        "summary": f"engineering completed but automatic QA handoff blocked progression: {exc}",
+    }
 
 
 def automatic_qa_handoff(implementer: RegisteredAgent, mission: dict[str, Any], engineering_result: dict[str, Any]) -> dict[str, Any]:
@@ -246,13 +312,10 @@ def automatic_qa_handoff(implementer: RegisteredAgent, mission: dict[str, Any], 
         _checkpoint("qa_handoff_dispatching", (f"qa_agent:{qa_agent.agent_id}", f"engineering_commit:{qa_mission['engineering_commit_sha']}", f"engineering_branch:{qa_mission['engineering_branch']}"))
         qa_result = dispatch_qa_payload({"protocol": "rvsc.worker.v1", "mission": qa_mission})
         verdict, evidence = validate_qa_result(qa_result)
+    except QAHandoffError as exc:
+        return _qa_failure_result(engineering_result, mission, exc)
     except Exception as exc:
-        return {
-            **engineering_result,
-            "success": False,
-            "qa_handoff": {"success": False, "summary": str(exc)},
-            "summary": f"engineering completed but automatic QA handoff blocked progression: {exc}",
-        }
+        return _qa_failure_result(engineering_result, mission, QAHandoffError(str(exc)))
 
     combined = {
         **engineering_result,
@@ -261,9 +324,12 @@ def automatic_qa_handoff(implementer: RegisteredAgent, mission: dict[str, Any], 
         "qa_evidence": list(evidence),
         "qa_handoff": {
             "success": verdict == QA_ACCEPTED,
+            "classification": "qa_accepted" if verdict == QA_ACCEPTED else "qa_rejected",
             "qa_agent_id": qa_agent.agent_id,
             "verdict": verdict,
             "evidence": list(evidence),
+            "engineering_project": qa_mission["engineering_project"],
+            "engineering_repository": qa_mission["engineering_repository"],
             "engineering_branch": qa_mission["engineering_branch"],
             "engineering_commit_sha": qa_mission["engineering_commit_sha"],
         },
