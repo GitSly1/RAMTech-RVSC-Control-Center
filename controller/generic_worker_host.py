@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
@@ -13,14 +14,16 @@ from urllib import error, request
 from . import daniel_multi_mission_host as daniel
 from .generic_engineering_worker import execute_mission as execute_generic_engineering
 from .generic_qa_worker import execute_mission as execute_generic_qa
-from .runtime_state_store import DurableRuntimeStateStore
+from .runtime_state_store import DurableRuntimeStateStore, sanitize_for_persistence
 from .work_package_controller import QA_ACCEPTED, QA_REJECTED, QAHandoffError, build_qa_mission, engineering_commit_sha, validate_qa_result
 
 RVSC_ROOT = Path(__file__).resolve().parents[1]
 AGENT_REGISTRY = RVSC_ROOT / "config" / "agents.yaml"
 _STATE_LOCK = threading.Lock()
+_EXECUTION_LOCK = threading.Lock()
 _RUNTIME_STATE: dict[str, Any] = {
     "active_mission": None,
+    "active_run_id": None,
     "last_run_id": None,
     "last_activity": None,
     "last_result": None,
@@ -28,8 +31,16 @@ _RUNTIME_STATE: dict[str, Any] = {
     "checkpoint_evidence": (),
     "recovery_required": False,
     "recovered_checkpoint": None,
+    "lifecycle_state": "idle",
+    "recovery_context": None,
+    "recovery_digest": None,
+    "recovery_attempted": False,
+    "engineering_result": None,
+    "qa_dispatch_started": False,
+    "terminal_recovery": None,
 }
 LEGACY_DANIEL_WP_IDS = frozenset({"SEM-DANIEL-002", "SEM-DANIEL-003"})
+_RECOVERY_REQUIRED_FIELDS = ("agent_id", "project", "repository", "wp_id", "run_id")
 
 
 @dataclass(frozen=True)
@@ -169,6 +180,31 @@ def _checkpoint(name: str, evidence: tuple[str, ...] = ()) -> None:
     _set_runtime_state(**updates)
 
 
+def _mission_context(mission: dict[str, Any]) -> dict[str, Any]:
+    sanitized = sanitize_for_persistence(mission)
+    if not isinstance(sanitized, dict):
+        raise ValueError("mission recovery context is invalid")
+    return sanitized
+
+
+def _context_digest(context: dict[str, Any]) -> str:
+    encoded = json.dumps(context, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _validate_recovery_context(context: Any, digest: Any = None) -> dict[str, Any]:
+    if not isinstance(context, dict):
+        raise ValueError("persisted recovery context is missing")
+    for key in _RECOVERY_REQUIRED_FIELDS:
+        value = context.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"persisted recovery context is incomplete: {key}")
+    calculated = _context_digest(context)
+    if not isinstance(digest, str) or digest != calculated:
+        raise ValueError("persisted recovery context digest mismatch")
+    return context
+
+
 def _restore_runtime_state() -> bool:
     restored = _state_store().load(configured_agent().agent_id)
     if restored is None:
@@ -177,17 +213,35 @@ def _restore_runtime_state() -> bool:
     filtered["checkpoint_evidence"] = tuple(filtered.get("checkpoint_evidence", ()))
     previous_checkpoint = filtered.get("last_checkpoint")
     interrupted = bool(filtered.get("active_mission"))
+    recovery_error: str | None = None
+    if interrupted:
+        try:
+            context = _validate_recovery_context(filtered.get("recovery_context"), filtered.get("recovery_digest"))
+            if context["wp_id"] != filtered.get("active_mission") or context["run_id"] != filtered.get("active_run_id"):
+                raise ValueError("persisted recovery identity mismatch")
+            if context["agent_id"].strip().upper() != configured_agent().agent_id.upper():
+                raise ValueError("persisted recovery agent mismatch")
+        except ValueError as exc:
+            recovery_error = str(exc)
     with _STATE_LOCK:
         _RUNTIME_STATE.update(filtered)
         _RUNTIME_STATE["recovery_required"] = interrupted
         _RUNTIME_STATE["recovered_checkpoint"] = previous_checkpoint
+        evidence = list(_RUNTIME_STATE.get("checkpoint_evidence", ()))
         if interrupted:
-            _RUNTIME_STATE["last_checkpoint"] = "runtime_recovered"
-            evidence = list(_RUNTIME_STATE.get("checkpoint_evidence", ()))
             if previous_checkpoint:
                 evidence.append(f"recovered_checkpoint:{previous_checkpoint}")
             evidence.append("durable_state:restored")
-            _RUNTIME_STATE["checkpoint_evidence"] = tuple(evidence)
+            if recovery_error or filtered.get("recovery_attempted") or filtered.get("lifecycle_state") == "recovering":
+                _RUNTIME_STATE["lifecycle_state"] = "recovery_failed"
+                _RUNTIME_STATE["last_checkpoint"] = "recovery_failed"
+                evidence.append(f"recovery_refused:{recovery_error or 'previous recovery was interrupted'}")
+            else:
+                _RUNTIME_STATE["lifecycle_state"] = "recovery_required"
+                _RUNTIME_STATE["last_checkpoint"] = "runtime_recovered"
+        elif filtered.get("lifecycle_state") not in {"recovered", "recovery_failed"}:
+            _RUNTIME_STATE["lifecycle_state"] = "idle"
+        _RUNTIME_STATE["checkpoint_evidence"] = tuple(evidence)
         _RUNTIME_STATE["last_activity"] = _utc_now()
     _persist_runtime_state()
     return True
@@ -212,6 +266,7 @@ def health_payload() -> dict[str, Any]:
         "projects": list(agent.projects),
         "busy": state["active_mission"] is not None,
         "active_mission": state["active_mission"],
+        "active_run_id": state["active_run_id"],
         "last_run_id": state["last_run_id"],
         "last_activity": state["last_activity"],
         "last_result": state["last_result"],
@@ -219,6 +274,8 @@ def health_payload() -> dict[str, Any]:
         "checkpoint_evidence": list(state["checkpoint_evidence"]),
         "recovery_required": state["recovery_required"],
         "recovered_checkpoint": state["recovered_checkpoint"],
+        "lifecycle_state": state["lifecycle_state"],
+        "terminal_recovery": state["terminal_recovery"],
         "durable_state": True,
         "generic_engineering": not agent.qa_eligible,
         "generic_qa": agent.qa_eligible,
@@ -231,19 +288,9 @@ def _decode_qa_response(raw: bytes, *, http_status: int | None = None) -> dict[s
     try:
         decoded = json.loads(text)
     except (json.JSONDecodeError, TypeError) as exc:
-        raise QAHandoffError(
-            "malformed QA dispatch response",
-            category="malformed_qa_response",
-            response=text,
-            http_status=http_status,
-        ) from exc
+        raise QAHandoffError("malformed QA dispatch response", category="malformed_qa_response", response=text, http_status=http_status) from exc
     if not isinstance(decoded, dict):
-        raise QAHandoffError(
-            "malformed QA dispatch response",
-            category="malformed_qa_response",
-            response=decoded,
-            http_status=http_status,
-        )
+        raise QAHandoffError("malformed QA dispatch response", category="malformed_qa_response", response=decoded, http_status=http_status)
     return decoded
 
 
@@ -260,22 +307,12 @@ def dispatch_qa_payload(payload: dict[str, Any]) -> dict[str, Any]:
         decoded = _decode_qa_response(exc.read(), http_status=exc.code)
         summary = decoded.get("summary")
         detail = summary.strip() if isinstance(summary, str) and summary.strip() else str(exc.reason)
-        raise QAHandoffError(
-            f"QA worker HTTP {exc.code}: {detail}",
-            category="qa_http_error",
-            response=decoded,
-            http_status=exc.code,
-            retryable=False,
-        ) from exc
+        raise QAHandoffError(f"QA worker HTTP {exc.code}: {detail}", category="qa_http_error", response=decoded, http_status=exc.code, retryable=False) from exc
     except QAHandoffError:
         raise
     except (error.URLError, TimeoutError, OSError) as exc:
         reason = getattr(exc, "reason", exc)
-        raise QAHandoffError(
-            f"QA transport failure: {reason}",
-            category="transport_failure",
-            retryable=True,
-        ) from exc
+        raise QAHandoffError(f"QA transport failure: {reason}", category="transport_failure", retryable=True) from exc
 
 
 def _qa_failure_result(engineering_result: dict[str, Any], mission: dict[str, Any], exc: QAHandoffError) -> dict[str, Any]:
@@ -297,12 +334,7 @@ def _qa_failure_result(engineering_result: dict[str, Any], mission: dict[str, An
         handoff["http_status"] = exc.http_status
     if exc.response is not None:
         handoff["response"] = exc.response
-    return {
-        **engineering_result,
-        "success": False,
-        "qa_handoff": handoff,
-        "summary": f"engineering completed but automatic QA handoff blocked progression: {exc}",
-    }
+    return {**engineering_result, "success": False, "qa_handoff": handoff, "summary": f"engineering completed but automatic QA handoff blocked progression: {exc}"}
 
 
 def automatic_qa_handoff(implementer: RegisteredAgent, mission: dict[str, Any], engineering_result: dict[str, Any]) -> dict[str, Any]:
@@ -316,7 +348,6 @@ def automatic_qa_handoff(implementer: RegisteredAgent, mission: dict[str, Any], 
         return _qa_failure_result(engineering_result, mission, exc)
     except Exception as exc:
         return _qa_failure_result(engineering_result, mission, QAHandoffError(str(exc)))
-
     combined = {
         **engineering_result,
         "success": verdict == QA_ACCEPTED,
@@ -342,6 +373,14 @@ def automatic_qa_handoff(implementer: RegisteredAgent, mission: dict[str, Any], 
     return combined
 
 
+def _run_worker(configured: RegisteredAgent, mission: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    if configured.qa_eligible:
+        return execute_generic_qa(agent_id=configured.agent_id, agent_name=configured.name, role=configured.role, qa_eligible=True, mission=mission, checkpoint=_checkpoint)
+    if configured.agent_id == "DEV-001" and is_legacy_daniel_mission(mission):
+        return daniel.execute_payload(payload)
+    return execute_generic_engineering(agent_id=configured.agent_id, agent_name=configured.name, role=configured.role, mission=mission, checkpoint=_checkpoint)
+
+
 def execute_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if payload.get("protocol") != "rvsc.worker.v1":
         raise ValueError("unsupported protocol")
@@ -356,30 +395,70 @@ def execute_payload(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"worker configured for {configured.agent_id}, mission requested {requested_id}")
     project = str(mission.get("project", "")).strip()
     validate_worker(configured, project or None)
-    with _STATE_LOCK:
-        recovery_required = bool(_RUNTIME_STATE["recovery_required"])
-        active_mission = _RUNTIME_STATE["active_mission"]
-    if recovery_required:
-        raise RuntimeError(f"durable recovery required for interrupted mission {active_mission}; refusing duplicate dispatch")
-
-    wp_id = str(mission.get("wp_id", "")).strip() or "unknown"
-    _set_runtime_state(active_mission=wp_id, last_result="acknowledged", last_checkpoint="mission_acknowledged", checkpoint_evidence=(), recovery_required=False, recovered_checkpoint=None)
+    recovery = payload.get("recovery") is True
+    if not _EXECUTION_LOCK.acquire(blocking=False):
+        raise RuntimeError("worker execution already in progress")
     try:
-        if configured.qa_eligible:
-            result = execute_generic_qa(agent_id=configured.agent_id, agent_name=configured.name, role=configured.role, qa_eligible=True, mission=mission, checkpoint=_checkpoint)
-        elif configured.agent_id == "DEV-001" and is_legacy_daniel_mission(mission):
-            result = daniel.execute_payload(payload)
+        with _STATE_LOCK:
+            state = dict(_RUNTIME_STATE)
+        context = _mission_context(mission)
+        digest = _context_digest(context)
+        wp_id = str(mission.get("wp_id", "")).strip() or "unknown"
+        run_id = str(mission.get("run_id", "")).strip()
+        if recovery:
+            if not state["recovery_required"]:
+                raise RuntimeError("no interrupted mission requires recovery")
+            if state["recovery_attempted"] or state["lifecycle_state"] in {"recovering", "recovery_failed"}:
+                raise RuntimeError("recovery already attempted; refusing duplicate recovery")
+            persisted = _validate_recovery_context(state["recovery_context"], state["recovery_digest"])
+            if digest != state["recovery_digest"] or context != persisted:
+                raise RuntimeError("recovery mission does not exactly match persisted context")
+            if wp_id != state["active_mission"] or run_id != state["active_run_id"]:
+                raise RuntimeError("recovery mission identity mismatch")
+            _set_runtime_state(lifecycle_state="recovering", recovery_attempted=True, last_checkpoint="recovery_started", checkpoint_evidence=(f"wp_id:{wp_id}", f"run_id:{run_id}"))
         else:
-            result = execute_generic_engineering(agent_id=configured.agent_id, agent_name=configured.name, role=configured.role, mission=mission, checkpoint=_checkpoint)
-        if not configured.qa_eligible and result.get("success"):
-            result = automatic_qa_handoff(configured, mission, result)
-        _set_runtime_state(last_result="success" if result.get("success") else "failed", last_run_id=result.get("run_id") or _RUNTIME_STATE.get("last_run_id"))
+            if state["recovery_required"]:
+                raise RuntimeError(f"durable recovery required for interrupted mission {state['active_mission']}; refusing duplicate dispatch")
+            if state["active_mission"] is not None:
+                raise RuntimeError(f"mission {state['active_mission']} is already executing")
+            _set_runtime_state(active_mission=wp_id, active_run_id=run_id or None, last_result="acknowledged", last_checkpoint="mission_acknowledged", checkpoint_evidence=(), recovery_required=False, recovered_checkpoint=None, lifecycle_state="executing", recovery_context=context, recovery_digest=digest, recovery_attempted=False, engineering_result=None, qa_dispatch_started=False, terminal_recovery=None)
+
+        engineering_result = state.get("engineering_result") if recovery else None
+        if recovery and engineering_result is None and state.get("last_checkpoint") != "mission_acknowledged":
+            raise RuntimeError("interrupted operation has no proven idempotent recovery boundary")
+        if engineering_result is None:
+            engineering_result = _run_worker(configured, mission, payload)
+            _set_runtime_state(engineering_result=engineering_result, last_run_id=engineering_result.get("run_id") or run_id or state.get("last_run_id"), last_checkpoint="engineering_result_persisted")
+        if not configured.qa_eligible and engineering_result.get("success"):
+            if recovery and state.get("qa_dispatch_started"):
+                raise RuntimeError("QA handoff was already dispatched; refusing duplicate QA")
+            _set_runtime_state(qa_dispatch_started=True, last_checkpoint="qa_handoff_reserved")
+            result = automatic_qa_handoff(configured, mission, engineering_result)
+        else:
+            result = engineering_result
+
+        if recovery and not result.get("success"):
+            terminal = {"wp_id": wp_id, "run_id": run_id, "result": "failed", "completed_at": _utc_now()}
+            _set_runtime_state(last_result="failed", lifecycle_state="recovery_failed", recovery_required=True, last_checkpoint="recovery_failed", terminal_recovery=terminal)
+            return result
+        if recovery:
+            terminal = {"wp_id": wp_id, "run_id": run_id, "result": "recovered", "completed_at": _utc_now()}
+            _set_runtime_state(active_mission=None, active_run_id=None, last_result="success", lifecycle_state="recovered", recovery_required=False, last_checkpoint="recovery_completed", terminal_recovery=terminal, engineering_result=None, qa_dispatch_started=False)
+        else:
+            _set_runtime_state(active_mission=None, active_run_id=None, last_result="success" if result.get("success") else "failed", lifecycle_state="idle", recovery_required=False, engineering_result=None, qa_dispatch_started=False)
         return result
     except Exception as exc:
-        _set_runtime_state(last_result="failed", last_checkpoint="execution_failed", checkpoint_evidence=(f"failure:{exc}",))
+        if recovery:
+            with _STATE_LOCK:
+                active_wp = _RUNTIME_STATE.get("active_mission")
+                active_run = _RUNTIME_STATE.get("active_run_id")
+            terminal = {"wp_id": active_wp, "run_id": active_run, "result": "recovery_failed", "completed_at": _utc_now()}
+            _set_runtime_state(last_result="failed", lifecycle_state="recovery_failed", recovery_required=True, last_checkpoint="recovery_failed", checkpoint_evidence=(f"failure:{exc}",), terminal_recovery=terminal)
+        else:
+            _set_runtime_state(active_mission=None, active_run_id=None, last_result="failed", lifecycle_state="idle", recovery_required=False, last_checkpoint="execution_failed", checkpoint_evidence=(f"failure:{exc}",), engineering_result=None, qa_dispatch_started=False)
         raise
     finally:
-        _set_runtime_state(active_mission=None)
+        _EXECUTION_LOCK.release()
 
 
 class GenericWorkerHandler(BaseHTTPRequestHandler):
