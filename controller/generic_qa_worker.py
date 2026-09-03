@@ -81,6 +81,26 @@ def _normalized_origin_url(workspace_root: Path, origin_url: str) -> str:
     return str(path.resolve())
 
 
+def _mission_text(mission: dict[str, Any], key: str) -> str:
+    value = mission.get(key)
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _requested_commit(mission: dict[str, Any]) -> str:
+    reviewed_commit = _mission_text(mission, "reviewed_commit_sha")
+    engineering_commit = _mission_text(mission, "engineering_commit_sha")
+    legacy_commit = _mission_text(mission, "commit_sha")
+
+    if reviewed_commit:
+        for field, value in (("engineering_commit_sha", engineering_commit), ("commit_sha", legacy_commit)):
+            if value and value.lower() != reviewed_commit.lower():
+                raise ValueError(f"{field} does not match reviewed_commit_sha")
+        return reviewed_commit
+    if engineering_commit:
+        raise ValueError("reviewed_commit_sha is required when engineering_commit_sha is supplied")
+    return legacy_commit
+
+
 @contextmanager
 def _review_repository(
     workspace_root: Path,
@@ -265,7 +285,7 @@ def execute_mission(
     validations: list[dict[str, Any]] = []
     try:
         expected_branch = str(mission.get("work_branch", "")).strip()
-        expected_commit = str(mission.get("reviewed_commit_sha", mission.get("commit_sha", ""))).strip()
+        expected_commit = _requested_commit(mission)
         with _review_repository(root, expected_branch, expected_commit) as target:
             review_root, branch, commit_sha, acquisition_evidence = target
             evidence.extend(acquisition_evidence)

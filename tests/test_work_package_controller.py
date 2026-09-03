@@ -48,6 +48,8 @@ class WorkPackageControllerTests(unittest.TestCase):
         self.assertEqual(qa["implementer_id"], "OPS-001")
         self.assertEqual(qa["engineering_branch"], mission["work_branch"])
         self.assertEqual(qa["engineering_commit_sha"], "0123456789abcdef")
+        self.assertEqual(qa["reviewed_commit_sha"], "0123456789abcdef")
+        self.assertEqual(qa["reviewed_commit_sha"], qa["engineering_commit_sha"])
         self.assertEqual(qa["allowed_paths"], mission["allowed_paths"])
         self.assertEqual(qa["validation_commands"], mission["validation_commands"])
 

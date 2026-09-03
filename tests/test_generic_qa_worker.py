@@ -72,6 +72,7 @@ class GenericQAWorkerTests(unittest.TestCase):
         ])
         mission["work_branch"] = branch
         mission["reviewed_commit_sha"] = commit_sha
+        mission["engineering_commit_sha"] = commit_sha
         return mission
 
     def execute(self, mission=None, qa_eligible=True):
@@ -113,6 +114,40 @@ class GenericQAWorkerTests(unittest.TestCase):
         self.assertEqual(self.git_value("rev-parse", "HEAD"), workspace_commit)
         self.assertEqual((self.root / "source.py").read_text(encoding="utf-8"), "VALUE = 1\n")
         self.assertEqual(self.git_value("rev-parse", "refs/heads/engineering-review", cwd=origin), remote_commit)
+
+    def test_legacy_commit_sha_still_acquires_exact_remote_target(self):
+        _, engineering_commit, _ = self.create_remote_target()
+        mission = self.automatic_mission(engineering_commit)
+        mission.pop("reviewed_commit_sha")
+        mission.pop("engineering_commit_sha")
+        mission["commit_sha"] = engineering_commit
+
+        result = self.execute(mission)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["reviewed_branch"], "engineering-review")
+        self.assertEqual(result["reviewed_commit_sha"], engineering_commit)
+        self.assertIn("target_acquisition:origin_fetch", result["evidence"])
+
+    def test_fails_closed_when_canonical_commit_is_missing_from_engineering_handoff(self):
+        _, engineering_commit, _ = self.create_remote_target()
+        mission = self.automatic_mission(engineering_commit)
+        mission.pop("reviewed_commit_sha")
+
+        result = self.execute(mission)
+
+        self.assertEqual(result["verdict"], "QA_REJECTED")
+        self.assertIn("reviewed_commit_sha is required", result["summary"])
+
+    def test_fails_closed_when_engineering_and_reviewed_commits_mismatch(self):
+        _, engineering_commit, _ = self.create_remote_target()
+        mission = self.automatic_mission(engineering_commit)
+        mission["engineering_commit_sha"] = "0" * 40
+
+        result = self.execute(mission)
+
+        self.assertEqual(result["verdict"], "QA_REJECTED")
+        self.assertIn("engineering_commit_sha does not match reviewed_commit_sha", result["summary"])
 
     def test_fails_closed_when_requested_remote_branch_is_unavailable(self):
         _, engineering_commit, _ = self.create_remote_target()

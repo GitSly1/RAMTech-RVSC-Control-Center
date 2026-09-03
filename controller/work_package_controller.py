@@ -150,6 +150,7 @@ def build_qa_mission(*, engineering_mission: dict[str, Any], engineering_result:
         "engineering_run_id": engineering_result.get("run_id"),
         "engineering_branch": branch,
         "engineering_commit_sha": commit_sha,
+        "reviewed_commit_sha": commit_sha,
         "work_branch": branch,
         "authorized_paths": list(engineering_mission.get("authorized_paths") or engineering_mission.get("allowed_paths") or ()),
         "allowed_paths": list(engineering_mission.get("allowed_paths") or engineering_mission.get("authorized_paths") or ()),
