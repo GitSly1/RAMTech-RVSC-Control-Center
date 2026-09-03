@@ -5,7 +5,9 @@ import unittest
 from unittest.mock import patch
 
 from controller.generic_worker_host import (
+    RegisteredAgent,
     configured_agent,
+    execute_payload,
     get_agent,
     health_payload,
     load_agents,
@@ -60,7 +62,7 @@ class GenericWorkerHostTests(unittest.TestCase):
         self.assertEqual(agent.agent_id, "OPS-001")
         self.assertEqual(agent.name, "Noah")
 
-    def test_health_reports_configured_worker(self):
+    def test_health_reports_configured_qa_worker(self):
         with patch.dict(
             os.environ,
             {
@@ -77,6 +79,68 @@ class GenericWorkerHostTests(unittest.TestCase):
         self.assertTrue(payload["worker_enabled"])
         self.assertTrue(payload["qa_eligible"])
         self.assertTrue(payload["ready"])
+        self.assertTrue(payload["generic_qa"])
+        self.assertFalse(payload["generic_engineering"])
+        self.assertEqual(payload["execution_path"], "independent_qa")
+
+    def test_host_routes_qa_eligible_agent_to_qa_worker(self):
+        quinn = RegisteredAgent("QA-001", "Quinn", "QA", ("rvsc",), True, True)
+        payload = {
+            "protocol": "rvsc.worker.v1",
+            "mission": {"agent_id": "QA-001", "project": "rvsc", "wp_id": "QA-WP"},
+        }
+        expected = {"success": True, "run_id": "QA-RUN", "verdict": "QA_ACCEPTED"}
+
+        with patch("controller.generic_worker_host.configured_agent", return_value=quinn), \
+             patch("controller.generic_worker_host._set_runtime_state"), \
+             patch("controller.generic_worker_host.execute_generic_qa", return_value=expected) as qa_worker, \
+             patch("controller.generic_worker_host.execute_generic_engineering") as engineering_worker:
+            result = execute_payload(payload)
+
+        self.assertEqual(result, expected)
+        qa_worker.assert_called_once()
+        engineering_worker.assert_not_called()
+
+    def test_host_preserves_generic_engineering_route(self):
+        noah = RegisteredAgent("OPS-001", "Noah", "DevOps & Runtime", ("rvsc",), True, False)
+        payload = {
+            "protocol": "rvsc.worker.v1",
+            "mission": {"agent_id": "OPS-001", "project": "rvsc", "wp_id": "OPS-WP"},
+        }
+        expected = {"success": True, "run_id": "OPS-RUN"}
+
+        with patch("controller.generic_worker_host.configured_agent", return_value=noah), \
+             patch("controller.generic_worker_host._set_runtime_state"), \
+             patch("controller.generic_worker_host.execute_generic_qa") as qa_worker, \
+             patch("controller.generic_worker_host.execute_generic_engineering", return_value=expected) as engineering_worker:
+            result = execute_payload(payload)
+
+        self.assertEqual(result, expected)
+        engineering_worker.assert_called_once()
+        called = engineering_worker.call_args.kwargs
+        self.assertEqual(called["agent_id"], "OPS-001")
+        self.assertEqual(called["agent_name"], "Noah")
+        qa_worker.assert_not_called()
+
+    def test_host_preserves_daniel_specific_route(self):
+        daniel = RegisteredAgent("DEV-001", "Daniel", "Development", ("semantiq",), True, False)
+        payload = {
+            "protocol": "rvsc.worker.v1",
+            "mission": {"agent_id": "DEV-001", "project": "semantiq", "wp_id": "DEV-WP"},
+        }
+        expected = {"success": True, "run_id": "DEV-RUN"}
+
+        with patch("controller.generic_worker_host.configured_agent", return_value=daniel), \
+             patch("controller.generic_worker_host._set_runtime_state"), \
+             patch("controller.generic_worker_host.daniel.execute_payload", return_value=expected) as daniel_worker, \
+             patch("controller.generic_worker_host.execute_generic_qa") as qa_worker, \
+             patch("controller.generic_worker_host.execute_generic_engineering") as engineering_worker:
+            result = execute_payload(payload)
+
+        self.assertEqual(result, expected)
+        daniel_worker.assert_called_once_with(payload)
+        qa_worker.assert_not_called()
+        engineering_worker.assert_not_called()
 
 
 if __name__ == "__main__":

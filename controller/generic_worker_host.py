@@ -11,6 +11,7 @@ from typing import Any
 
 from . import daniel_multi_mission_host as daniel
 from .generic_engineering_worker import execute_mission as execute_generic_engineering
+from .generic_qa_worker import execute_mission as execute_generic_qa
 from .runtime_state_store import DurableRuntimeStateStore
 
 RVSC_ROOT = Path(__file__).resolve().parents[1]
@@ -156,6 +157,7 @@ def health_payload() -> dict[str, Any]:
     with _STATE_LOCK:
         state = dict(_RUNTIME_STATE)
     credential_ready = bool(os.environ.get("OPENAI_API_KEY", "").strip())
+    execution_path = "independent_qa" if agent.qa_eligible else "generic_engineering"
     return {
         "protocol": "rvsc.worker.health.v1", "worker": agent.agent_id, "name": agent.name,
         "role": agent.role, "service": "rvsc-generic-worker",
@@ -167,7 +169,8 @@ def health_payload() -> dict[str, Any]:
         "last_result": state["last_result"], "last_checkpoint": state["last_checkpoint"],
         "checkpoint_evidence": list(state["checkpoint_evidence"]),
         "recovery_required": state["recovery_required"], "recovered_checkpoint": state["recovered_checkpoint"],
-        "durable_state": True, "generic_engineering": True,
+        "durable_state": True, "generic_engineering": not agent.qa_eligible,
+        "generic_qa": agent.qa_eligible, "execution_path": execution_path,
     }
 
 def execute_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -192,7 +195,9 @@ def execute_payload(payload: dict[str, Any]) -> dict[str, Any]:
     wp_id = str(mission.get("wp_id", "")).strip() or "unknown"
     _set_runtime_state(active_mission=wp_id, last_result="acknowledged", last_checkpoint="mission_acknowledged", checkpoint_evidence=(), recovery_required=False, recovered_checkpoint=None)
     try:
-        if configured.agent_id == "DEV-001":
+        if configured.qa_eligible:
+            result = execute_generic_qa(agent_id=configured.agent_id, agent_name=configured.name, role=configured.role, qa_eligible=configured.qa_eligible, mission=mission, checkpoint=_checkpoint)
+        elif configured.agent_id == "DEV-001":
             result = daniel.execute_payload(payload)
         else:
             result = execute_generic_engineering(agent_id=configured.agent_id, agent_name=configured.name, role=configured.role, mission=mission, checkpoint=_checkpoint)
