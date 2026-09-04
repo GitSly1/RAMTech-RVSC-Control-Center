@@ -1,6 +1,8 @@
+import io
 import json
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -53,6 +55,53 @@ class RuntimeSupervisorTests(unittest.TestCase):
         ):
             with self.subTest(payload=payload):
                 self.assertIsNone(RuntimeSupervisor._normalise_health(payload).agent_id)
+
+    def test_http_execute_sends_exact_worker_protocol_envelope(self):
+        supervisor = self.make_supervisor()
+        config = supervisor.configs[0]
+        mission = self.contract(
+            dependencies=["WP-0"],
+            run_id="RUN-1",
+            mission_scope="bounded",
+        )
+        response = mock.MagicMock()
+        response.status = 200
+        response.read.return_value = b'{"qa_status":"QA_ACCEPTED","qa_agent_id":"QA-001"}'
+        response.__enter__.return_value = response
+        with mock.patch("controller.runtime_supervisor.urllib.request.urlopen", return_value=response) as urlopen:
+            result = supervisor._http_execute(config, mission)
+        request = urlopen.call_args.args[0]
+        body = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(set(body), {"protocol", "mission"})
+        self.assertEqual(body["protocol"], "rvsc.worker.v1")
+        self.assertEqual(body["mission"], mission)
+        for field in (
+            "agent_id", "wp_id", "project", "repository", "base_branch", "work_branch",
+            "objective", "allowed_paths", "acceptance_criteria", "validation_commands",
+            "dependencies", "run_id", "mission_scope",
+        ):
+            self.assertEqual(body["mission"][field], mission[field])
+        for persistence_field in ("mission_id", "metadata", "state", "assigned_worker"):
+            self.assertNotIn(persistence_field, body["mission"])
+        self.assertEqual(result["qa_status"], "QA_ACCEPTED")
+
+    def test_json_http_error_detail_is_durably_observable(self):
+        store = MissionStore()
+        store.add_contract(self.contract(), supported_projects=("rvsc",))
+        supervisor = self.make_supervisor(store)
+        supervisor._execute_requester = supervisor._http_execute
+        error = urllib.error.HTTPError(
+            "http://127.0.0.1:8765/execute", 500, "Internal Server Error", {},
+            io.BytesIO(b'{"detail":"worker contract rejected: missing mission envelope","token":"must-not-be-recorded"}'),
+        )
+        with mock.patch("controller.runtime_supervisor.urllib.request.urlopen", side_effect=error):
+            result = supervisor.work_control_once()
+        self.assertEqual(result["state"], "BLOCKED")
+        self.assertIn("HTTP 500", result["evidence"]["reason"])
+        self.assertIn("missing mission envelope", result["evidence"]["reason"])
+        self.assertNotIn("must-not-be-recorded", result["evidence"]["reason"])
+        self.assertEqual(store.get("WP-1").state, MissionState.BLOCKED)
+        self.assertIn("missing mission envelope", store.get("WP-1").block_reason)
 
     def test_validated_durable_contract_reaches_worker_at_top_level(self):
         store = MissionStore()

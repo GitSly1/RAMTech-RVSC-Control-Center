@@ -512,14 +512,54 @@ class RuntimeSupervisor:
         worker = _field(decision, "worker", "selected_worker") or next((item for item in workers if worker_id is not None and str(_field(item, "worker_id", "agent_id")) == str(worker_id)), None)
         return mission, worker, reason
 
+    @staticmethod
+    def _bounded_http_error_detail(body: bytes) -> str:
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError, TypeError):
+            return ""
+
+        def useful(value: Any, depth: int = 0) -> List[str]:
+            if depth > 3:
+                return []
+            if isinstance(value, str):
+                text = value.strip()
+                return [text] if text else []
+            if isinstance(value, (int, float, bool)):
+                return [str(value)]
+            if isinstance(value, Mapping):
+                details = []
+                for key in ("detail", "message", "error", "reason", "title", "code", "type"):
+                    if key in value:
+                        details.extend(useful(value[key], depth + 1))
+                return details
+            if isinstance(value, list):
+                details = []
+                for item in value[:10]:
+                    details.extend(useful(item, depth + 1))
+                return details
+            return []
+
+        detail = "; ".join(dict.fromkeys(useful(payload)))
+        return detail[:2048]
+
     def _http_execute(self, config: WorkerConfig, mission: Mapping[str, Any]) -> Any:
-        request = urllib.request.Request("http://127.0.0.1:%s/execute" % config.port, data=json.dumps(dict(mission)).encode(), headers={"Accept": "application/json", "Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(request, timeout=self.execute_timeout) as response:
-            status = getattr(response, "status", response.getcode())
-            body = response.read().decode()
-            if not 200 <= status < 300:
-                raise RuntimeSupervisorError("worker execute returned HTTP %s" % status)
-            return json.loads(body) if body else {}
+        envelope = {"protocol": "rvsc.worker.v1", "mission": dict(mission)}
+        request = urllib.request.Request("http://127.0.0.1:%s/execute" % config.port, data=json.dumps(envelope).encode("utf-8"), headers={"Accept": "application/json", "Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=self.execute_timeout) as response:
+                status = getattr(response, "status", response.getcode())
+                body = response.read(8193)
+                if not 200 <= status < 300:
+                    detail = self._bounded_http_error_detail(body[:8192])
+                    message = "worker execute returned HTTP %s" % status
+                    raise RuntimeSupervisorError("%s: %s" % (message, detail) if detail else message)
+                return json.loads(body.decode("utf-8")) if body else {}
+        except urllib.error.HTTPError as exc:
+            body = exc.read(8193)
+            detail = self._bounded_http_error_detail(body[:8192])
+            message = "worker execute returned HTTP %s" % exc.code
+            raise RuntimeSupervisorError("%s: %s" % (message, detail) if detail else message) from exc
 
     @staticmethod
     def _result_tokens(value: Any) -> set:
