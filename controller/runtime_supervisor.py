@@ -1,4 +1,4 @@
-"""Controlled runtime supervision, durable dispatch, and productivity monitoring."""
+"""Controlled runtime supervision, durable dispatch, QA rework, and productivity monitoring."""
 from __future__ import annotations
 
 import argparse
@@ -85,11 +85,7 @@ class WorkerStatus:
 
 
 def golden_team_configs() -> Tuple[WorkerConfig, ...]:
-    return (
-        WorkerConfig("OPS-001", "Noah", 8770, "engineering"),
-        WorkerConfig("DEV-001", "Daniel", 8765, "engineering"),
-        WorkerConfig("QA-001", "Quinn", 8771, "qa"),
-    )
+    return (WorkerConfig("OPS-001", "Noah", 8770, "engineering"), WorkerConfig("DEV-001", "Daniel", 8765, "engineering"), WorkerConfig("QA-001", "Quinn", 8771, "qa"))
 
 
 def _field(value: Any, *names: str, default: Any = None) -> Any:
@@ -138,33 +134,14 @@ def _identity(checkpoint: Any, evidence: Any) -> str:
 
 
 class RuntimeSupervisor:
-    def __init__(
-        self,
-        configs: Optional[Iterable[WorkerConfig]] = None,
-        repository_mappings: Optional[Mapping[str, str]] = None,
-        qa_endpoint: str = DEFAULT_QA_ENDPOINT,
-        worker_module: str = "controller.generic_worker_host",
-        max_restarts: int = 3,
-        health_timeout: float = 1.0,
-        process_factory: Optional[Callable[..., Any]] = None,
-        health_checker: Optional[Callable[[WorkerConfig], Any]] = None,
-        port_checker: Optional[Callable[[int], bool]] = None,
-        mission_store: Optional[Any] = None,
-        mission_store_path: Optional[str] = None,
-        execute_timeout: float = 300.0,
-        execute_requester: Optional[Callable[[WorkerConfig, Mapping[str, Any]], Any]] = None,
-        clock: Optional[Callable[[], float]] = None,
-        stall_threshold: float = 300.0,
-        starvation_threshold: float = 0.0,
-        max_recovery_attempts: int = 2,
-        recovery_handler: Optional[Callable[[WorkerConfig, Any, int], Any]] = None,
-    ) -> None:
+    def __init__(self, configs: Optional[Iterable[WorkerConfig]] = None, repository_mappings: Optional[Mapping[str, str]] = None, qa_endpoint: str = DEFAULT_QA_ENDPOINT, worker_module: str = "controller.generic_worker_host", max_restarts: int = 3, health_timeout: float = 1.0, process_factory: Optional[Callable[..., Any]] = None, health_checker: Optional[Callable[[WorkerConfig], Any]] = None, port_checker: Optional[Callable[[int], bool]] = None, mission_store: Optional[Any] = None, mission_store_path: Optional[str] = None, execute_timeout: float = 300.0, execute_requester: Optional[Callable[[WorkerConfig, Mapping[str, Any]], Any]] = None, clock: Optional[Callable[[], float]] = None, stall_threshold: float = 300.0, starvation_threshold: float = 0.0, max_recovery_attempts: int = 2, recovery_handler: Optional[Callable[[WorkerConfig, Any, int], Any]] = None, max_rework_attempts: int = 2) -> None:
         self._configs = self._validate_configs(tuple(configs or golden_team_configs()))
         self._config_by_id = {c.agent_id: c for c in self._configs}
         self.qa_endpoint = qa_endpoint.rstrip("/")
         self.worker_module = worker_module
         self.max_restarts = max(0, int(max_restarts))
         self.max_recovery_attempts = max(0, int(max_recovery_attempts))
+        self.max_rework_attempts = max(0, int(max_rework_attempts))
         self.health_timeout = max(.01, float(health_timeout))
         self.execute_timeout = max(.01, float(execute_timeout))
         self.stall_threshold = max(0.0, float(stall_threshold))
@@ -189,11 +166,7 @@ class RuntimeSupervisor:
         unknown = set(supplied).difference(REPOSITORY_ENV_KEYS)
         if unknown:
             raise ValueError("unsupported repository mapping keys: %s" % sorted(unknown))
-        self.repository_mappings = {}
-        for key in REPOSITORY_ENV_KEYS:
-            value = supplied.get(key, os.environ.get(key))
-            if value:
-                self.repository_mappings[key] = str(value)
+        self.repository_mappings = {key: str(supplied.get(key, os.environ.get(key))) for key in REPOSITORY_ENV_KEYS if supplied.get(key, os.environ.get(key))}
         if mission_store is not None and mission_store_path is not None:
             raise ValueError("supply mission_store or mission_store_path, not both")
         self.mission_store = mission_store if mission_store_path is None else MissionStore.load_or_create(mission_store_path)
@@ -206,7 +179,8 @@ class RuntimeSupervisor:
         for c in configs:
             if not c.agent_id or not c.name or c.agent_id in ids or c.port in ports or not 1 <= int(c.port) <= 65535:
                 raise ValueError("invalid or duplicate worker configuration: %s" % c.agent_id)
-            ids.add(c.agent_id); ports.add(c.port)
+            ids.add(c.agent_id)
+            ports.add(c.port)
         return tuple(configs)
 
     @property
@@ -221,7 +195,8 @@ class RuntimeSupervisor:
     def build_launch(self, worker: Any) -> Tuple[List[str], Dict[str, str]]:
         c = self._resolve(worker)
         command = list(c.command) if c.command else [sys.executable, "-m", self.worker_module]
-        env = os.environ.copy(); env.update(self.repository_mappings)
+        env = os.environ.copy()
+        env.update(self.repository_mappings)
         env.update({"RVSC_AGENT_ID": c.agent_id, "RVSC_WORKER_AGENT_ID": c.agent_id, "RVSC_AGENT_NAME": c.name, "RVSC_AGENT_ROLE": c.role, "RVSC_WORKER_PORT": str(c.port), "RVSC_PORT": str(c.port)})
         if c.role == "engineering":
             env.update({key: self.qa_endpoint for key in QA_ROUTING_ENV_KEYS})
@@ -287,7 +262,8 @@ class RuntimeSupervisor:
                     try:
                         process.wait(timeout=max(0.0, timeout))
                     except subprocess.TimeoutExpired:
-                        process.kill(); process.wait(timeout=max(0.0, timeout))
+                        process.kill()
+                        process.wait(timeout=max(0.0, timeout))
             finally:
                 self._owned.pop(c.agent_id, None)
             return True
@@ -317,11 +293,16 @@ class RuntimeSupervisor:
             nested = payload.get(key)
             if identity is None and isinstance(nested, Mapping):
                 identity = nested.get("agent_id") or nested.get("identity") or nested.get("id")
-        if "healthy" in payload: healthy = bool(payload["healthy"])
-        elif "ok" in payload: healthy = bool(payload["ok"])
-        elif "ready" in payload: healthy = bool(payload["ready"])
-        elif "status" in payload: healthy = str(payload["status"]).lower() in {"ok", "healthy", "ready", "running"}
-        else: healthy = True
+        if "healthy" in payload:
+            healthy = bool(payload["healthy"])
+        elif "ok" in payload:
+            healthy = bool(payload["ok"])
+        elif "ready" in payload:
+            healthy = bool(payload["ready"])
+        elif "status" in payload:
+            healthy = str(payload["status"]).lower() in {"ok", "healthy", "ready", "running"}
+        else:
+            healthy = True
         return HealthResult(healthy, str(identity) if identity is not None else None, str(payload.get("detail") or payload.get("message") or ""), payload)
 
     def _http_health(self, c: WorkerConfig) -> HealthResult:
@@ -355,7 +336,8 @@ class RuntimeSupervisor:
                     continue
                 count = self._restart_counts[c.agent_id]
                 if count >= self.max_restarts:
-                    self._last_errors[c.agent_id] = "restart limit reached"; continue
+                    self._last_errors[c.agent_id] = "restart limit reached"
+                    continue
                 self._restart_counts[c.agent_id] = count + 1
                 health = self.check_health(c)
                 if health.healthy:
@@ -363,7 +345,8 @@ class RuntimeSupervisor:
                         self._last_errors[c.agent_id] = "identity conflict after exit"
                     continue
                 if self._port_checker(c.port):
-                    self._last_errors[c.agent_id] = "port conflict after exit"; continue
+                    self._last_errors[c.agent_id] = "port conflict after exit"
+                    continue
                 try:
                     self._spawn(c)
                 except Exception as exc:
@@ -375,22 +358,26 @@ class RuntimeSupervisor:
     def _store_missions(self) -> List[Any]:
         for name in ("list_missions", "missions", "all", "list"):
             member = getattr(self.mission_store, name, None)
-            if member is None: continue
+            if member is None:
+                continue
             value = member() if callable(member) else member
-            if isinstance(value, Mapping): value = value.get("missions", list(value.values()))
+            if isinstance(value, Mapping):
+                value = value.get("missions", list(value.values()))
             return list(value or [])
         raise RuntimeSupervisorError("MissionStore does not expose durable missions")
 
     def _authorized_projects(self, c: WorkerConfig, health: HealthResult) -> Tuple[str, ...]:
         projects = {str(v).lower() for v in c.authorized_projects}
         advertised = health.payload.get("authorized_projects") or health.payload.get("projects") or ()
-        if isinstance(advertised, str): advertised = [advertised]
+        if isinstance(advertised, str):
+            advertised = [advertised]
         projects.update(str(v).lower() for v in advertised)
         projects.update(key[5:-5].lower() for key in self.repository_mappings)
         return tuple(sorted(projects))
 
     def _make_worker_state(self, c: WorkerConfig, health: HealthResult, available: bool, mission_id: Optional[str]) -> Any:
-        values = {"worker_id": c.agent_id, "agent_id": c.agent_id, "identity": c.agent_id, "authorized_projects": self._authorized_projects(c, health), "projects": self._authorized_projects(c, health), "available": available, "healthy": True, "active_mission_id": mission_id, "current_mission_id": mission_id}
+        projects = self._authorized_projects(c, health)
+        values = {"worker_id": c.agent_id, "agent_id": c.agent_id, "identity": c.agent_id, "authorized_projects": projects, "projects": projects, "available": available, "healthy": True, "active_mission_id": mission_id, "current_mission_id": mission_id}
         try:
             signature = inspect.signature(WorkerState)
             return WorkerState(**{name: values[name] for name in signature.parameters if name in values})
@@ -400,7 +387,8 @@ class RuntimeSupervisor:
     @staticmethod
     def _dependency_ready(mission: Any, accepted: set) -> bool:
         dependencies = _field(mission, "dependencies", "depends_on", default=()) or ()
-        if isinstance(dependencies, str): dependencies = [dependencies]
+        if isinstance(dependencies, str):
+            dependencies = [dependencies]
         return all(str(v) in accepted for v in dependencies)
 
     def _transition(self, mission: Any, state: str, worker_id: Optional[str] = None, evidence: Optional[Mapping[str, Any]] = None) -> Any:
@@ -408,23 +396,28 @@ class RuntimeSupervisor:
         if not callable(method):
             for name in ("transition_mission", "set_status", "update_status"):
                 method = getattr(self.mission_store, name, None)
-                if callable(method): break
-        if not callable(method): raise RuntimeSupervisorError("MissionStore does not expose lifecycle transitions")
+                if callable(method):
+                    break
+        if not callable(method):
+            raise RuntimeSupervisorError("MissionStore does not expose lifecycle transitions")
         values = {"mission_id": _mission_id(mission), "wp_id": _mission_id(mission), "id": _mission_id(mission), "new_state": state, "state": state, "status": state, "worker_id": worker_id, "agent_id": worker_id, "evidence": dict(evidence or {}), "reason": str((evidence or {}).get("reason", "")) or None, "timestamp": float(self._clock())}
-        signature = inspect.signature(method); args, kwargs = [], {}
+        signature = inspect.signature(method)
+        args, kwargs = [], {}
         for p in signature.parameters.values():
-            if p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD): continue
+            if p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD):
+                continue
             if p.name in values:
-                if p.kind == p.POSITIONAL_ONLY: args.append(values[p.name])
-                else: kwargs[p.name] = values[p.name]
-            elif p.default is p.empty: raise RuntimeSupervisorError("unsupported transition signature")
+                if p.kind == p.POSITIONAL_ONLY:
+                    args.append(values[p.name])
+                else:
+                    kwargs[p.name] = values[p.name]
+            elif p.default is p.empty:
+                raise RuntimeSupervisorError("unsupported transition signature")
         return method(*args, **kwargs)
 
     def _record_progress(self, mission: Any, timestamp: float, checkpoint: Any, evidence: Any) -> Any:
         method = getattr(self.mission_store, "record_progress", None)
-        if callable(method):
-            return method(_mission_id(mission), timestamp=timestamp, checkpoint=checkpoint, evidence=evidence)
-        return mission
+        return method(_mission_id(mission), timestamp=timestamp, checkpoint=checkpoint, evidence=evidence) if callable(method) else mission
 
     def _monitor_active(self, mission: Any, health: HealthResult, now: float) -> Dict[str, Any]:
         worker_id = str(_field(mission, "assigned_worker", "assigned_worker_id", "worker_id", "agent_id", "assignee", default=""))
@@ -441,7 +434,7 @@ class RuntimeSupervisor:
             candidate_identity = _identity(candidate_checkpoint, candidate_evidence)
             if candidate_identity != identity:
                 mission = self._record_progress(mission, now, candidate_checkpoint, candidate_evidence)
-                last, checkpoint, evidence, identity = now, candidate_checkpoint, candidate_evidence, candidate_identity
+                last, checkpoint, evidence = now, candidate_checkpoint, candidate_evidence
         if last is None:
             checkpoint = checkpoint or "lifecycle:%s" % _state_text(mission)
             evidence = evidence if evidence is not None else {"state": _state_text(mission)}
@@ -454,7 +447,7 @@ class RuntimeSupervisor:
         outcome = _field(mission, "recovery_outcome", default=metadata.get("recovery_outcome"))
         recovery_state = "NONE"
         if elapsed > self.stall_threshold:
-            state = "STALLED"; reason = "no material advancement for %.3f seconds" % elapsed
+            state, reason = "STALLED", "no material advancement for %.3f seconds" % elapsed
             if attempts >= self.max_recovery_attempts:
                 recovery_state = "EXHAUSTED"
             elif self._recovery_handler is None:
@@ -465,18 +458,22 @@ class RuntimeSupervisor:
                     outcome = str(self._recovery_handler(self._config_by_id[worker_id], mission, attempts))
                     recovery_state = "ATTEMPTED"
                 except Exception as exc:
-                    outcome = "%s: %s" % (type(exc).__name__, exc); recovery_state = "FAILED"
+                    outcome = "%s: %s" % (type(exc).__name__, exc)
+                    recovery_state = "FAILED"
                 recorder = getattr(self.mission_store, "record_recovery", None)
-                if callable(recorder): recorder(_mission_id(mission), attempts, recovery_state, outcome)
+                if callable(recorder):
+                    recorder(_mission_id(mission), attempts, recovery_state, outcome)
         result = {"state": state, "mission_id": _mission_id(mission), "detail": reason, "reason": reason, "last_material_progress": float(last), "no_progress_duration": elapsed, "material_checkpoint": checkpoint, "material_evidence": _plain(evidence), "recovery_state": recovery_state, "recovery_attempts": attempts, "recovery_outcome": outcome}
         self._work_states[worker_id] = result
         return result
 
     @staticmethod
     def _decision_parts(decision: Any, missions: Sequence[Any], workers: Sequence[Any]) -> Tuple[Any, Any, str]:
-        if decision is None: return None, None, "deterministic dispatch found no eligible pairing"
+        if decision is None:
+            return None, None, "deterministic dispatch found no eligible pairing"
         reason = str(_field(decision, "reason", "detail", default=""))
-        if isinstance(decision, (tuple, list)) and len(decision) >= 2: return decision[0], decision[1], reason
+        if isinstance(decision, (tuple, list)) and len(decision) >= 2:
+            return decision[0], decision[1], reason
         mid, wid = _field(decision, "mission_id", "wp_id"), _field(decision, "worker_id", "agent_id")
         mission = _field(decision, "mission", "selected_mission") or next((m for m in missions if mid is not None and _mission_id(m) == str(mid)), None)
         worker = _field(decision, "worker", "selected_worker") or next((w for w in workers if wid is not None and str(_field(w, "worker_id", "agent_id")) == str(wid)), None)
@@ -485,48 +482,66 @@ class RuntimeSupervisor:
     def _http_execute(self, c: WorkerConfig, mission: Mapping[str, Any]) -> Any:
         request = urllib.request.Request("http://127.0.0.1:%s/execute" % c.port, data=json.dumps(dict(mission)).encode(), headers={"Accept": "application/json", "Content-Type": "application/json"}, method="POST")
         with urllib.request.urlopen(request, timeout=self.execute_timeout) as response:
-            status = getattr(response, "status", response.getcode()); body = response.read().decode()
-            if not 200 <= status < 300: raise RuntimeSupervisorError("worker execute returned HTTP %s" % status)
+            status = getattr(response, "status", response.getcode())
+            body = response.read().decode()
+            if not 200 <= status < 300:
+                raise RuntimeSupervisorError("worker execute returned HTTP %s" % status)
             return json.loads(body) if body else {}
 
     @staticmethod
     def _result_tokens(value: Any) -> set:
-        if isinstance(value, Mapping): return set().union(*(RuntimeSupervisor._result_tokens(v) for v in value.values())) if value else set()
-        if isinstance(value, (list, tuple, set)): return set().union(*(RuntimeSupervisor._result_tokens(v) for v in value)) if value else set()
-        if isinstance(value, Enum): return {str(value.value).upper()}
+        if isinstance(value, Mapping):
+            return set().union(*(RuntimeSupervisor._result_tokens(v) for v in value.values())) if value else set()
+        if isinstance(value, (list, tuple, set)):
+            return set().union(*(RuntimeSupervisor._result_tokens(v) for v in value)) if value else set()
+        if isinstance(value, Enum):
+            return {str(value.value).upper()}
         return {value.upper()} if isinstance(value, str) else set()
 
     @staticmethod
     def _qa_identity(value: Any) -> Optional[str]:
         if isinstance(value, Mapping):
             for key in ("qa_agent_id", "qa_worker_id", "reviewer_id"):
-                if value.get(key): return str(value[key])
+                if value.get(key):
+                    return str(value[key])
             for nested in value.values():
                 found = RuntimeSupervisor._qa_identity(nested)
-                if found: return found
+                if found:
+                    return found
         elif isinstance(value, (list, tuple)):
             for nested in value:
                 found = RuntimeSupervisor._qa_identity(nested)
-                if found: return found
+                if found:
+                    return found
         return None
+
+    def _is_quinn(self, qa_id: Optional[str], implementer: str) -> bool:
+        if not qa_id or qa_id == implementer:
+            return False
+        config = self._config_by_id.get(qa_id)
+        return qa_id == "QA-001" or bool(config and config.role == "qa" and config.name.lower() == "quinn")
 
     def work_control_once(self) -> Dict[str, Any]:
         with self._lock:
             if self.mission_store is None:
                 return dict(self._last_work_control)
-            now = float(self._clock()); missions = self._store_missions()
+            now = float(self._clock())
+            missions = self._store_missions()
             accepted = {_mission_id(m) for m in missions if _state_text(m) in _ACCEPTED_STATES}
             active_by_worker = {}
             for m in missions:
                 if _state_text(m) in _ACTIVE_STATES:
                     worker_id = _field(m, "assigned_worker", "assigned_worker_id", "worker_id", "agent_id", "assignee")
-                    if worker_id: active_by_worker[str(worker_id)] = m
+                    if worker_id:
+                        active_by_worker[str(worker_id)] = m
             workers, health_by_id = [], {}
             for c in self._configs:
-                health = self.check_health(c); health_by_id[c.agent_id] = health
+                health = self.check_health(c)
+                health_by_id[c.agent_id] = health
                 verified = health.healthy and health.agent_id == c.agent_id
                 available = bool(verified and c.role == "engineering" and c.agent_id not in active_by_worker)
-                if verified: workers.append(self._make_worker_state(c, health, available, _mission_id(active_by_worker[c.agent_id]) if c.agent_id in active_by_worker else None))
+                if verified:
+                    workers.append(self._make_worker_state(c, health, available, _mission_id(active_by_worker[c.agent_id]) if c.agent_id in active_by_worker else None))
                 if c.agent_id in active_by_worker:
                     self._monitor_active(active_by_worker[c.agent_id], health, now)
                 elif available:
@@ -541,16 +556,20 @@ class RuntimeSupervisor:
             if mission is None or worker is None:
                 if queued:
                     key = "|".join(sorted(_mission_id(m) for m in queued))
-                    if key != self._starvation_key: self._starvation_key, self._starvation_since = key, now
+                    if key != self._starvation_key:
+                        self._starvation_key, self._starvation_since = key, now
                     elapsed = max(0.0, now - float(self._starvation_since or now))
                     state = "STARVED" if elapsed >= self.starvation_threshold else "AVAILABLE"
                     why = reason or "eligible work has no assignment"
                 else:
-                    self._starvation_key = self._starvation_since = None; elapsed = 0.0; state = "IDLE"; why = reason or "no eligible work"
+                    self._starvation_key = self._starvation_since = None
+                    elapsed, state, why = 0.0, "IDLE", reason or "no eligible work"
                 self._last_work_control = {"state": state, "reason": why, "queued_ready": [_mission_id(m) for m in queued], "no_progress_duration": elapsed, "next_eligible_work": next_work}
                 return dict(self._last_work_control)
             self._starvation_key = self._starvation_since = None
-            worker_id = str(_field(worker, "worker_id", "agent_id", "identity")); c = self._config_by_id.get(worker_id); health = health_by_id.get(worker_id)
+            worker_id = str(_field(worker, "worker_id", "agent_id", "identity"))
+            c = self._config_by_id.get(worker_id)
+            health = health_by_id.get(worker_id)
             project = str(_field(mission, "project", "project_id", default="")).lower()
             if not c or c.role != "engineering" or not health or not health.healthy or health.agent_id != worker_id or project not in self._authorized_projects(c, health):
                 self._last_work_control = {"state": "STARVED", "mission_id": _mission_id(mission), "worker_id": worker_id, "reason": "selected worker failed health, role, availability, or project authorization validation", "next_eligible_work": _mission_id(mission)}
@@ -561,91 +580,117 @@ class RuntimeSupervisor:
             self._work_states[worker_id] = {"state": "WORKING", "mission_id": mission_id, "detail": "dispatch in progress", "last_material_progress": now, "no_progress_duration": 0.0, "material_checkpoint": "lifecycle:running", "material_evidence": {"event": "dispatch_started"}}
             self._last_work_control = {"state": "WORKING", "mission_id": mission_id, "worker_id": worker_id, "reason": "durably reserved and dispatched", "last_material_progress": now}
         try:
-            result = self._execute_requester(c, _plain(current)); tokens = self._result_tokens(result); qa_id = self._qa_identity(result); self_qa = qa_id == worker_id
-            evidence = {"event": "worker_result", "worker_id": worker_id, "result": _plain(result)}
-            if "QA_ACCEPTED" in tokens and qa_id and not self_qa:
-                try:
-                    current = self._transition(current, "completed", worker_id, evidence) or current
-                    current = self._transition(current, "qa_pending", qa_id, evidence) or current
-                    self._transition(current, "accepted", qa_id, evidence)
-                except Exception:
-                    current = self._transition(current, "qa_pending", worker_id, evidence) or current
-                    self._transition(current, "accepted", worker_id, evidence)
+            result = self._execute_requester(c, _plain(current))
+            tokens = self._result_tokens(result)
+            qa_id = self._qa_identity(result)
+            evidence = {"event": "worker_result", "worker_id": worker_id, "qa_worker_id": qa_id, "result": _plain(result)}
+            if ("QA_ACCEPTED" in tokens or "QA_REJECTED" in tokens or "REJECTED" in tokens) and not self._is_quinn(qa_id, worker_id):
+                evidence["reason"] = "QA outcome was not independently attributed to Quinn"
+                self._transition(current, "blocked", worker_id, evidence)
+                final, detail = "BLOCKED", evidence["reason"]
+            elif "QA_ACCEPTED" in tokens:
+                current = self._transition(current, "completed", worker_id, evidence) or current
+                outcome = self.mission_store.process_qa_outcome(mission_id, "QA_ACCEPTED", qa_worker=qa_id or "", evidence=evidence, timestamp=float(self._clock()), max_rework_attempts=self.max_rework_attempts)
                 final, detail = "ACCEPTED", "engineering result independently QA accepted"
-            elif "QA_REJECTED" in tokens or "REJECTED" in tokens or self_qa:
-                try:
-                    current = self._transition(current, "completed", worker_id, evidence) or current
-                    current = self._transition(current, "qa_pending", qa_id or "QA-UNSPECIFIED", evidence) or current
-                    self._transition(current, "rejected", qa_id or "QA-UNSPECIFIED", evidence)
-                except Exception:
-                    current = self._transition(current, "qa_pending", worker_id, evidence) or current
-                    self._transition(current, "rejected", worker_id, evidence)
-                final, detail = "REJECTED", "self-QA prohibited" if self_qa else "QA rejected"
+                evidence["qa_control_outcome"] = outcome.outcome
+            elif "QA_REJECTED" in tokens or "REJECTED" in tokens:
+                current = self._transition(current, "completed", worker_id, evidence) or current
+                outcome = self.mission_store.process_qa_outcome(mission_id, "QA_REJECTED", qa_worker=qa_id or "", evidence=evidence, timestamp=float(self._clock()), max_rework_attempts=self.max_rework_attempts)
+                evidence.update({"qa_control_outcome": outcome.outcome, "corrective_mission_id": outcome.corrective_mission_id, "rework_attempts": outcome.rework_attempts})
+                if outcome.outcome == "REWORK_EXHAUSTED":
+                    final, detail = "EXCEPTION", "QA rework threshold exhausted"
+                else:
+                    final, detail = "REWORK_QUEUED", "QA rejected; corrective engineering work queued"
             else:
-                evidence["reason"] = "worker result did not contain independently attributed QA_ACCEPTED"
-                self._transition(current, "blocked", worker_id, evidence); final, detail = "BLOCKED", evidence["reason"]
+                evidence["reason"] = "worker result did not contain independently attributed QA outcome"
+                self._transition(current, "blocked", worker_id, evidence)
+                final, detail = "BLOCKED", evidence["reason"]
         except Exception as exc:
             evidence = {"event": "dispatch_failure", "worker_id": worker_id, "reason": "%s: %s" % (type(exc).__name__, exc), "retryable": True}
-            try: self._transition(current, "blocked", worker_id, evidence)
-            except Exception as persist: evidence["persistence_error"] = "%s: %s" % (type(persist).__name__, persist)
+            try:
+                self._transition(current, "blocked", worker_id, evidence)
+            except Exception as persist:
+                evidence["persistence_error"] = "%s: %s" % (type(persist).__name__, persist)
             final, detail = "BLOCKED", evidence["reason"]
         with self._lock:
-            self._work_states[worker_id] = {"state": final, "mission_id": mission_id, "detail": detail, "reason": detail, "last_material_progress": float(self._clock()), "no_progress_duration": 0.0, "material_checkpoint": "lifecycle:%s" % final.lower(), "material_evidence": evidence}
-            self._last_work_control = {"state": final, "mission_id": mission_id, "worker_id": worker_id, "reason": detail, "last_material_progress": float(self._clock()), "evidence": evidence}
+            timestamp = float(self._clock())
+            self._work_states[worker_id] = {"state": final, "mission_id": mission_id, "detail": detail, "reason": detail, "last_material_progress": timestamp, "no_progress_duration": 0.0, "material_checkpoint": "lifecycle:%s" % final.lower(), "material_evidence": evidence}
+            self._last_work_control = {"state": final, "mission_id": mission_id, "worker_id": worker_id, "reason": detail, "last_material_progress": timestamp, "evidence": evidence, "next_eligible_work": evidence.get("corrective_mission_id")}
             return dict(self._last_work_control)
 
     dispatch_once = work_control_once
 
     def status(self) -> List[WorkerStatus]:
-        with self._lock: return [self._status_for(c) for c in self._configs]
+        with self._lock:
+            return [self._status_for(c) for c in self._configs]
 
     def status_dicts(self) -> List[Dict[str, Any]]:
         return [s.as_dict() for s in self.status()]
 
     def _status_for(self, c: WorkerConfig, known_health: Optional[HealthResult] = None) -> WorkerStatus:
-        process = self._owned.get(c.agent_id); owned = process is not None and process.poll() is None
-        health = known_health or self.check_health(c); ready = bool(health.healthy and health.agent_id == c.agent_id)
+        process = self._owned.get(c.agent_id)
+        owned = process is not None and process.poll() is None
+        health = known_health or self.check_health(c)
+        ready = bool(health.healthy and health.agent_id == c.agent_id)
         payload = health.as_dict()
-        if c.agent_id in self._last_errors: payload["supervisor_error"] = self._last_errors[c.agent_id]
+        if c.agent_id in self._last_errors:
+            payload["supervisor_error"] = self._last_errors[c.agent_id]
         work = self._work_states.get(c.agent_id, {})
         return WorkerStatus(c.agent_id, c.name, c.port, bool(owned or ready or self._port_checker(c.port)), ready, payload, owned, self._restart_counts[c.agent_id], str(work.get("state", "AVAILABLE" if ready else "IDLE")), work.get("mission_id"), str(work.get("detail", "")), work.get("last_material_progress"), work.get("no_progress_duration"), work.get("material_checkpoint"), work.get("material_evidence"), str(work.get("reason", "")), str(work.get("recovery_state", "NONE")), int(work.get("recovery_attempts", 0)), work.get("recovery_outcome"), self._last_work_control.get("next_eligible_work"))
 
     def _resolve(self, worker: Any) -> WorkerConfig:
         if isinstance(worker, WorkerConfig):
-            if self._config_by_id.get(worker.agent_id) != worker: raise KeyError("worker is not managed by this supervisor")
+            if self._config_by_id.get(worker.agent_id) != worker:
+                raise KeyError("worker is not managed by this supervisor")
             return worker
-        if str(worker) not in self._config_by_id: raise KeyError("unknown worker identity: %s" % worker)
+        if str(worker) not in self._config_by_id:
+            raise KeyError("unknown worker identity: %s" % worker)
         return self._config_by_id[str(worker)]
 
-    def request_shutdown(self) -> None: self._shutdown_requested.set()
+    def request_shutdown(self) -> None:
+        self._shutdown_requested.set()
 
     def run(self, poll_interval: float = 1.0) -> None:
         self.start_all()
         try:
-            while not self._shutdown_requested.wait(max(.05, poll_interval)): self.poll_once()
-        finally: self.stop_all()
+            while not self._shutdown_requested.wait(max(.05, poll_interval)):
+                self.poll_once()
+        finally:
+            self.stop_all()
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="RVSC Golden Team runtime supervisor")
     parser.add_argument("action", nargs="?", choices=("run", "status"), default="run")
-    parser.add_argument("--poll-interval", type=float, default=1.0); parser.add_argument("--max-restarts", type=int, default=3)
-    parser.add_argument("--qa-endpoint", default=DEFAULT_QA_ENDPOINT); parser.add_argument("--worker-module", default="controller.generic_worker_host"); parser.add_argument("--mission-store")
-    parser.add_argument("--stall-threshold", type=float, default=300.0); parser.add_argument("--starvation-threshold", type=float, default=0.0); parser.add_argument("--max-recovery-attempts", type=int, default=2)
+    parser.add_argument("--poll-interval", type=float, default=1.0)
+    parser.add_argument("--max-restarts", type=int, default=3)
+    parser.add_argument("--qa-endpoint", default=DEFAULT_QA_ENDPOINT)
+    parser.add_argument("--worker-module", default="controller.generic_worker_host")
+    parser.add_argument("--mission-store")
+    parser.add_argument("--stall-threshold", type=float, default=300.0)
+    parser.add_argument("--starvation-threshold", type=float, default=0.0)
+    parser.add_argument("--max-recovery-attempts", type=int, default=2)
+    parser.add_argument("--max-rework-attempts", type=int, default=2)
     return parser
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
-    supervisor = RuntimeSupervisor(qa_endpoint=args.qa_endpoint, worker_module=args.worker_module, max_restarts=args.max_restarts, mission_store_path=args.mission_store, stall_threshold=args.stall_threshold, starvation_threshold=args.starvation_threshold, max_recovery_attempts=args.max_recovery_attempts)
+    supervisor = RuntimeSupervisor(qa_endpoint=args.qa_endpoint, worker_module=args.worker_module, max_restarts=args.max_restarts, mission_store_path=args.mission_store, stall_threshold=args.stall_threshold, starvation_threshold=args.starvation_threshold, max_recovery_attempts=args.max_recovery_attempts, max_rework_attempts=args.max_rework_attempts)
     if args.action == "status":
-        print(json.dumps({"workers": supervisor.status_dicts(), "work_control": supervisor.work_control_status}, indent=2, sort_keys=True)); return 0
-    def stop_handler(_signum: int, _frame: Any) -> None: supervisor.request_shutdown()
-    signal.signal(signal.SIGINT, stop_handler); signal.signal(signal.SIGTERM, stop_handler)
-    try: supervisor.run(args.poll_interval)
+        print(json.dumps({"workers": supervisor.status_dicts(), "work_control": supervisor.work_control_status}, indent=2, sort_keys=True))
+        return 0
+    def stop_handler(_signum: int, _frame: Any) -> None:
+        supervisor.request_shutdown()
+    signal.signal(signal.SIGINT, stop_handler)
+    signal.signal(signal.SIGTERM, stop_handler)
+    try:
+        supervisor.run(args.poll_interval)
     except RuntimeConflictError as exc:
-        print("runtime supervisor conflict: %s" % exc, file=sys.stderr); return 2
+        print("runtime supervisor conflict: %s" % exc, file=sys.stderr)
+        return 2
     return 0
 
 
-if __name__ == "__main__": raise SystemExit(main())
+if __name__ == "__main__":
+    raise SystemExit(main())
