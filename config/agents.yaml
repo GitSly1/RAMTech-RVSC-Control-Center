@@ -24,7 +24,7 @@ agents:
     name: Daniel
     role: Lead Software Engineer
     capabilities: [python, desktop_app, application_engineering, refactoring, testing]
-    projects: [semantiq, moxie]
+    projects: [rvsc, semantiq, moxie]
     worker_enabled: true
     qa_eligible: false
 
