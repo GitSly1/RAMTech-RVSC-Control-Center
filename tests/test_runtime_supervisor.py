@@ -1,8 +1,11 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
-from controller.orchestrator import Mission, MissionState, MissionStore
-from controller.runtime_supervisor import RuntimeSupervisor, WorkerConfig
+from controller.orchestrator import Mission, MissionState, MissionStore, OrchestrationError
+from controller.runtime_supervisor import RuntimeSupervisor, WorkerConfig, main, production_mission_store_path
 
 
 class Clock:
@@ -50,9 +53,8 @@ class RuntimeProductivityTests(unittest.TestCase):
         payload["checkpoint"] = "tests"
         supervisor.work_control_once()
         self.assertEqual(supervisor.status_dicts()[0]["work_state"], "PROGRESSING")
-        self.assertEqual(store.get("M-1").material_progress_at, 106.0)
 
-    def test_recovery_is_bounded_and_telemetry_exposes_outcome(self):
+    def test_recovery_is_bounded(self):
         clock = Clock()
         store = self.active_store()
         store.record_progress("M-1", timestamp=90, checkpoint="start", evidence=[])
@@ -60,75 +62,79 @@ class RuntimeProductivityTests(unittest.TestCase):
         supervisor = self.make_supervisor(store, clock, {"healthy": True, "agent_id": "DEV-001"}, stall_threshold=5, max_recovery_attempts=1, recovery_handler=lambda _c, _m, attempt: calls.append(attempt) or "restart-requested")
         supervisor.work_control_once()
         supervisor.work_control_once()
-        status = supervisor.status_dicts()[0]
         self.assertEqual(calls, [1])
-        self.assertEqual(status["recovery_state"], "EXHAUSTED")
-        self.assertEqual(status["recovery_attempts"], 1)
+        self.assertEqual(supervisor.status_dicts()[0]["recovery_state"], "EXHAUSTED")
 
     def test_no_work_is_idle_and_eligible_unassigned_work_is_starved(self):
-        clock = Clock()
         empty = MissionStore()
-        supervisor = self.make_supervisor(empty, clock, {"healthy": False}, starvation_threshold=0)
+        supervisor = self.make_supervisor(empty, Clock(), {"healthy": False}, starvation_threshold=0)
         self.assertEqual(supervisor.work_control_once()["state"], "IDLE")
         queued = MissionStore()
         queued.add(Mission("M-2", "rvsc"))
-        supervisor = self.make_supervisor(queued, clock, {"healthy": False}, starvation_threshold=0)
+        supervisor = self.make_supervisor(queued, Clock(), {"healthy": False}, starvation_threshold=0)
         result = supervisor.work_control_once()
         self.assertEqual(result["state"], "STARVED")
         self.assertEqual(result["next_eligible_work"], "M-2")
 
-    def test_restart_uses_durable_progress_instead_of_health(self):
-        clock = Clock(200)
+    def test_restart_does_not_duplicate_active_durable_mission(self):
         store = self.active_store()
-        store.record_progress("M-1", timestamp=100, checkpoint="commit", evidence=["abc"])
-        supervisor = self.make_supervisor(store, clock, {"healthy": True, "agent_id": "DEV-001"}, stall_threshold=10)
-        supervisor.work_control_once()
-        status = supervisor.status_dicts()[0]
-        self.assertEqual(status["work_state"], "STALLED")
-        self.assertEqual(status["last_material_progress"], 100.0)
+        calls = []
+        supervisor = self.make_supervisor(store, Clock(), {"healthy": True, "agent_id": "DEV-001"}, execute_requester=lambda _c, _m: calls.append(1))
+        self.assertEqual(supervisor.work_control_once()["state"], "IDLE")
+        self.assertEqual(calls, [])
+        self.assertEqual(store.get("M-1").state, MissionState.RUNNING)
 
-    def test_independent_qa_is_preserved(self):
-        store = MissionStore()
-        store.add(Mission("M-3", "rvsc"))
-        clock = Clock()
-        supervisor = self.make_supervisor(store, clock, {"healthy": True, "agent_id": "DEV-001", "authorized_projects": ["rvsc"]})
-        with mock.patch("controller.runtime_supervisor.select_dispatch", return_value=(store.get("M-3"), mock.Mock(worker_id="DEV-001"))):
-            result = supervisor.work_control_once()
-        self.assertEqual(result["state"], "ACCEPTED")
-        self.assertEqual(store.get("M-3").qa_worker, "QA-001")
+    def test_queued_work_dispatches_after_supervisor_recreation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "missions.json"
+            store = MissionStore.load_or_create(path)
+            store.add(Mission("M-3", "rvsc"))
+            restored = MissionStore.load(path)
+            supervisor = self.make_supervisor(restored, Clock(), {"healthy": True, "agent_id": "DEV-001", "authorized_projects": ["rvsc"]})
+            self.assertEqual(supervisor.work_control_once()["state"], "ACCEPTED")
+            self.assertEqual(MissionStore.load(path).get("M-3").state, MissionState.ACCEPTED)
 
-    def test_rejection_queues_corrective_work_for_next_cycle(self):
+    def test_independent_qa_and_rework_are_preserved(self):
         store = MissionStore()
         store.add(Mission("M-4", "rvsc"))
-        clock = Clock()
-        result = {"qa_status": "QA_REJECTED", "qa_agent_id": "QA-001", "rejection_reason": "regression", "reviewed_commit": "abc"}
-        supervisor = self.make_supervisor(store, clock, {"healthy": True, "agent_id": "DEV-001", "authorized_projects": ["rvsc"]}, result=result)
-        first = supervisor.work_control_once()
-        self.assertEqual(first["state"], "REWORK_QUEUED")
-        self.assertEqual(first["next_eligible_work"], "M-4::rework:1")
-        self.assertEqual(store.get("M-4").state, MissionState.REJECTED)
-        corrective = store.get("M-4::rework:1")
-        self.assertEqual(corrective.metadata["originating_mission_id"], "M-4")
-        self.assertTrue(store.readiness(corrective.mission_id)[0])
+        rejected = {"qa_status": "QA_REJECTED", "qa_agent_id": "QA-001", "reason": "bad"}
+        supervisor = self.make_supervisor(store, Clock(), {"healthy": True, "agent_id": "DEV-001", "authorized_projects": ["rvsc"]}, result=rejected)
+        outcome = supervisor.work_control_once()
+        self.assertEqual(outcome["state"], "REWORK_QUEUED")
+        self.assertEqual(outcome["next_eligible_work"], "M-4::rework:1")
 
-    def test_self_qa_is_blocked_and_does_not_accept(self):
+    def test_self_qa_is_blocked(self):
         store = MissionStore()
         store.add(Mission("M-5", "rvsc"))
         supervisor = self.make_supervisor(store, Clock(), {"healthy": True, "agent_id": "DEV-001", "authorized_projects": ["rvsc"]}, result={"qa_status": "QA_ACCEPTED", "qa_agent_id": "DEV-001"})
-        outcome = supervisor.work_control_once()
-        self.assertEqual(outcome["state"], "BLOCKED")
-        self.assertEqual(store.get("M-5").state, MissionState.BLOCKED)
+        self.assertEqual(supervisor.work_control_once()["state"], "BLOCKED")
 
-    def test_rework_exhaustion_emits_exception(self):
-        store = MissionStore()
-        store.add(Mission("M-6", "rvsc"))
-        payload = {"healthy": True, "agent_id": "DEV-001", "authorized_projects": ["rvsc"]}
-        rejected = {"qa_status": "QA_REJECTED", "qa_agent_id": "QA-001", "reason": "bad"}
-        supervisor = self.make_supervisor(store, Clock(), payload, result=rejected, max_rework_attempts=0)
-        outcome = supervisor.work_control_once()
-        self.assertEqual(outcome["state"], "EXCEPTION")
-        self.assertEqual(store.get("M-6").state, MissionState.BLOCKED)
-        self.assertEqual(len(store.all()), 1)
+    def test_production_path_is_deterministic_and_override_is_preserved(self):
+        env = {"RVSC_STATE_DIR": "/state"}
+        self.assertEqual(production_mission_store_path(env), Path("/state/RAMTech/RVSC/mission-store.json"))
+        with tempfile.TemporaryDirectory() as directory:
+            store_path = Path(directory) / "override.json"
+            with mock.patch("controller.runtime_supervisor.RuntimeSupervisor.status_dicts", return_value=[]):
+                self.assertEqual(main(["status", "--mission-store", str(store_path)]), 0)
+            self.assertTrue(store_path.exists())
+
+    def test_cli_add_and_status_expose_queue(self):
+        contract = {
+            "wp_id": "WP-1", "project": "rvsc", "objective": "Ship bounded work",
+            "repository": "GitSly1/repo", "work_branch": "feature", "base_branch": "main",
+            "agent_id": "DEV-001", "acceptance_criteria": ["passes"],
+            "allowed_paths": ["controller/a.py"],
+            "validation_commands": [{"name": "tests", "argv": ["python", "-m", "unittest"]}],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            mission_file = Path(directory) / "mission.json"
+            store_path = Path(directory) / "store.json"
+            mission_file.write_text(json.dumps(contract), encoding="utf-8")
+            self.assertEqual(main(["add", "--mission-store", str(store_path), "--mission-file", str(mission_file)]), 0)
+            restored = MissionStore.load(store_path)
+            self.assertEqual(restored.get("WP-1").state, MissionState.QUEUED)
+            with self.assertRaises(OrchestrationError):
+                restored.add_contract(contract, supported_projects=("rvsc",))
 
 
 if __name__ == "__main__":

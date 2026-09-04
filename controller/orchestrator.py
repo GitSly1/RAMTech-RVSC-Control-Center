@@ -5,7 +5,7 @@ import os
 import tempfile
 from dataclasses import asdict, dataclass, field
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping, Optional
 
 
@@ -43,11 +43,11 @@ def worker_signal_event(signal: Any) -> Event:
 
 
 def resolve_trigger(config: Mapping[str, Any], event: Event) -> Mapping[str, Any]:
-    matches = [t for t in config.get("triggers", []) if t.get("event") == event.event_type and _matches(t.get("when", {}), event.payload)]
+    matches = [trigger for trigger in config.get("triggers", []) if trigger.get("event") == event.event_type and _matches(trigger.get("when", {}), event.payload)]
     if not matches:
         raise OrchestrationError("no trigger matched event: %s" % event.event_type)
     if len(matches) > 1:
-        raise OrchestrationError("ambiguous trigger match: %s" % ", ".join(str(v.get("id")) for v in matches))
+        raise OrchestrationError("ambiguous trigger match: %s" % ", ".join(str(value.get("id")) for value in matches))
     return matches[0]
 
 
@@ -64,7 +64,7 @@ def build_execution_plan(config: Mapping[str, Any], event: Event) -> ExecutionPl
 
 
 def dispatch_order(projects: Mapping[str, Mapping[str, Any]]) -> tuple[str, ...]:
-    return tuple(k for k, _ in sorted(projects.items(), key=lambda item: (_priority_rank(item[1].get("priority", "P999")), item[0])))
+    return tuple(key for key, _ in sorted(projects.items(), key=lambda item: (_priority_rank(item[1].get("priority", "P999")), item[0])))
 
 
 class MissionState(str, Enum):
@@ -102,6 +102,73 @@ def _priority_rank(value: Any) -> int:
         return 999
 
 
+def _required_string(contract: Mapping[str, Any], name: str) -> str:
+    value = contract.get(name)
+    if not isinstance(value, str) or not value.strip():
+        raise OrchestrationError("mission contract requires non-empty %s" % name)
+    if "\x00" in value:
+        raise OrchestrationError("mission contract %s contains an unsafe null character" % name)
+    return value.strip()
+
+
+def _required_string_list(contract: Mapping[str, Any], name: str) -> list[str]:
+    value = contract.get(name)
+    if not isinstance(value, list) or not value:
+        raise OrchestrationError("mission contract requires a non-empty %s list" % name)
+    normalized = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip() or "\x00" in item:
+            raise OrchestrationError("mission contract %s entries must be non-empty strings" % name)
+        normalized.append(item.strip())
+    if len(set(normalized)) != len(normalized):
+        raise OrchestrationError("mission contract %s entries must be unique" % name)
+    return normalized
+
+
+def validate_mission_contract(contract: Mapping[str, Any], supported_projects: Iterable[str]) -> dict[str, Any]:
+    if not isinstance(contract, Mapping):
+        raise OrchestrationError("mission contract must be an object")
+    data = dict(contract)
+    mission_id = _required_string(data, "wp_id")
+    project = _required_string(data, "project").lower()
+    aliases = (("mission_id", mission_id), ("id", mission_id), ("project_id", project))
+    for alias, expected in aliases:
+        if alias in data and str(data[alias]).strip().lower() != expected.lower():
+            raise OrchestrationError("ambiguous mission identity or project definition")
+    authorized = {str(value).strip().lower() for value in supported_projects if str(value).strip()}
+    if project not in authorized:
+        raise OrchestrationError("unsupported project mission: %s" % project)
+    for name in ("objective", "repository", "work_branch", "base_branch", "agent_id"):
+        _required_string(data, name)
+    acceptance = _required_string_list(data, "acceptance_criteria")
+    allowed_paths = _required_string_list(data, "allowed_paths")
+    for raw_path in allowed_paths:
+        normalized = raw_path.replace("\\", "/")
+        path = PurePosixPath(normalized)
+        if path.is_absolute() or ".." in path.parts or normalized.startswith("~") or ":" in path.parts[0]:
+            raise OrchestrationError("mission contract contains an unsafe allowed path: %s" % raw_path)
+    commands = data.get("validation_commands")
+    if not isinstance(commands, list) or not commands:
+        raise OrchestrationError("mission contract requires validation_commands")
+    for command in commands:
+        if not isinstance(command, Mapping) or not isinstance(command.get("argv"), list) or not command["argv"]:
+            raise OrchestrationError("each validation command requires a non-empty argv list")
+        if any(not isinstance(argument, str) or not argument.strip() or "\x00" in argument for argument in command["argv"]):
+            raise OrchestrationError("validation command argv entries must be non-empty strings")
+    dependencies = data.get("dependencies", [])
+    if not isinstance(dependencies, list) or any(not isinstance(value, str) or not value.strip() for value in dependencies):
+        raise OrchestrationError("mission dependencies must be a list of non-empty strings")
+    dependencies = [value.strip() for value in dependencies]
+    if len(set(dependencies)) != len(dependencies) or mission_id in dependencies:
+        raise OrchestrationError("mission dependencies must be unique and cannot include the mission")
+    data["wp_id"] = mission_id
+    data["project"] = project
+    data["acceptance_criteria"] = acceptance
+    data["allowed_paths"] = allowed_paths
+    data["dependencies"] = dependencies
+    return data
+
+
 @dataclass
 class Mission:
     mission_id: str
@@ -132,12 +199,12 @@ class Mission:
 
     def __post_init__(self) -> None:
         self.mission_id = str(self.mission_id).strip()
-        self.project_id = str(self.project_id).strip()
+        self.project_id = str(self.project_id).strip().lower()
         try:
             self.state = MissionState(self.state)
         except ValueError as exc:
             raise OrchestrationError("unknown mission state: %s" % self.state) from exc
-        self.dependencies = tuple(str(v).strip() for v in self.dependencies)
+        self.dependencies = tuple(str(value).strip() for value in self.dependencies)
         self.dependency_policy = str(self.dependency_policy).strip().lower()
         self.priority = _priority_rank(self.priority)
         self.metadata = dict(self.metadata)
@@ -145,7 +212,7 @@ class Mission:
         self.rework_attempts = max(0, int(self.rework_attempts))
         if not self.mission_id or not self.project_id:
             raise OrchestrationError("mission requires mission_id and project_id")
-        if any(not v for v in self.dependencies) or len(set(self.dependencies)) != len(self.dependencies):
+        if any(not value for value in self.dependencies) or len(set(self.dependencies)) != len(self.dependencies):
             raise OrchestrationError("mission dependencies must be non-empty and unique")
         if self.mission_id in self.dependencies:
             raise OrchestrationError("mission cannot depend on itself")
@@ -190,20 +257,33 @@ class MissionStore:
 
     @classmethod
     def load_or_create(cls, path: os.PathLike[str] | str) -> "MissionStore":
-        return cls.load(path) if Path(path).exists() else cls(path)
+        destination = Path(path)
+        if destination.exists():
+            return cls.load(destination)
+        store = cls(destination)
+        store.save()
+        return store
 
     def _persist(self) -> None:
         if self.path is not None:
             self.save()
 
     def add(self, mission: Mission) -> Mission:
+        if not isinstance(mission, Mission):
+            raise OrchestrationError("mission store accepts Mission instances")
         if mission.mission_id in self._missions:
             raise OrchestrationError("duplicate mission: %s" % mission.mission_id)
         if mission.sequence < 0:
             mission.sequence = self._next_sequence
         self._next_sequence = max(self._next_sequence, mission.sequence + 1)
         self._missions[mission.mission_id] = mission
+        self._persist()
         return mission
+
+    def add_contract(self, contract: Mapping[str, Any], *, supported_projects: Iterable[str]) -> Mission:
+        data = validate_mission_contract(contract, supported_projects)
+        mission = Mission(data["wp_id"], data["project"], dependencies=tuple(data.get("dependencies", ())), dependency_policy=str(data.get("dependency_policy", "accepted")), priority=data.get("priority", 999), metadata={"contract": data, "requires_independent_qa": True, "ingestion": "validated_cli"})
+        return self.add(mission)
 
     def get(self, mission_id: str) -> Mission:
         try:
@@ -212,7 +292,7 @@ class MissionStore:
             raise OrchestrationError("mission not found: %s" % mission_id) from exc
 
     def all(self) -> tuple[Mission, ...]:
-        return tuple(sorted(self._missions.values(), key=lambda m: (m.sequence, m.mission_id)))
+        return tuple(sorted(self._missions.values(), key=lambda mission: (mission.sequence, mission.mission_id)))
 
     list_missions = all
 
@@ -223,12 +303,12 @@ class MissionStore:
         acceptable = {MissionState.ACCEPTED}
         if mission.dependency_policy == "completed":
             acceptable.update({MissionState.COMPLETED, MissionState.QA_PENDING})
-        for dep_id in mission.dependencies:
-            dep = self._missions.get(dep_id)
-            if dep is None:
-                return False, "dependency_missing:%s" % dep_id
-            if dep.state not in acceptable:
-                return False, "dependency_not_%s:%s:%s" % (mission.dependency_policy, dep_id, dep.state.value)
+        for dependency_id in mission.dependencies:
+            dependency = self._missions.get(dependency_id)
+            if dependency is None:
+                return False, "dependency_missing:%s" % dependency_id
+            if dependency.state not in acceptable:
+                return False, "dependency_not_%s:%s:%s" % (mission.dependency_policy, dependency_id, dependency.state.value)
         return True, None
 
     def record_progress(self, mission_id: str, *, timestamp: float, checkpoint: Any, evidence: Any) -> Mission:
@@ -278,7 +358,7 @@ class MissionStore:
                 raise OrchestrationError("mission is not dispatch-eligible: %s" % blocked)
             if not worker:
                 raise OrchestrationError("assignment requires worker_id")
-            excluded = {str(v) for v in mission.metadata.get("excluded_worker_ids", ())}
+            excluded = {str(value) for value in mission.metadata.get("excluded_worker_ids", ())}
             if worker in excluded:
                 raise OrchestrationError("worker is excluded from corrective engineering assignment")
             mission.assigned_worker = mission.implementer = worker
@@ -392,7 +472,7 @@ class MissionStore:
         if destination is None:
             raise OrchestrationError("mission store path is required")
         destination.parent.mkdir(parents=True, exist_ok=True)
-        document = {"schema_version": self.SCHEMA_VERSION, "missions": [m.to_dict() for m in self.all()]}
+        document = {"schema_version": self.SCHEMA_VERSION, "missions": [mission.to_dict() for mission in self.all()]}
         temporary_name = None
         try:
             with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=destination.parent, prefix=".%s." % destination.name, suffix=".tmp", delete=False) as handle:
@@ -424,11 +504,12 @@ class MissionStore:
         raw = document.get("missions")
         if not isinstance(raw, list):
             raise OrchestrationError("mission store requires a missions list")
-        store = cls(source)
+        store = cls()
         for item in raw:
             if not isinstance(item, Mapping):
                 raise OrchestrationError("invalid mission record")
             store.add(Mission.from_dict(item))
+        store.path = source
         return store
 
 
@@ -463,33 +544,33 @@ class DispatchDecision:
 
 
 def select_dispatch(store: MissionStore, workers: Iterable[WorkerState | Mapping[str, Any]]) -> DispatchDecision:
-    missions = [m for m in store.all() if store.readiness(m.mission_id)[0]]
-    missions.sort(key=lambda m: (m.priority, m.sequence, m.mission_id))
+    missions = [mission for mission in store.all() if store.readiness(mission.mission_id)[0]]
+    missions.sort(key=lambda mission: (mission.priority, mission.sequence, mission.mission_id))
     if not missions:
         return DispatchDecision("idle", reason="no_eligible_work")
     normalized = []
     for worker in workers:
         if isinstance(worker, Mapping):
-            wid = str(worker.get("worker_id", worker.get("agent_id", ""))).strip()
+            worker_id = str(worker.get("worker_id", worker.get("agent_id", ""))).strip()
             projects = worker.get("authorized_projects", worker.get("projects", ()))
             available = bool(worker.get("available", True))
             healthy = bool(worker.get("healthy", True))
             active = worker.get("active_mission_id")
         else:
-            wid, projects, available, healthy, active = worker.worker_id.strip(), worker.authorized_projects, worker.available, worker.healthy, worker.active_mission_id
-        if not wid:
+            worker_id, projects, available, healthy, active = worker.worker_id.strip(), worker.authorized_projects, worker.available, worker.healthy, worker.active_mission_id
+        if not worker_id:
             raise OrchestrationError("worker requires worker_id")
         if isinstance(projects, str):
             projects = (projects,)
-        normalized.append((wid, tuple(str(p).strip() for p in projects), available, healthy, active))
-    ids = [w[0] for w in normalized]
+        normalized.append((worker_id, tuple(str(project).strip().lower() for project in projects), available, healthy, active))
+    ids = [worker[0] for worker in normalized]
     if len(ids) != len(set(ids)):
         raise OrchestrationError("worker ids must be unique")
     for mission in missions:
-        excluded = {str(v) for v in mission.metadata.get("excluded_worker_ids", ())}
-        for wid, projects, available, healthy, active in sorted(normalized):
-            if wid not in excluded and available and healthy and not active and mission.project_id in projects:
-                return DispatchDecision("dispatch", mission.mission_id, wid, "eligible_worker_selected")
+        excluded = {str(value) for value in mission.metadata.get("excluded_worker_ids", ())}
+        for worker_id, projects, available, healthy, active in sorted(normalized):
+            if worker_id not in excluded and available and healthy and not active and mission.project_id in projects:
+                return DispatchDecision("dispatch", mission.mission_id, worker_id, "eligible_worker_selected")
     return DispatchDecision("starved", reason="eligible_work_has_no_authorized_available_worker")
 
 

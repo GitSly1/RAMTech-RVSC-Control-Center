@@ -15,14 +15,16 @@ import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass, field, is_dataclass
 from enum import Enum
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-from controller.orchestrator import MissionStore, WorkerState, select_dispatch
+from controller.orchestrator import MissionStore, OrchestrationError, WorkerState, select_dispatch
 
 REPOSITORY_ENV_KEYS = ("RVSC_RVSC_REPO", "RVSC_SEMANTIQ_REPO", "RVSC_MOXIE_REPO")
 QA_ROUTING_ENV_KEYS = ("RVSC_QA_ENDPOINT", "RVSC_QA_URL", "RVSC_QA_WORKER_ENDPOINT", "RVSC_QA_WORKER_URL")
 DEFAULT_QA_ENDPOINT = "http://127.0.0.1:8771/execute"
+SUPPORTED_PROJECTS = ("rvsc", "semantiq", "moxie")
 _ACTIVE_STATES = {"assigned", "running", "qa_pending", "qa_review"}
 _QUEUED_STATES = {"queued", "retryable"}
 _ACCEPTED_STATES = {"accepted", "qa_accepted"}
@@ -85,7 +87,24 @@ class WorkerStatus:
 
 
 def golden_team_configs() -> Tuple[WorkerConfig, ...]:
-    return (WorkerConfig("OPS-001", "Noah", 8770, "engineering"), WorkerConfig("DEV-001", "Daniel", 8765, "engineering"), WorkerConfig("QA-001", "Quinn", 8771, "qa"))
+    return (
+        WorkerConfig("OPS-001", "Noah", 8770, "engineering"),
+        WorkerConfig("DEV-001", "Daniel", 8765, "engineering"),
+        WorkerConfig("QA-001", "Quinn", 8771, "qa"),
+    )
+
+
+def production_mission_store_path(environ: Optional[Mapping[str, str]] = None) -> Path:
+    """Return the deterministic per-user production store location."""
+    env = os.environ if environ is None else environ
+    configured_root = str(env.get("RVSC_STATE_DIR", "")).strip()
+    if configured_root:
+        root = Path(configured_root).expanduser()
+    elif os.name == "nt":
+        root = Path(env.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+    else:
+        root = Path(env.get("XDG_STATE_HOME") or (Path.home() / ".local" / "state"))
+    return root / "RAMTech" / "RVSC" / "mission-store.json"
 
 
 def _field(value: Any, *names: str, default: Any = None) -> Any:
@@ -157,7 +176,6 @@ class RuntimeSupervisor:
         self._intentional_stops = set()
         self._last_errors: Dict[str, str] = {}
         self._work_states: Dict[str, Dict[str, Any]] = {}
-        self._last_work_control = {"state": "DISABLED", "reason": "no mission store configured"}
         self._starvation_key: Optional[str] = None
         self._starvation_since: Optional[float] = None
         self._lock = threading.RLock()
@@ -170,6 +188,7 @@ class RuntimeSupervisor:
         if mission_store is not None and mission_store_path is not None:
             raise ValueError("supply mission_store or mission_store_path, not both")
         self.mission_store = mission_store if mission_store_path is None else MissionStore.load_or_create(mission_store_path)
+        self._last_work_control = {"state": "IDLE", "reason": "durable mission store configured; no work-control cycle completed"} if self.mission_store is not None else {"state": "DISABLED", "reason": "no mission store configured"}
 
     @staticmethod
     def _validate_configs(configs: Sequence[WorkerConfig]) -> Tuple[WorkerConfig, ...]:
@@ -403,15 +422,15 @@ class RuntimeSupervisor:
         values = {"mission_id": _mission_id(mission), "wp_id": _mission_id(mission), "id": _mission_id(mission), "new_state": state, "state": state, "status": state, "worker_id": worker_id, "agent_id": worker_id, "evidence": dict(evidence or {}), "reason": str((evidence or {}).get("reason", "")) or None, "timestamp": float(self._clock())}
         signature = inspect.signature(method)
         args, kwargs = [], {}
-        for p in signature.parameters.values():
-            if p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD):
+        for parameter in signature.parameters.values():
+            if parameter.kind in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD):
                 continue
-            if p.name in values:
-                if p.kind == p.POSITIONAL_ONLY:
-                    args.append(values[p.name])
+            if parameter.name in values:
+                if parameter.kind == parameter.POSITIONAL_ONLY:
+                    args.append(values[parameter.name])
                 else:
-                    kwargs[p.name] = values[p.name]
-            elif p.default is p.empty:
+                    kwargs[parameter.name] = values[parameter.name]
+            elif parameter.default is parameter.empty:
                 raise RuntimeSupervisorError("unsupported transition signature")
         return method(*args, **kwargs)
 
@@ -438,7 +457,7 @@ class RuntimeSupervisor:
         if last is None:
             checkpoint = checkpoint or "lifecycle:%s" % _state_text(mission)
             evidence = evidence if evidence is not None else {"state": _state_text(mission)}
-            mission = self._record_progress(mission, now, checkpoint, evidence)
+            self._record_progress(mission, now, checkpoint, evidence)
             last = now
         elapsed = max(0.0, now - float(last))
         state = "PROGRESSING" if elapsed == 0 else "WORKING"
@@ -521,6 +540,47 @@ class RuntimeSupervisor:
         config = self._config_by_id.get(qa_id)
         return qa_id == "QA-001" or bool(config and config.role == "qa" and config.name.lower() == "quinn")
 
+    def ingest_mission(self, contract: Mapping[str, Any]) -> Dict[str, Any]:
+        if self.mission_store is None or not isinstance(self.mission_store, MissionStore):
+            raise RuntimeSupervisorError("durable MissionStore is required for mission ingestion")
+        mission = self.mission_store.add_contract(contract, supported_projects=SUPPORTED_PROJECTS)
+        return mission.to_dict()
+
+    def queue_status(self) -> Dict[str, Any]:
+        if self.mission_store is None:
+            return {"state": "DISABLED", "missions": [], "next_eligible_work": None}
+        missions = self._store_missions()
+        records = []
+        eligible = []
+        for mission in missions:
+            mission_id = _mission_id(mission)
+            state = _state_text(mission)
+            ready, dependency_state = self.mission_store.readiness(mission_id) if isinstance(self.mission_store, MissionStore) else (state in _QUEUED_STATES, None)
+            if ready:
+                eligible.append(mission)
+            metadata = _field(mission, "metadata", default={}) or {}
+            records.append({
+                "mission_id": mission_id,
+                "project": _field(mission, "project_id", "project"),
+                "lifecycle": state,
+                "dependencies": list(_field(mission, "dependencies", default=()) or ()),
+                "dependency_state": "ready" if ready else dependency_state,
+                "assigned_worker": _field(mission, "assigned_worker", "worker_id"),
+                "material_progress_at": _field(mission, "material_progress_at"),
+                "material_checkpoint": _field(mission, "material_checkpoint"),
+                "material_evidence": _plain(_field(mission, "material_evidence")),
+                "qa_worker": _field(mission, "qa_worker"),
+                "qa_evidence": _plain(_field(mission, "qa_evidence")),
+                "rework_attempts": int(_field(mission, "rework_attempts", default=0) or 0),
+                "corrective_mission_id": metadata.get("corrective_mission_id"),
+                "blocker": _field(mission, "block_reason", "rejection_reason"),
+                "recovery_state": _field(mission, "recovery_state", default="NONE"),
+                "recovery_attempts": int(_field(mission, "recovery_attempts", default=0) or 0),
+                "recovery_outcome": _field(mission, "recovery_outcome"),
+            })
+        eligible.sort(key=lambda m: (int(_field(m, "priority", default=999)), int(_field(m, "sequence", default=-1)), _mission_id(m)))
+        return {"state": "IDLE" if not eligible else "READY", "missions": records, "next_eligible_work": _mission_id(eligible[0]) if eligible else None, "work_control": self.work_control_status}
+
     def work_control_once(self) -> Dict[str, Any]:
         with self._lock:
             if self.mission_store is None:
@@ -529,11 +589,11 @@ class RuntimeSupervisor:
             missions = self._store_missions()
             accepted = {_mission_id(m) for m in missions if _state_text(m) in _ACCEPTED_STATES}
             active_by_worker = {}
-            for m in missions:
-                if _state_text(m) in _ACTIVE_STATES:
-                    worker_id = _field(m, "assigned_worker", "assigned_worker_id", "worker_id", "agent_id", "assignee")
+            for mission in missions:
+                if _state_text(mission) in _ACTIVE_STATES:
+                    worker_id = _field(mission, "assigned_worker", "assigned_worker_id", "worker_id", "agent_id", "assignee")
                     if worker_id:
-                        active_by_worker[str(worker_id)] = m
+                        active_by_worker[str(worker_id)] = mission
             workers, health_by_id = [], {}
             for c in self._configs:
                 health = self.check_health(c)
@@ -558,7 +618,7 @@ class RuntimeSupervisor:
                     key = "|".join(sorted(_mission_id(m) for m in queued))
                     if key != self._starvation_key:
                         self._starvation_key, self._starvation_since = key, now
-                    elapsed = max(0.0, now - float(self._starvation_since or now))
+                    elapsed = max(0.0, now - float(self._starvation_since if self._starvation_since is not None else now))
                     state = "STARVED" if elapsed >= self.starvation_threshold else "AVAILABLE"
                     why = reason or "eligible work has no assignment"
                 else:
@@ -625,7 +685,7 @@ class RuntimeSupervisor:
             return [self._status_for(c) for c in self._configs]
 
     def status_dicts(self) -> List[Dict[str, Any]]:
-        return [s.as_dict() for s in self.status()]
+        return [status.as_dict() for status in self.status()]
 
     def _status_for(self, c: WorkerConfig, known_health: Optional[HealthResult] = None) -> WorkerStatus:
         process = self._owned.get(c.agent_id)
@@ -652,6 +712,8 @@ class RuntimeSupervisor:
 
     def run(self, poll_interval: float = 1.0) -> None:
         self.start_all()
+        if self.mission_store is not None:
+            self.work_control_once()
         try:
             while not self._shutdown_requested.wait(max(.05, poll_interval)):
                 self.poll_once()
@@ -661,12 +723,13 @@ class RuntimeSupervisor:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="RVSC Golden Team runtime supervisor")
-    parser.add_argument("action", nargs="?", choices=("run", "status"), default="run")
+    parser.add_argument("action", nargs="?", choices=("run", "status", "add"), default="run")
     parser.add_argument("--poll-interval", type=float, default=1.0)
     parser.add_argument("--max-restarts", type=int, default=3)
     parser.add_argument("--qa-endpoint", default=DEFAULT_QA_ENDPOINT)
     parser.add_argument("--worker-module", default="controller.generic_worker_host")
     parser.add_argument("--mission-store")
+    parser.add_argument("--mission-file")
     parser.add_argument("--stall-threshold", type=float, default=300.0)
     parser.add_argument("--starvation-threshold", type=float, default=0.0)
     parser.add_argument("--max-recovery-attempts", type=int, default=2)
@@ -676,12 +739,29 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
-    supervisor = RuntimeSupervisor(qa_endpoint=args.qa_endpoint, worker_module=args.worker_module, max_restarts=args.max_restarts, mission_store_path=args.mission_store, stall_threshold=args.stall_threshold, starvation_threshold=args.starvation_threshold, max_recovery_attempts=args.max_recovery_attempts, max_rework_attempts=args.max_rework_attempts)
-    if args.action == "status":
-        print(json.dumps({"workers": supervisor.status_dicts(), "work_control": supervisor.work_control_status}, indent=2, sort_keys=True))
-        return 0
+    store_path = Path(args.mission_store).expanduser() if args.mission_store else production_mission_store_path()
+    try:
+        supervisor = RuntimeSupervisor(qa_endpoint=args.qa_endpoint, worker_module=args.worker_module, max_restarts=args.max_restarts, mission_store_path=str(store_path), stall_threshold=args.stall_threshold, starvation_threshold=args.starvation_threshold, max_recovery_attempts=args.max_recovery_attempts, max_rework_attempts=args.max_rework_attempts)
+        if args.action == "add":
+            if not args.mission_file:
+                raise RuntimeSupervisorError("add requires --mission-file")
+            with Path(args.mission_file).expanduser().open("r", encoding="utf-8") as handle:
+                contract = json.load(handle)
+            if not isinstance(contract, Mapping):
+                raise RuntimeSupervisorError("mission file must contain a JSON object")
+            mission = supervisor.ingest_mission(contract)
+            print(json.dumps({"added": mission, "queue": supervisor.queue_status(), "mission_store": str(store_path)}, indent=2, sort_keys=True))
+            return 0
+        if args.action == "status":
+            print(json.dumps({"workers": supervisor.status_dicts(), "work_control": supervisor.work_control_status, "queue": supervisor.queue_status(), "mission_store": str(store_path)}, indent=2, sort_keys=True))
+            return 0
+    except (OSError, ValueError, json.JSONDecodeError, OrchestrationError, RuntimeSupervisorError) as exc:
+        print("runtime supervisor input error: %s" % exc, file=sys.stderr)
+        return 2
+
     def stop_handler(_signum: int, _frame: Any) -> None:
         supervisor.request_shutdown()
+
     signal.signal(signal.SIGINT, stop_handler)
     signal.signal(signal.SIGTERM, stop_handler)
     try:
