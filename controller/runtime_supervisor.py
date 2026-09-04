@@ -87,15 +87,10 @@ class WorkerStatus:
 
 
 def golden_team_configs() -> Tuple[WorkerConfig, ...]:
-    return (
-        WorkerConfig("OPS-001", "Noah", 8770, "engineering"),
-        WorkerConfig("DEV-001", "Daniel", 8765, "engineering"),
-        WorkerConfig("QA-001", "Quinn", 8771, "qa"),
-    )
+    return (WorkerConfig("OPS-001", "Noah", 8770, "engineering"), WorkerConfig("DEV-001", "Daniel", 8765, "engineering"), WorkerConfig("QA-001", "Quinn", 8771, "qa"))
 
 
 def production_mission_store_path(environ: Optional[Mapping[str, str]] = None) -> Path:
-    """Return the deterministic per-user production store location."""
     env = os.environ if environ is None else environ
     configured_root = str(env.get("RVSC_STATE_DIR", "")).strip()
     if configured_root:
@@ -136,9 +131,9 @@ def _plain(value: Any) -> Any:
     if isinstance(value, Enum):
         return value.value
     if isinstance(value, Mapping):
-        return {str(k): _plain(v) for k, v in value.items()}
+        return {str(key): _plain(item) for key, item in value.items()}
     if isinstance(value, (list, tuple, set)):
-        return [_plain(v) for v in value]
+        return [_plain(item) for item in value]
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if hasattr(value, "to_dict"):
@@ -155,7 +150,7 @@ def _identity(checkpoint: Any, evidence: Any) -> str:
 class RuntimeSupervisor:
     def __init__(self, configs: Optional[Iterable[WorkerConfig]] = None, repository_mappings: Optional[Mapping[str, str]] = None, qa_endpoint: str = DEFAULT_QA_ENDPOINT, worker_module: str = "controller.generic_worker_host", max_restarts: int = 3, health_timeout: float = 1.0, process_factory: Optional[Callable[..., Any]] = None, health_checker: Optional[Callable[[WorkerConfig], Any]] = None, port_checker: Optional[Callable[[int], bool]] = None, mission_store: Optional[Any] = None, mission_store_path: Optional[str] = None, execute_timeout: float = 300.0, execute_requester: Optional[Callable[[WorkerConfig, Mapping[str, Any]], Any]] = None, clock: Optional[Callable[[], float]] = None, stall_threshold: float = 300.0, starvation_threshold: float = 0.0, max_recovery_attempts: int = 2, recovery_handler: Optional[Callable[[WorkerConfig, Any, int], Any]] = None, max_rework_attempts: int = 2) -> None:
         self._configs = self._validate_configs(tuple(configs or golden_team_configs()))
-        self._config_by_id = {c.agent_id: c for c in self._configs}
+        self._config_by_id = {config.agent_id: config for config in self._configs}
         self.qa_endpoint = qa_endpoint.rstrip("/")
         self.worker_module = worker_module
         self.max_restarts = max(0, int(max_restarts))
@@ -172,7 +167,7 @@ class RuntimeSupervisor:
         self._execute_requester = execute_requester or self._http_execute
         self._recovery_handler = recovery_handler
         self._owned: Dict[str, Any] = {}
-        self._restart_counts = {c.agent_id: 0 for c in self._configs}
+        self._restart_counts = {config.agent_id: 0 for config in self._configs}
         self._intentional_stops = set()
         self._last_errors: Dict[str, str] = {}
         self._work_states: Dict[str, Dict[str, Any]] = {}
@@ -195,11 +190,11 @@ class RuntimeSupervisor:
         if not configs:
             raise ValueError("at least one worker configuration is required")
         ids, ports = set(), set()
-        for c in configs:
-            if not c.agent_id or not c.name or c.agent_id in ids or c.port in ports or not 1 <= int(c.port) <= 65535:
-                raise ValueError("invalid or duplicate worker configuration: %s" % c.agent_id)
-            ids.add(c.agent_id)
-            ports.add(c.port)
+        for config in configs:
+            if not config.agent_id or not config.name or config.agent_id in ids or config.port in ports or not 1 <= int(config.port) <= 65535:
+                raise ValueError("invalid or duplicate worker configuration: %s" % config.agent_id)
+            ids.add(config.agent_id)
+            ports.add(config.port)
         return tuple(configs)
 
     @property
@@ -212,12 +207,12 @@ class RuntimeSupervisor:
             return dict(self._last_work_control)
 
     def build_launch(self, worker: Any) -> Tuple[List[str], Dict[str, str]]:
-        c = self._resolve(worker)
-        command = list(c.command) if c.command else [sys.executable, "-m", self.worker_module]
+        config = self._resolve(worker)
+        command = list(config.command) if config.command else [sys.executable, "-m", self.worker_module]
         env = os.environ.copy()
         env.update(self.repository_mappings)
-        env.update({"RVSC_AGENT_ID": c.agent_id, "RVSC_WORKER_AGENT_ID": c.agent_id, "RVSC_AGENT_NAME": c.name, "RVSC_AGENT_ROLE": c.role, "RVSC_WORKER_PORT": str(c.port), "RVSC_PORT": str(c.port)})
-        if c.role == "engineering":
+        env.update({"RVSC_AGENT_ID": config.agent_id, "RVSC_WORKER_AGENT_ID": config.agent_id, "RVSC_AGENT_NAME": config.name, "RVSC_AGENT_ROLE": config.role, "RVSC_WORKER_PORT": str(config.port), "RVSC_PORT": str(config.port)})
+        if config.role == "engineering":
             env.update({key: self.qa_endpoint for key in QA_ROUTING_ENV_KEYS})
         else:
             for key in QA_ROUTING_ENV_KEYS:
@@ -225,54 +220,54 @@ class RuntimeSupervisor:
         return command, env
 
     def start(self, worker: Any) -> WorkerStatus:
-        c = self._resolve(worker)
+        config = self._resolve(worker)
         with self._lock:
-            process = self._owned.get(c.agent_id)
+            process = self._owned.get(config.agent_id)
             if process is not None and process.poll() is None:
-                return self._status_for(c)
-            self._owned.pop(c.agent_id, None)
-            health = self.check_health(c)
-            occupied = bool(self._port_checker(c.port))
+                return self._status_for(config)
+            self._owned.pop(config.agent_id, None)
+            health = self.check_health(config)
+            occupied = bool(self._port_checker(config.port))
             if health.healthy:
-                if health.agent_id != c.agent_id:
-                    raise RuntimeConflictError("port %s reports identity %r; expected %s" % (c.port, health.agent_id, c.agent_id))
-                self._restart_counts[c.agent_id] = 0
-                self._last_errors.pop(c.agent_id, None)
-                self._intentional_stops.discard(c.agent_id)
-                return self._status_for(c, health)
+                if health.agent_id != config.agent_id:
+                    raise RuntimeConflictError("port %s reports identity %r; expected %s" % (config.port, health.agent_id, config.agent_id))
+                self._restart_counts[config.agent_id] = 0
+                self._last_errors.pop(config.agent_id, None)
+                self._intentional_stops.discard(config.agent_id)
+                return self._status_for(config, health)
             if occupied:
-                raise RuntimeConflictError("port %s is occupied without a healthy matching identity" % c.port)
-            self._restart_counts[c.agent_id] = 0
-            self._intentional_stops.discard(c.agent_id)
-            self._spawn(c)
-            return self._status_for(c)
+                raise RuntimeConflictError("port %s is occupied without a healthy matching identity" % config.port)
+            self._restart_counts[config.agent_id] = 0
+            self._intentional_stops.discard(config.agent_id)
+            self._spawn(config)
+            return self._status_for(config)
 
     def start_all(self) -> List[WorkerStatus]:
         started = []
         try:
-            for c in self._configs:
-                owned = c.agent_id in self._owned
-                self.start(c)
-                if not owned and c.agent_id in self._owned:
-                    started.append(c.agent_id)
+            for config in self._configs:
+                owned = config.agent_id in self._owned
+                self.start(config)
+                if not owned and config.agent_id in self._owned:
+                    started.append(config.agent_id)
         except Exception:
             for worker_id in reversed(started):
                 self.stop(worker_id)
             raise
         return self.status()
 
-    def _spawn(self, c: WorkerConfig) -> Any:
-        command, env = self.build_launch(c)
+    def _spawn(self, config: WorkerConfig) -> Any:
+        command, env = self.build_launch(config)
         process = self._process_factory(command, env=env)
-        self._owned[c.agent_id] = process
-        self._last_errors.pop(c.agent_id, None)
+        self._owned[config.agent_id] = process
+        self._last_errors.pop(config.agent_id, None)
         return process
 
     def stop(self, worker: Any, timeout: float = 5.0) -> bool:
-        c = self._resolve(worker)
+        config = self._resolve(worker)
         with self._lock:
-            self._intentional_stops.add(c.agent_id)
-            process = self._owned.get(c.agent_id)
+            self._intentional_stops.add(config.agent_id)
+            process = self._owned.get(config.agent_id)
             if process is None:
                 return False
             try:
@@ -284,17 +279,17 @@ class RuntimeSupervisor:
                         process.kill()
                         process.wait(timeout=max(0.0, timeout))
             finally:
-                self._owned.pop(c.agent_id, None)
+                self._owned.pop(config.agent_id, None)
             return True
 
     def stop_all(self, timeout: float = 5.0) -> None:
-        for c in reversed(self._configs):
-            self.stop(c, timeout)
+        for config in reversed(self._configs):
+            self.stop(config, timeout)
 
     def check_health(self, worker: Any) -> HealthResult:
-        c = self._resolve(worker)
+        config = self._resolve(worker)
         try:
-            return self._normalise_health(self._health_checker(c))
+            return self._normalise_health(self._health_checker(config))
         except Exception as exc:
             return HealthResult(False, detail="health check failed: %s" % exc)
 
@@ -316,9 +311,8 @@ class RuntimeSupervisor:
         for key in ("worker", "agent"):
             nested = payload.get(key)
             if key == "worker" and key in payload and isinstance(nested, str):
-                candidate = nested.strip()
-                if candidate:
-                    identities.append(candidate)
+                if nested.strip():
+                    identities.append(nested.strip())
                 else:
                     invalid_identity = True
             elif key == "worker" and key in payload and not isinstance(nested, Mapping):
@@ -328,13 +322,10 @@ class RuntimeSupervisor:
                     candidate = nested.get(identity_key)
                     if candidate:
                         identities.append(str(candidate))
-        distinct_identities = set(identities)
-        if invalid_identity or len(distinct_identities) > 1:
-            identity = None
-            identity_detail = "invalid or conflicting health identity"
+        if invalid_identity or len(set(identities)) > 1:
+            identity, identity_detail = None, "invalid or conflicting health identity"
         else:
-            identity = identities[0] if identities else None
-            identity_detail = ""
+            identity, identity_detail = (identities[0] if identities else None), ""
         if "healthy" in payload:
             healthy = bool(payload["healthy"])
         elif "ok" in payload:
@@ -345,11 +336,10 @@ class RuntimeSupervisor:
             healthy = str(payload["status"]).lower() in {"ok", "healthy", "ready", "running"}
         else:
             healthy = True
-        detail = str(payload.get("detail") or payload.get("message") or identity_detail)
-        return HealthResult(healthy, identity, detail, payload)
+        return HealthResult(healthy, identity, str(payload.get("detail") or payload.get("message") or identity_detail), payload)
 
-    def _http_health(self, c: WorkerConfig) -> HealthResult:
-        request = urllib.request.Request("http://127.0.0.1:%s/health" % c.port, headers={"Accept": "application/json"})
+    def _http_health(self, config: WorkerConfig) -> HealthResult:
+        request = urllib.request.Request("http://127.0.0.1:%s/health" % config.port, headers={"Accept": "application/json"})
         try:
             with urllib.request.urlopen(request, timeout=self.health_timeout) as response:
                 status = getattr(response, "status", response.getcode())
@@ -370,30 +360,30 @@ class RuntimeSupervisor:
 
     def poll_once(self) -> List[WorkerStatus]:
         with self._lock:
-            for c in self._configs:
-                process = self._owned.get(c.agent_id)
+            for config in self._configs:
+                process = self._owned.get(config.agent_id)
                 if process is None or process.poll() is None:
                     continue
-                self._owned.pop(c.agent_id, None)
-                if c.agent_id in self._intentional_stops:
+                self._owned.pop(config.agent_id, None)
+                if config.agent_id in self._intentional_stops:
                     continue
-                count = self._restart_counts[c.agent_id]
+                count = self._restart_counts[config.agent_id]
                 if count >= self.max_restarts:
-                    self._last_errors[c.agent_id] = "restart limit reached"
+                    self._last_errors[config.agent_id] = "restart limit reached"
                     continue
-                self._restart_counts[c.agent_id] = count + 1
-                health = self.check_health(c)
+                self._restart_counts[config.agent_id] = count + 1
+                health = self.check_health(config)
                 if health.healthy:
-                    if health.agent_id != c.agent_id:
-                        self._last_errors[c.agent_id] = "identity conflict after exit"
+                    if health.agent_id != config.agent_id:
+                        self._last_errors[config.agent_id] = "identity conflict after exit"
                     continue
-                if self._port_checker(c.port):
-                    self._last_errors[c.agent_id] = "port conflict after exit"
+                if self._port_checker(config.port):
+                    self._last_errors[config.agent_id] = "port conflict after exit"
                     continue
                 try:
-                    self._spawn(c)
+                    self._spawn(config)
                 except Exception as exc:
-                    self._last_errors[c.agent_id] = "restart failed: %s" % exc
+                    self._last_errors[config.agent_id] = "restart failed: %s" % exc
         if self.mission_store is not None:
             self.work_control_once()
         return self.status()
@@ -409,18 +399,18 @@ class RuntimeSupervisor:
             return list(value or [])
         raise RuntimeSupervisorError("MissionStore does not expose durable missions")
 
-    def _authorized_projects(self, c: WorkerConfig, health: HealthResult) -> Tuple[str, ...]:
-        projects = {str(v).lower() for v in c.authorized_projects}
+    def _authorized_projects(self, config: WorkerConfig, health: HealthResult) -> Tuple[str, ...]:
+        projects = {str(value).lower() for value in config.authorized_projects}
         advertised = health.payload.get("authorized_projects") or health.payload.get("projects") or ()
         if isinstance(advertised, str):
             advertised = [advertised]
-        projects.update(str(v).lower() for v in advertised)
+        projects.update(str(value).lower() for value in advertised)
         projects.update(key[5:-5].lower() for key in self.repository_mappings)
         return tuple(sorted(projects))
 
-    def _make_worker_state(self, c: WorkerConfig, health: HealthResult, available: bool, mission_id: Optional[str]) -> Any:
-        projects = self._authorized_projects(c, health)
-        values = {"worker_id": c.agent_id, "agent_id": c.agent_id, "identity": c.agent_id, "authorized_projects": projects, "projects": projects, "available": available, "healthy": True, "active_mission_id": mission_id, "current_mission_id": mission_id}
+    def _make_worker_state(self, config: WorkerConfig, health: HealthResult, available: bool, mission_id: Optional[str]) -> Any:
+        projects = self._authorized_projects(config, health)
+        values = {"worker_id": config.agent_id, "agent_id": config.agent_id, "identity": config.agent_id, "authorized_projects": projects, "projects": projects, "available": available, "healthy": True, "active_mission_id": mission_id, "current_mission_id": mission_id}
         try:
             signature = inspect.signature(WorkerState)
             return WorkerState(**{name: values[name] for name in signature.parameters if name in values})
@@ -432,7 +422,7 @@ class RuntimeSupervisor:
         dependencies = _field(mission, "dependencies", "depends_on", default=()) or ()
         if isinstance(dependencies, str):
             dependencies = [dependencies]
-        return all(str(v) in accepted for v in dependencies)
+        return all(str(value) in accepted for value in dependencies)
 
     def _transition(self, mission: Any, state: str, worker_id: Optional[str] = None, evidence: Optional[Mapping[str, Any]] = None) -> Any:
         method = getattr(self.mission_store, "transition", None)
@@ -476,7 +466,7 @@ class RuntimeSupervisor:
         if (candidate_checkpoint is not None or candidate_evidence is not None) and (reported_mission is None or str(reported_mission) == _mission_id(mission)):
             candidate_identity = _identity(candidate_checkpoint, candidate_evidence)
             if candidate_identity != identity:
-                mission = self._record_progress(mission, now, candidate_checkpoint, candidate_evidence)
+                self._record_progress(mission, now, candidate_checkpoint, candidate_evidence)
                 last, checkpoint, evidence = now, candidate_checkpoint, candidate_evidence
         if last is None:
             checkpoint = checkpoint or "lifecycle:%s" % _state_text(mission)
@@ -517,13 +507,13 @@ class RuntimeSupervisor:
         reason = str(_field(decision, "reason", "detail", default=""))
         if isinstance(decision, (tuple, list)) and len(decision) >= 2:
             return decision[0], decision[1], reason
-        mid, wid = _field(decision, "mission_id", "wp_id"), _field(decision, "worker_id", "agent_id")
-        mission = _field(decision, "mission", "selected_mission") or next((m for m in missions if mid is not None and _mission_id(m) == str(mid)), None)
-        worker = _field(decision, "worker", "selected_worker") or next((w for w in workers if wid is not None and str(_field(w, "worker_id", "agent_id")) == str(wid)), None)
+        mission_id, worker_id = _field(decision, "mission_id", "wp_id"), _field(decision, "worker_id", "agent_id")
+        mission = _field(decision, "mission", "selected_mission") or next((item for item in missions if mission_id is not None and _mission_id(item) == str(mission_id)), None)
+        worker = _field(decision, "worker", "selected_worker") or next((item for item in workers if worker_id is not None and str(_field(item, "worker_id", "agent_id")) == str(worker_id)), None)
         return mission, worker, reason
 
-    def _http_execute(self, c: WorkerConfig, mission: Mapping[str, Any]) -> Any:
-        request = urllib.request.Request("http://127.0.0.1:%s/execute" % c.port, data=json.dumps(dict(mission)).encode(), headers={"Accept": "application/json", "Content-Type": "application/json"}, method="POST")
+    def _http_execute(self, config: WorkerConfig, mission: Mapping[str, Any]) -> Any:
+        request = urllib.request.Request("http://127.0.0.1:%s/execute" % config.port, data=json.dumps(dict(mission)).encode(), headers={"Accept": "application/json", "Content-Type": "application/json"}, method="POST")
         with urllib.request.urlopen(request, timeout=self.execute_timeout) as response:
             status = getattr(response, "status", response.getcode())
             body = response.read().decode()
@@ -534,9 +524,9 @@ class RuntimeSupervisor:
     @staticmethod
     def _result_tokens(value: Any) -> set:
         if isinstance(value, Mapping):
-            return set().union(*(RuntimeSupervisor._result_tokens(v) for v in value.values())) if value else set()
+            return set().union(*(RuntimeSupervisor._result_tokens(item) for item in value.values())) if value else set()
         if isinstance(value, (list, tuple, set)):
-            return set().union(*(RuntimeSupervisor._result_tokens(v) for v in value)) if value else set()
+            return set().union(*(RuntimeSupervisor._result_tokens(item) for item in value)) if value else set()
         if isinstance(value, Enum):
             return {str(value.value).upper()}
         return {value.upper()} if isinstance(value, str) else set()
@@ -567,15 +557,13 @@ class RuntimeSupervisor:
     def ingest_mission(self, contract: Mapping[str, Any]) -> Dict[str, Any]:
         if self.mission_store is None or not isinstance(self.mission_store, MissionStore):
             raise RuntimeSupervisorError("durable MissionStore is required for mission ingestion")
-        mission = self.mission_store.add_contract(contract, supported_projects=SUPPORTED_PROJECTS)
-        return mission.to_dict()
+        return self.mission_store.add_contract(contract, supported_projects=SUPPORTED_PROJECTS).to_dict()
 
     def queue_status(self) -> Dict[str, Any]:
         if self.mission_store is None:
             return {"state": "DISABLED", "missions": [], "next_eligible_work": None}
         missions = self._store_missions()
-        records = []
-        eligible = []
+        records, eligible = [], []
         for mission in missions:
             mission_id = _mission_id(mission)
             state = _state_text(mission)
@@ -583,26 +571,8 @@ class RuntimeSupervisor:
             if ready:
                 eligible.append(mission)
             metadata = _field(mission, "metadata", default={}) or {}
-            records.append({
-                "mission_id": mission_id,
-                "project": _field(mission, "project_id", "project"),
-                "lifecycle": state,
-                "dependencies": list(_field(mission, "dependencies", default=()) or ()),
-                "dependency_state": "ready" if ready else dependency_state,
-                "assigned_worker": _field(mission, "assigned_worker", "worker_id"),
-                "material_progress_at": _field(mission, "material_progress_at"),
-                "material_checkpoint": _field(mission, "material_checkpoint"),
-                "material_evidence": _plain(_field(mission, "material_evidence")),
-                "qa_worker": _field(mission, "qa_worker"),
-                "qa_evidence": _plain(_field(mission, "qa_evidence")),
-                "rework_attempts": int(_field(mission, "rework_attempts", default=0) or 0),
-                "corrective_mission_id": metadata.get("corrective_mission_id"),
-                "blocker": _field(mission, "block_reason", "rejection_reason"),
-                "recovery_state": _field(mission, "recovery_state", default="NONE"),
-                "recovery_attempts": int(_field(mission, "recovery_attempts", default=0) or 0),
-                "recovery_outcome": _field(mission, "recovery_outcome"),
-            })
-        eligible.sort(key=lambda m: (int(_field(m, "priority", default=999)), int(_field(m, "sequence", default=-1)), _mission_id(m)))
+            records.append({"mission_id": mission_id, "project": _field(mission, "project_id", "project"), "lifecycle": state, "dependencies": list(_field(mission, "dependencies", default=()) or ()), "dependency_state": "ready" if ready else dependency_state, "assigned_worker": _field(mission, "assigned_worker", "worker_id"), "material_progress_at": _field(mission, "material_progress_at"), "material_checkpoint": _field(mission, "material_checkpoint"), "material_evidence": _plain(_field(mission, "material_evidence")), "qa_worker": _field(mission, "qa_worker"), "qa_evidence": _plain(_field(mission, "qa_evidence")), "rework_attempts": int(_field(mission, "rework_attempts", default=0) or 0), "corrective_mission_id": metadata.get("corrective_mission_id"), "blocker": _field(mission, "block_reason", "rejection_reason"), "recovery_state": _field(mission, "recovery_state", default="NONE"), "recovery_attempts": int(_field(mission, "recovery_attempts", default=0) or 0), "recovery_outcome": _field(mission, "recovery_outcome")})
+        eligible.sort(key=lambda item: (int(_field(item, "priority", default=999)), int(_field(item, "sequence", default=-1)), _mission_id(item)))
         return {"state": "IDLE" if not eligible else "READY", "missions": records, "next_eligible_work": _mission_id(eligible[0]) if eligible else None, "work_control": self.work_control_status}
 
     def work_control_once(self) -> Dict[str, Any]:
@@ -611,7 +581,7 @@ class RuntimeSupervisor:
                 return dict(self._last_work_control)
             now = float(self._clock())
             missions = self._store_missions()
-            accepted = {_mission_id(m) for m in missions if _state_text(m) in _ACCEPTED_STATES}
+            accepted = {_mission_id(mission) for mission in missions if _state_text(mission) in _ACCEPTED_STATES}
             active_by_worker = {}
             for mission in missions:
                 if _state_text(mission) in _ACTIVE_STATES:
@@ -619,27 +589,27 @@ class RuntimeSupervisor:
                     if worker_id:
                         active_by_worker[str(worker_id)] = mission
             workers, health_by_id = [], {}
-            for c in self._configs:
-                health = self.check_health(c)
-                health_by_id[c.agent_id] = health
-                verified = health.healthy and health.agent_id == c.agent_id
-                available = bool(verified and c.role == "engineering" and c.agent_id not in active_by_worker)
+            for config in self._configs:
+                health = self.check_health(config)
+                health_by_id[config.agent_id] = health
+                verified = health.healthy and health.agent_id == config.agent_id
+                available = bool(verified and config.role == "engineering" and config.agent_id not in active_by_worker)
                 if verified:
-                    workers.append(self._make_worker_state(c, health, available, _mission_id(active_by_worker[c.agent_id]) if c.agent_id in active_by_worker else None))
-                if c.agent_id in active_by_worker:
-                    self._monitor_active(active_by_worker[c.agent_id], health, now)
+                    workers.append(self._make_worker_state(config, health, available, _mission_id(active_by_worker[config.agent_id]) if config.agent_id in active_by_worker else None))
+                if config.agent_id in active_by_worker:
+                    self._monitor_active(active_by_worker[config.agent_id], health, now)
                 elif available:
-                    self._work_states[c.agent_id] = {"state": "AVAILABLE", "mission_id": None, "detail": "verified healthy and available", "reason": "no assignment"}
+                    self._work_states[config.agent_id] = {"state": "AVAILABLE", "mission_id": None, "detail": "verified healthy and available", "reason": "no assignment"}
                 else:
-                    self._work_states[c.agent_id] = {"state": "IDLE" if verified else "BLOCKED", "mission_id": None, "detail": "not an available engineering worker" if verified else "worker health not verified", "reason": "role or health prevents assignment"}
+                    self._work_states[config.agent_id] = {"state": "IDLE" if verified else "BLOCKED", "mission_id": None, "detail": "not an available engineering worker" if verified else "worker health not verified", "reason": "role or health prevents assignment"}
             source = self.mission_store if isinstance(self.mission_store, MissionStore) else missions
             decision = select_dispatch(source, workers)
             mission, worker, reason = self._decision_parts(decision, missions, workers)
-            queued = [m for m in missions if _state_text(m) in _QUEUED_STATES and self._dependency_ready(m, accepted)]
+            queued = [item for item in missions if _state_text(item) in _QUEUED_STATES and self._dependency_ready(item, accepted)]
             next_work = _mission_id(queued[0]) if queued else None
             if mission is None or worker is None:
                 if queued:
-                    key = "|".join(sorted(_mission_id(m) for m in queued))
+                    key = "|".join(sorted(_mission_id(item) for item in queued))
                     if key != self._starvation_key:
                         self._starvation_key, self._starvation_since = key, now
                     elapsed = max(0.0, now - float(self._starvation_since if self._starvation_since is not None else now))
@@ -648,23 +618,36 @@ class RuntimeSupervisor:
                 else:
                     self._starvation_key = self._starvation_since = None
                     elapsed, state, why = 0.0, "IDLE", reason or "no eligible work"
-                self._last_work_control = {"state": state, "reason": why, "queued_ready": [_mission_id(m) for m in queued], "no_progress_duration": elapsed, "next_eligible_work": next_work}
+                self._last_work_control = {"state": state, "reason": why, "queued_ready": [_mission_id(item) for item in queued], "no_progress_duration": elapsed, "next_eligible_work": next_work}
                 return dict(self._last_work_control)
             self._starvation_key = self._starvation_since = None
             worker_id = str(_field(worker, "worker_id", "agent_id", "identity"))
-            c = self._config_by_id.get(worker_id)
+            config = self._config_by_id.get(worker_id)
             health = health_by_id.get(worker_id)
             project = str(_field(mission, "project", "project_id", default="")).lower()
-            if not c or c.role != "engineering" or not health or not health.healthy or health.agent_id != worker_id or project not in self._authorized_projects(c, health):
-                self._last_work_control = {"state": "STARVED", "mission_id": _mission_id(mission), "worker_id": worker_id, "reason": "selected worker failed health, role, availability, or project authorization validation", "next_eligible_work": _mission_id(mission)}
-                return dict(self._last_work_control)
             mission_id = _mission_id(mission)
+            if not config or config.role != "engineering" or not health or not health.healthy or health.agent_id != worker_id or project not in self._authorized_projects(config, health):
+                self._last_work_control = {"state": "STARVED", "mission_id": mission_id, "worker_id": worker_id, "reason": "selected worker failed health, role, availability, or project authorization validation", "next_eligible_work": mission_id}
+                return dict(self._last_work_control)
+            try:
+                if not isinstance(self.mission_store, MissionStore):
+                    raise RuntimeSupervisorError("validated durable MissionStore is required for engineering dispatch")
+                dispatch_contract = self.mission_store.dispatch_contract(mission_id, worker_id, supported_projects=SUPPORTED_PROJECTS)
+            except Exception as exc:
+                evidence = {"event": "contract_validation_failure", "worker_id": worker_id, "reason": "%s: %s" % (type(exc).__name__, exc), "retryable": False}
+                try:
+                    self._transition(mission, "blocked", worker_id, evidence)
+                except Exception as persist:
+                    evidence["persistence_error"] = "%s: %s" % (type(persist).__name__, persist)
+                self._work_states[worker_id] = {"state": "BLOCKED", "mission_id": mission_id, "detail": evidence["reason"], "reason": evidence["reason"]}
+                self._last_work_control = {"state": "BLOCKED", "mission_id": mission_id, "worker_id": worker_id, "reason": evidence["reason"], "evidence": evidence, "next_eligible_work": None}
+                return dict(self._last_work_control)
             current = self._transition(mission, "assigned", worker_id, {"event": "dispatch_reserved", "worker_id": worker_id}) or mission
             current = self._transition(current, "running", worker_id, {"event": "dispatch_started", "worker_id": worker_id}) or current
             self._work_states[worker_id] = {"state": "WORKING", "mission_id": mission_id, "detail": "dispatch in progress", "last_material_progress": now, "no_progress_duration": 0.0, "material_checkpoint": "lifecycle:running", "material_evidence": {"event": "dispatch_started"}}
             self._last_work_control = {"state": "WORKING", "mission_id": mission_id, "worker_id": worker_id, "reason": "durably reserved and dispatched", "last_material_progress": now}
         try:
-            result = self._execute_requester(c, _plain(current))
+            result = self._execute_requester(config, dispatch_contract)
             tokens = self._result_tokens(result)
             qa_id = self._qa_identity(result)
             evidence = {"event": "worker_result", "worker_id": worker_id, "qa_worker_id": qa_id, "result": _plain(result)}
@@ -706,21 +689,21 @@ class RuntimeSupervisor:
 
     def status(self) -> List[WorkerStatus]:
         with self._lock:
-            return [self._status_for(c) for c in self._configs]
+            return [self._status_for(config) for config in self._configs]
 
     def status_dicts(self) -> List[Dict[str, Any]]:
         return [status.as_dict() for status in self.status()]
 
-    def _status_for(self, c: WorkerConfig, known_health: Optional[HealthResult] = None) -> WorkerStatus:
-        process = self._owned.get(c.agent_id)
+    def _status_for(self, config: WorkerConfig, known_health: Optional[HealthResult] = None) -> WorkerStatus:
+        process = self._owned.get(config.agent_id)
         owned = process is not None and process.poll() is None
-        health = known_health or self.check_health(c)
-        ready = bool(health.healthy and health.agent_id == c.agent_id)
+        health = known_health or self.check_health(config)
+        ready = bool(health.healthy and health.agent_id == config.agent_id)
         payload = health.as_dict()
-        if c.agent_id in self._last_errors:
-            payload["supervisor_error"] = self._last_errors[c.agent_id]
-        work = self._work_states.get(c.agent_id, {})
-        return WorkerStatus(c.agent_id, c.name, c.port, bool(owned or ready or self._port_checker(c.port)), ready, payload, owned, self._restart_counts[c.agent_id], str(work.get("state", "AVAILABLE" if ready else "IDLE")), work.get("mission_id"), str(work.get("detail", "")), work.get("last_material_progress"), work.get("no_progress_duration"), work.get("material_checkpoint"), work.get("material_evidence"), str(work.get("reason", "")), str(work.get("recovery_state", "NONE")), int(work.get("recovery_attempts", 0)), work.get("recovery_outcome"), self._last_work_control.get("next_eligible_work"))
+        if config.agent_id in self._last_errors:
+            payload["supervisor_error"] = self._last_errors[config.agent_id]
+        work = self._work_states.get(config.agent_id, {})
+        return WorkerStatus(config.agent_id, config.name, config.port, bool(owned or ready or self._port_checker(config.port)), ready, payload, owned, self._restart_counts[config.agent_id], str(work.get("state", "AVAILABLE" if ready else "IDLE")), work.get("mission_id"), str(work.get("detail", "")), work.get("last_material_progress"), work.get("no_progress_duration"), work.get("material_checkpoint"), work.get("material_evidence"), str(work.get("reason", "")), str(work.get("recovery_state", "NONE")), int(work.get("recovery_attempts", 0)), work.get("recovery_outcome"), self._last_work_control.get("next_eligible_work"))
 
     def _resolve(self, worker: Any) -> WorkerConfig:
         if isinstance(worker, WorkerConfig):

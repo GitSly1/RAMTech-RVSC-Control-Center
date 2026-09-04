@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import tempfile
@@ -27,16 +28,16 @@ class OrchestrationError(ValueError):
 
 
 def _matches(expected: Mapping[str, Any], payload: Mapping[str, Any]) -> bool:
-    return all(payload.get(k) == v for k, v in expected.items())
+    return all(payload.get(key) == value for key, value in expected.items())
 
 
 def worker_signal_event(signal: Any) -> Event:
     signal_type = getattr(signal, "signal_type", None)
     raw_type = getattr(signal_type, "value", signal_type)
-    if not isinstance(raw_type, str) or not raw_type.strip():
-        raise OrchestrationError("worker signal requires signal_type")
     wp_id = str(getattr(signal, "wp_id", "")).strip()
     agent_id = str(getattr(signal, "agent_id", "")).strip()
+    if not isinstance(raw_type, str) or not raw_type.strip():
+        raise OrchestrationError("worker signal requires signal_type")
     if not wp_id or not agent_id:
         raise OrchestrationError("worker signal requires wp_id and agent_id")
     return Event("worker.%s" % raw_type.strip(), {"wp_id": wp_id, "agent_id": agent_id, "checkpoint": getattr(signal, "checkpoint", None), "evidence": tuple(getattr(signal, "evidence", ()) or ()), "failure_reason": getattr(signal, "failure_reason", None)})
@@ -61,6 +62,14 @@ def build_execution_plan(config: Mapping[str, Any], event: Event) -> ExecutionPl
     if not actions:
         raise OrchestrationError("route has no actions: %s" % route_name)
     return ExecutionPlan(str(trigger.get("id")), str(route_name), actions)
+
+
+def _priority_rank(value: Any) -> int:
+    raw = str(value).strip().upper().removeprefix("P")
+    try:
+        return int(raw)
+    except ValueError:
+        return 999
 
 
 def dispatch_order(projects: Mapping[str, Mapping[str, Any]]) -> tuple[str, ...]:
@@ -94,14 +103,6 @@ def _canonical(checkpoint: Any, evidence: Any) -> str:
     return json.dumps({"checkpoint": checkpoint, "evidence": evidence}, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
 
 
-def _priority_rank(value: Any) -> int:
-    raw = str(value).strip().upper().removeprefix("P")
-    try:
-        return int(raw)
-    except ValueError:
-        return 999
-
-
 def _required_string(contract: Mapping[str, Any], name: str) -> str:
     value = contract.get(name)
     if not isinstance(value, str) or not value.strip():
@@ -128,21 +129,22 @@ def _required_string_list(contract: Mapping[str, Any], name: str) -> list[str]:
 def validate_mission_contract(contract: Mapping[str, Any], supported_projects: Iterable[str]) -> dict[str, Any]:
     if not isinstance(contract, Mapping):
         raise OrchestrationError("mission contract must be an object")
-    data = dict(contract)
+    data = copy.deepcopy(dict(contract))
     mission_id = _required_string(data, "wp_id")
     project = _required_string(data, "project").lower()
-    aliases = (("mission_id", mission_id), ("id", mission_id), ("project_id", project))
-    for alias, expected in aliases:
+    for alias, expected in (("mission_id", mission_id), ("id", mission_id), ("project_id", project)):
         if alias in data and str(data[alias]).strip().lower() != expected.lower():
             raise OrchestrationError("ambiguous mission identity or project definition")
     authorized = {str(value).strip().lower() for value in supported_projects if str(value).strip()}
     if project not in authorized:
         raise OrchestrationError("unsupported project mission: %s" % project)
+    data["wp_id"] = mission_id
+    data["project"] = project
     for name in ("objective", "repository", "work_branch", "base_branch", "agent_id"):
-        _required_string(data, name)
-    acceptance = _required_string_list(data, "acceptance_criteria")
-    allowed_paths = _required_string_list(data, "allowed_paths")
-    for raw_path in allowed_paths:
+        data[name] = _required_string(data, name)
+    data["acceptance_criteria"] = _required_string_list(data, "acceptance_criteria")
+    data["allowed_paths"] = _required_string_list(data, "allowed_paths")
+    for raw_path in data["allowed_paths"]:
         normalized = raw_path.replace("\\", "/")
         path = PurePosixPath(normalized)
         if path.is_absolute() or ".." in path.parts or normalized.startswith("~") or ":" in path.parts[0]:
@@ -150,21 +152,22 @@ def validate_mission_contract(contract: Mapping[str, Any], supported_projects: I
     commands = data.get("validation_commands")
     if not isinstance(commands, list) or not commands:
         raise OrchestrationError("mission contract requires validation_commands")
+    normalized_commands = []
     for command in commands:
         if not isinstance(command, Mapping) or not isinstance(command.get("argv"), list) or not command["argv"]:
             raise OrchestrationError("each validation command requires a non-empty argv list")
         if any(not isinstance(argument, str) or not argument.strip() or "\x00" in argument for argument in command["argv"]):
             raise OrchestrationError("validation command argv entries must be non-empty strings")
+        normalized_command = copy.deepcopy(dict(command))
+        normalized_command["argv"] = [argument.strip() for argument in command["argv"]]
+        normalized_commands.append(normalized_command)
+    data["validation_commands"] = normalized_commands
     dependencies = data.get("dependencies", [])
     if not isinstance(dependencies, list) or any(not isinstance(value, str) or not value.strip() for value in dependencies):
         raise OrchestrationError("mission dependencies must be a list of non-empty strings")
     dependencies = [value.strip() for value in dependencies]
     if len(set(dependencies)) != len(dependencies) or mission_id in dependencies:
         raise OrchestrationError("mission dependencies must be unique and cannot include the mission")
-    data["wp_id"] = mission_id
-    data["project"] = project
-    data["acceptance_criteria"] = acceptance
-    data["allowed_paths"] = allowed_paths
     data["dependencies"] = dependencies
     return data
 
@@ -284,6 +287,20 @@ class MissionStore:
         data = validate_mission_contract(contract, supported_projects)
         mission = Mission(data["wp_id"], data["project"], dependencies=tuple(data.get("dependencies", ())), dependency_policy=str(data.get("dependency_policy", "accepted")), priority=data.get("priority", 999), metadata={"contract": data, "requires_independent_qa": True, "ingestion": "validated_cli"})
         return self.add(mission)
+
+    def dispatch_contract(self, mission_id: str, worker_id: str, *, supported_projects: Iterable[str]) -> dict[str, Any]:
+        mission = self.get(mission_id)
+        stored = mission.metadata.get("contract")
+        if not isinstance(stored, Mapping):
+            raise OrchestrationError("queued mission has no validated engineering contract")
+        contract = validate_mission_contract(stored, supported_projects)
+        if contract["wp_id"] != mission.mission_id:
+            raise OrchestrationError("stored contract wp_id does not match durable mission identity")
+        if contract["project"] != mission.project_id:
+            raise OrchestrationError("stored contract project does not match durable mission project")
+        if contract["agent_id"] != str(worker_id).strip():
+            raise OrchestrationError("stored contract agent_id does not match selected worker")
+        return contract
 
     def get(self, mission_id: str) -> Mission:
         try:
@@ -462,7 +479,15 @@ class MissionStore:
         mission.metadata["last_qa_action"] = "REWORK_QUEUED"
         mission.metadata["corrective_mission_id"] = corrective_id
         if corrective_id not in self._missions:
-            corrective = Mission(corrective_id, root.project_id, priority=root.priority, metadata={"corrective_work": True, "attempt_number": attempt, "originating_mission_id": root_id, "parent_mission_id": mission_id, "qa_rejection_evidence": evidence_data, "rejection_reason": reason, "reviewed_commit": evidence_data.get("reviewed_commit") or evidence_data.get("commit"), "reviewed_branch": evidence_data.get("reviewed_branch") or evidence_data.get("branch"), "excluded_worker_ids": [qa_worker], "requires_independent_qa": True}, parent_mission_id=mission_id, root_mission_id=root_id)
+            originating = root.metadata.get("contract")
+            if not isinstance(originating, Mapping):
+                raise OrchestrationError("cannot create corrective mission without originating validated contract")
+            corrective_contract = copy.deepcopy(dict(originating))
+            corrective_contract["wp_id"] = corrective_id
+            corrective_contract["dependencies"] = []
+            corrective_contract["objective"] = "Correct independent QA rejection for %s: %s\n\nOriginal objective:\n%s" % (root_id, reason, originating.get("objective", ""))
+            corrective_contract = validate_mission_contract(corrective_contract, (root.project_id,))
+            corrective = Mission(corrective_id, root.project_id, priority=root.priority, metadata={"contract": corrective_contract, "corrective_work": True, "attempt_number": attempt, "originating_mission_id": root_id, "parent_mission_id": mission_id, "qa_rejection_evidence": evidence_data, "rejection_reason": reason, "reviewed_commit": evidence_data.get("reviewed_commit") or evidence_data.get("commit"), "reviewed_branch": evidence_data.get("reviewed_branch") or evidence_data.get("branch"), "excluded_worker_ids": [qa_worker], "requires_independent_qa": True, "ingestion": "validated_corrective"}, parent_mission_id=mission_id, root_mission_id=root_id)
             self.add(corrective)
         self._persist()
         return QAOutcomeResult("REWORK_QUEUED", mission_id, root_id, corrective_id, attempt)
@@ -568,7 +593,11 @@ def select_dispatch(store: MissionStore, workers: Iterable[WorkerState | Mapping
         raise OrchestrationError("worker ids must be unique")
     for mission in missions:
         excluded = {str(value) for value in mission.metadata.get("excluded_worker_ids", ())}
+        contract = mission.metadata.get("contract")
+        authorized_worker = str(contract.get("agent_id", "")).strip() if isinstance(contract, Mapping) else None
         for worker_id, projects, available, healthy, active in sorted(normalized):
+            if authorized_worker and worker_id != authorized_worker:
+                continue
             if worker_id not in excluded and available and healthy and not active and mission.project_id in projects:
                 return DispatchDecision("dispatch", mission.mission_id, worker_id, "eligible_worker_selected")
     return DispatchDecision("starved", reason="eligible_work_has_no_authorized_available_worker")

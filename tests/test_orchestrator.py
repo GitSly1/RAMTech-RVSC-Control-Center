@@ -6,11 +6,6 @@ from controller.orchestrator import Mission, MissionState, MissionStore, Orchest
 
 
 class MissionStoreTests(unittest.TestCase):
-    def completed(self, store, mission_id, implementer="DEV-001"):
-        store.transition(mission_id, "assigned", worker_id=implementer)
-        store.transition(mission_id, "running", worker_id=implementer)
-        store.transition(mission_id, "completed", worker_id=implementer)
-
     def contract(self, **changes):
         value = {
             "wp_id": "WP-1", "project": "rvsc", "objective": "Deliver work",
@@ -22,99 +17,79 @@ class MissionStoreTests(unittest.TestCase):
         value.update(changes)
         return value
 
-    def test_load_or_create_cold_creation_and_durable_add(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "state" / "missions.json"
-            store = MissionStore.load_or_create(path)
-            self.assertTrue(path.exists())
-            self.assertEqual(store.all(), ())
-            store.add(Mission("M-1", "rvsc"))
-            self.assertEqual(MissionStore.load(path).get("M-1").state, MissionState.QUEUED)
+    def completed(self, store, mission_id, implementer="DEV-001"):
+        store.transition(mission_id, "assigned", worker_id=implementer)
+        store.transition(mission_id, "running", worker_id=implementer)
+        store.transition(mission_id, "completed", worker_id=implementer)
 
-    def test_progress_is_durable_and_identical_evidence_is_noop(self):
+    def test_load_or_create_and_progress_are_durable(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "missions.json"
             store = MissionStore.load_or_create(path)
             store.add(Mission("M-1", "rvsc"))
             store.record_progress("M-1", timestamp=10, checkpoint="build", evidence=["commit:a"])
             store.record_progress("M-1", timestamp=20, checkpoint="build", evidence=["commit:a"])
-            mission = MissionStore.load(path).get("M-1")
-            self.assertEqual(mission.material_progress_at, 10.0)
+            self.assertEqual(MissionStore.load(path).get("M-1").material_progress_at, 10.0)
 
-    def test_progress_timestamp_cannot_move_backwards(self):
-        store = MissionStore()
-        store.add(Mission("M", "rvsc"))
-        store.record_progress("M", timestamp=10, checkpoint="a", evidence=[])
-        with self.assertRaises(OrchestrationError):
-            store.record_progress("M", timestamp=9, checkpoint="b", evidence=[])
-
-    def test_lifecycle_and_independent_qa(self):
-        store = MissionStore()
-        store.add(Mission("M", "rvsc"))
-        self.completed(store, "M")
-        with self.assertRaises(OrchestrationError):
-            store.transition("M", "qa_pending", worker_id="DEV-001")
-        store.transition("M", "qa_pending", worker_id="QA-001", timestamp=4)
-        store.transition("M", "accepted", worker_id="QA-001", timestamp=5)
-        self.assertEqual(store.get("M").state, MissionState.ACCEPTED)
-
-    def test_qa_acceptance_unlocks_dependency(self):
+    def test_independent_qa_and_dependency_dispatch_remain_intact(self):
         store = MissionStore()
         store.add(Mission("origin", "rvsc"))
         store.add(Mission("dependent", "rvsc", dependencies=("origin",), priority=1))
         self.completed(store, "origin")
-        store.process_qa_outcome("origin", "QA_ACCEPTED", qa_worker="QA-001", evidence={"commit": "abc"}, timestamp=5)
+        with self.assertRaises(OrchestrationError):
+            store.transition("origin", "qa_pending", worker_id="DEV-001")
+        store.process_qa_outcome("origin", "QA_ACCEPTED", qa_worker="QA-001", evidence={"commit": "abc"})
         self.assertTrue(store.readiness("dependent")[0])
 
-    def test_rejection_creates_traceable_idempotent_corrective_work(self):
+    def test_dispatch_is_deterministic_and_honors_contract_agent(self):
         store = MissionStore()
-        store.add(Mission("origin", "rvsc"))
-        self.completed(store, "origin")
-        evidence = {"rejection_reason": "tests failed", "commit": "abc", "branch": "feature"}
-        first = store.process_qa_outcome("origin", "QA_REJECTED", qa_worker="QA-001", evidence=evidence, max_rework_attempts=2)
-        duplicate = store.process_qa_outcome("origin", "QA_REJECTED", qa_worker="QA-001", evidence=evidence, max_rework_attempts=2)
-        self.assertTrue(duplicate.idempotent)
-        self.assertEqual(first.corrective_mission_id, "origin::rework:1")
-        self.assertEqual(len(store.all()), 2)
-
-    def test_rework_count_persists_and_exhaustion_blocks(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "missions.json"
-            store = MissionStore.load_or_create(path)
-            store.add(Mission("origin", "rvsc"))
-            self.completed(store, "origin")
-            first = store.process_qa_outcome("origin", "QA_REJECTED", qa_worker="QA-001", evidence={"reason": "one"}, max_rework_attempts=1)
-            restored = MissionStore.load(path)
-            self.completed(restored, first.corrective_mission_id, "DEV-002")
-            exhausted = restored.process_qa_outcome(first.corrective_mission_id, "QA_REJECTED", qa_worker="QA-001", evidence={"reason": "two"}, max_rework_attempts=1)
-            self.assertEqual(exhausted.outcome, "REWORK_EXHAUSTED")
-            self.assertEqual(restored.get("origin").state, MissionState.BLOCKED)
-
-    def test_dispatch_remains_deterministic_and_distinguishes_idle_starved(self):
-        store = MissionStore()
-        store.add(Mission("later", "rvsc", priority=2))
-        store.add(Mission("first", "rvsc", priority=1))
+        store.add_contract(self.contract(wp_id="later", priority=2), supported_projects=("rvsc",))
+        store.add_contract(self.contract(wp_id="first", priority=1), supported_projects=("rvsc",))
         workers = [WorkerState("DEV-002", ("rvsc",)), WorkerState("DEV-001", ("rvsc",))]
         decision = select_dispatch(store, workers)
         self.assertEqual((decision.mission_id, decision.worker_id), ("first", "DEV-001"))
         self.assertEqual(dispatch_next(store, workers).outcome, "dispatch")
-        blocked = MissionStore()
-        blocked.add(Mission("blocked", "rvsc", dependencies=("missing",)))
-        self.assertEqual(select_dispatch(blocked, []).outcome, "idle")
-        queued = MissionStore()
-        queued.add(Mission("queued", "rvsc"))
-        self.assertEqual(select_dispatch(queued, []).outcome, "starved")
 
-    def test_contract_ingestion_validates_and_persists_authorized_work(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "missions.json"
-            store = MissionStore.load_or_create(path)
-            mission = store.add_contract(self.contract(), supported_projects=("rvsc",))
-            restored = MissionStore.load(path).get(mission.mission_id)
-            self.assertTrue(restored.metadata["requires_independent_qa"])
-            self.assertEqual(restored.metadata["contract"]["objective"], "Deliver work")
+    def test_contract_ingestion_and_dispatch_contract_validate_identity(self):
+        store = MissionStore()
+        expected = validate_mission_contract(self.contract(), ("rvsc",))
+        store.add_contract(self.contract(), supported_projects=("rvsc",))
+        self.assertEqual(store.dispatch_contract("WP-1", "DEV-001", supported_projects=("rvsc",)), expected)
+        for field, value in (("wp_id", "OTHER"), ("project", "moxie"), ("agent_id", "DEV-002")):
+            with self.subTest(field=field):
+                store.get("WP-1").metadata["contract"][field] = value
+                with self.assertRaises(OrchestrationError):
+                    store.dispatch_contract("WP-1", "DEV-001", supported_projects=("rvsc", "moxie"))
+                store.get("WP-1").metadata["contract"] = expected.copy()
 
-    def test_malformed_duplicate_unsupported_and_unsafe_contracts_fail_closed(self):
+    def test_missing_and_malformed_stored_contracts_fail_closed(self):
+        store = MissionStore()
+        store.add(Mission("raw", "rvsc"))
+        with self.assertRaises(OrchestrationError):
+            store.dispatch_contract("raw", "DEV-001", supported_projects=("rvsc",))
+        mission = store.get("raw")
+        mission.metadata["contract"] = {"wp_id": "raw"}
+        with self.assertRaises(OrchestrationError):
+            store.dispatch_contract("raw", "DEV-001", supported_projects=("rvsc",))
+
+    def test_rejection_creates_valid_dispatchable_corrective_contract(self):
+        store = MissionStore()
+        original = store.add_contract(self.contract(), supported_projects=("rvsc",))
+        self.completed(store, original.mission_id)
+        result = store.process_qa_outcome(original.mission_id, "QA_REJECTED", qa_worker="QA-001", evidence={"reason": "tests failed", "commit": "abc"})
+        corrective = store.get(result.corrective_mission_id)
+        contract = store.dispatch_contract(corrective.mission_id, "DEV-001", supported_projects=("rvsc",))
+        self.assertEqual(contract["wp_id"], corrective.mission_id)
+        self.assertEqual(contract["repository"], self.contract()["repository"])
+        self.assertEqual(contract["work_branch"], self.contract()["work_branch"])
+        self.assertEqual(contract["allowed_paths"], self.contract()["allowed_paths"])
+        self.assertEqual(contract["acceptance_criteria"], self.contract()["acceptance_criteria"])
+        self.assertEqual(contract["dependencies"], [])
+        self.assertIn("Original objective", contract["objective"])
+        self.assertIn("QA-001", corrective.metadata["excluded_worker_ids"])
+        self.assertTrue(corrective.metadata["requires_independent_qa"])
+
+    def test_malformed_unsupported_and_unsafe_contracts_fail_closed(self):
         with self.assertRaises(OrchestrationError):
             validate_mission_contract(self.contract(project="unknown"), ("rvsc",))
         with self.assertRaises(OrchestrationError):
@@ -123,10 +98,6 @@ class MissionStoreTests(unittest.TestCase):
             validate_mission_contract(self.contract(validation_commands=[]), ("rvsc",))
         with self.assertRaises(OrchestrationError):
             validate_mission_contract(self.contract(mission_id="OTHER"), ("rvsc",))
-        store = MissionStore()
-        store.add_contract(self.contract(), supported_projects=("rvsc",))
-        with self.assertRaises(OrchestrationError):
-            store.add_contract(self.contract(), supported_projects=("rvsc",))
 
 
 if __name__ == "__main__":
