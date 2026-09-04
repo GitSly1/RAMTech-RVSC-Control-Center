@@ -14,7 +14,16 @@ from .engineering_environment import ControlledEngineeringEnvironment, Engineeri
 from .engineering_runner import EngineeringMissionRunner, ValidationCommand
 
 OPENAI_URL = "https://api.openai.com/v1/responses"
-DEFAULT_MODEL = os.environ.get("RVSC_OPENAI_MODEL", "gpt-5.6")
+OLLAMA_URL = os.environ.get(
+    "RVSC_OLLAMA_URL",
+    "http://127.0.0.1:11434/api/generate",
+)
+DEFAULT_OPENAI_MODEL = os.environ.get("RVSC_OPENAI_MODEL", "gpt-5.6")
+DEFAULT_OLLAMA_MODEL = os.environ.get(
+    "RVSC_OLLAMA_MODEL",
+    "qwen2.5-coder:7b-instruct",
+)
+DEFAULT_MODEL = DEFAULT_OPENAI_MODEL
 RVSC_ROOT = Path(__file__).resolve().parents[1]
 MAX_CORE_PATH = Path(os.environ.get("RVSC_MAX_CORE_PATH", str(RVSC_ROOT / "golden-core" / "MAX_PLATINUM_ENGINEERING_CORE_V1.md")))
 CheckpointReporter = Callable[[str, tuple[str, ...]], None]
@@ -42,6 +51,67 @@ def _openai_call(api_key: str, prompt: str) -> dict[str, Any]:
         raise RuntimeError(f"OpenAI HTTP {exc.code}: {detail}") from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"OpenAI transport error: {exc.reason}") from exc
+
+
+def _ollama_call(prompt: str) -> dict[str, Any]:
+    body = json.dumps(
+        {
+            "model": DEFAULT_OLLAMA_MODEL,
+            "prompt": prompt,
+            "stream": False,
+            "format": "json",
+        }
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        OLLAMA_URL,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=600) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Ollama HTTP {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Ollama transport error: {exc.reason}") from exc
+
+    text = payload.get("response")
+    if not isinstance(text, str) or not text.strip():
+        raise RuntimeError("Ollama response did not contain response text")
+
+    return {
+        "id": f"ollama-{uuid.uuid4().hex}",
+        "status": "completed",
+        "model": str(payload.get("model", DEFAULT_OLLAMA_MODEL)),
+        "output": [
+            {
+                "type": "message",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": text,
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def _provider_call(prompt: str) -> tuple[dict[str, Any], str]:
+    provider = os.environ.get("RVSC_AI_PROVIDER", "ollama").strip().lower()
+
+    if provider == "ollama":
+        return _ollama_call(prompt), "ollama"
+
+    if provider == "openai":
+        api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY is not set")
+        return _openai_call(api_key, prompt), "openai"
+
+    raise RuntimeError(f"unsupported RVSC_AI_PROVIDER: {provider}")
 
 
 def _response_text(response: dict[str, Any]) -> str:
@@ -225,9 +295,6 @@ def resume_persisted_engineering_result(mission: dict[str, Any], persisted: dict
 
 
 def execute_mission(*, agent_id: str, agent_name: str, role: str, mission: dict[str, Any], checkpoint: CheckpointReporter | None = None, persist_result: ResultReporter | None = None) -> dict[str, Any]:
-    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is not set")
     worker_request = _worker_request(mission)
     if worker_request.agent_id != agent_id:
         raise ValueError(f"mission agent mismatch: expected {agent_id}, got {worker_request.agent_id}")
@@ -244,7 +311,9 @@ def execute_mission(*, agent_id: str, agent_name: str, role: str, mission: dict[
     if checkpoint:
         checkpoint("preflight_passed", tuple(evidence) + (f"run_id:{run_id}",))
     source_files = {path: environment.read_text(path) for path in worker_request.allowed_paths}
-    response = _openai_call(api_key, _engineering_prompt(agent_id, agent_name, role, mission, source_files))
+    response, provider_name = _provider_call(
+        _engineering_prompt(agent_id, agent_name, role, mission, source_files)
+    )
     provider_response_id = str(response.get("id", ""))
     provider_status = str(response.get("status", "unknown"))
     model = str(response.get("model", DEFAULT_MODEL))
@@ -289,7 +358,7 @@ def execute_mission(*, agent_id: str, agent_name: str, role: str, mission: dict[
     if final_status.returncode != 0:
         raise EngineeringEnvironmentError(final_status.stderr.strip() or "post-commit git status failed")
     clean = not bool(final_status.stdout.strip())
-    evidence.extend((f"repo_clean_after:{str(clean).lower()}", f"run_id:{run_id}", f"started_at:{started}", f"ended_at:{_utc_now()}", "provider:openai", f"model:{model}", f"provider_response_id:{provider_response_id}", f"provider_status:{provider_status}", f"agent:{agent_id}", "execution_mode:generic_model_proposal_controlled_apply_validate_commit_push"))
+    evidence.extend((f"repo_clean_after:{str(clean).lower()}", f"run_id:{run_id}", f"started_at:{started}", f"ended_at:{_utc_now()}", f"provider:{provider_name}", f"model:{model}", f"provider_response_id:{provider_response_id}", f"provider_status:{provider_status}", f"agent:{agent_id}", "execution_mode:generic_model_proposal_controlled_apply_validate_commit_push"))
     result = {**partial, "success": True, "evidence": evidence, "pushed": True}
     if persist_result:
         persist_result(result)
