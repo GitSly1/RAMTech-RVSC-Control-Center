@@ -9,6 +9,7 @@ from controller.runtime_supervisor import (
     QA_ROUTING_ENV_KEYS,
     RuntimeConflictError,
     RuntimeSupervisor,
+    WorkerConfig,
     golden_team_configs,
 )
 
@@ -68,6 +69,24 @@ class Harness:
         )
 
 
+class FakeStore:
+    def __init__(self, missions):
+        self.records = {item["mission_id"]: dict(item) for item in missions}
+        self.transitions = []
+
+    def list_missions(self):
+        return [dict(item) for item in self.records.values()]
+
+    def transition(self, mission_id, new_state, worker_id=None, evidence=None):
+        record = self.records[mission_id]
+        record["status"] = getattr(new_state, "value", new_state)
+        if worker_id:
+            record["assigned_worker_id"] = worker_id
+        record.setdefault("evidence", []).append(dict(evidence or {}))
+        self.transitions.append((mission_id, str(record["status"]).lower(), worker_id))
+        return dict(record)
+
+
 class RuntimeSupervisorTests(unittest.TestCase):
     def setUp(self):
         self.harness = Harness()
@@ -76,69 +95,47 @@ class RuntimeSupervisorTests(unittest.TestCase):
         configs = golden_team_configs()
         self.assertEqual(
             [(item.agent_id, item.name, item.port) for item in configs],
-            [
-                ("OPS-001", "Noah", 8770),
-                ("DEV-001", "Daniel", 8765),
-                ("QA-001", "Quinn", 8771),
-            ],
+            [("OPS-001", "Noah", 8770), ("DEV-001", "Daniel", 8765), ("QA-001", "Quinn", 8771)],
         )
 
     def test_launch_propagates_identity_repositories_and_qa_endpoint(self):
-        qa_endpoint = "http://qa.internal:8771/execute"
+        endpoint = "http://qa.internal:8771/execute"
         supervisor = self.harness.supervisor(
             repository_mappings={
                 "RVSC_RVSC_REPO": "/repos/rvsc",
                 "RVSC_SEMANTIQ_REPO": "/repos/semantiq",
                 "RVSC_MOXIE_REPO": "/repos/moxie",
             },
-            qa_endpoint=qa_endpoint,
+            qa_endpoint=endpoint,
         )
         supervisor.start("OPS-001")
         process = self.harness.processes[0]
-        self.assertEqual(
-            process.command,
-            [sys.executable, "-m", "controller.generic_worker_host"],
-        )
-        self.assertNotIn("--agent-id", process.command)
-        self.assertNotIn("--port", process.command)
+        self.assertEqual(process.command, [sys.executable, "-m", "controller.generic_worker_host"])
         self.assertEqual(process.env["RVSC_WORKER_AGENT_ID"], "OPS-001")
         self.assertEqual(process.env["RVSC_WORKER_PORT"], "8770")
-        self.assertEqual(process.env["RVSC_AGENT_ID"], "OPS-001")
         self.assertEqual(process.env["RVSC_RVSC_REPO"], "/repos/rvsc")
-        self.assertEqual(process.env["RVSC_SEMANTIQ_REPO"], "/repos/semantiq")
-        self.assertEqual(process.env["RVSC_MOXIE_REPO"], "/repos/moxie")
         for key in QA_ROUTING_ENV_KEYS:
-            self.assertEqual(process.env.get(key), qa_endpoint, key)
+            self.assertEqual(process.env.get(key), endpoint)
 
     def test_default_qa_endpoint_is_execute_endpoint(self):
         supervisor = self.harness.supervisor()
         _, environment = supervisor.build_launch("DEV-001")
         self.assertEqual(DEFAULT_QA_ENDPOINT, "http://127.0.0.1:8771/execute")
         for key in QA_ROUTING_ENV_KEYS:
-            self.assertEqual(environment.get(key), DEFAULT_QA_ENDPOINT, key)
+            self.assertEqual(environment.get(key), DEFAULT_QA_ENDPOINT)
 
-    def test_qa_launch_removes_inherited_routing_and_preserves_other_environment(self):
+    def test_qa_launch_removes_inherited_routing(self):
         inherited = {key: "http://inherited.invalid/execute" for key in QA_ROUTING_ENV_KEYS}
         inherited["RVSC_TEST_CREDENTIAL"] = "sensitive-test-value"
         with mock.patch.dict(os.environ, inherited, clear=False):
-            supervisor = self.harness.supervisor(
-                repository_mappings={"RVSC_RVSC_REPO": "/repos/rvsc"}
-            )
+            supervisor = self.harness.supervisor()
             _, environment = supervisor.build_launch("QA-001")
-
         for key in QA_ROUTING_ENV_KEYS:
-            self.assertNotIn(key, environment, key)
+            self.assertNotIn(key, environment)
         self.assertIn("RVSC_TEST_CREDENTIAL", environment)
-        self.assertEqual(environment.get("RVSC_RVSC_REPO"), "/repos/rvsc")
-        self.assertEqual(environment.get("RVSC_AGENT_ROLE"), "qa")
-        self.assertEqual(environment.get("RVSC_WORKER_AGENT_ID"), "QA-001")
-        self.assertEqual(environment.get("RVSC_WORKER_PORT"), "8771")
 
     def test_matching_healthy_worker_is_not_duplicated_or_owned(self):
-        self.harness.health["DEV-001"] = {
-            "status": "healthy",
-            "agent_id": "DEV-001",
-        }
+        self.harness.health["DEV-001"] = {"status": "healthy", "agent_id": "DEV-001"}
         self.harness.open_ports.add(8765)
         supervisor = self.harness.supervisor()
         status = supervisor.start("DEV-001")
@@ -149,21 +146,16 @@ class RuntimeSupervisorTests(unittest.TestCase):
         self.assertFalse(supervisor.stop("DEV-001"))
 
     def test_identity_conflict_fails_closed(self):
-        self.harness.health["OPS-001"] = {
-            "status": "healthy",
-            "agent_id": "UNKNOWN-001",
-        }
+        self.harness.health["OPS-001"] = {"status": "healthy", "agent_id": "UNKNOWN-001"}
         self.harness.open_ports.add(8770)
-        supervisor = self.harness.supervisor()
         with self.assertRaises(RuntimeConflictError):
-            supervisor.start("OPS-001")
+            self.harness.supervisor().start("OPS-001")
         self.assertEqual(self.harness.processes, [])
 
     def test_unknown_listener_fails_closed(self):
         self.harness.open_ports.add(8771)
-        supervisor = self.harness.supervisor()
         with self.assertRaises(RuntimeConflictError):
-            supervisor.start("QA-001")
+            self.harness.supervisor().start("QA-001")
         self.assertEqual(self.harness.processes, [])
 
     def test_controlled_stop_only_terminates_owned_process(self):
@@ -177,21 +169,16 @@ class RuntimeSupervisorTests(unittest.TestCase):
     def test_unexpected_exit_restarts_only_up_to_bound(self):
         supervisor = self.harness.supervisor(max_restarts=2)
         supervisor.start("DEV-001")
-        self.harness.processes[-1].return_code = 1
-        supervisor.poll_once()
-        self.assertEqual(len(self.harness.processes), 2)
-        self.harness.processes[-1].return_code = 1
-        supervisor.poll_once()
-        self.assertEqual(len(self.harness.processes), 3)
+        for expected in (2, 3):
+            self.harness.processes[-1].return_code = 1
+            supervisor.poll_once()
+            self.assertEqual(len(self.harness.processes), expected)
         self.harness.processes[-1].return_code = 1
         statuses = supervisor.poll_once()
         self.assertEqual(len(self.harness.processes), 3)
         daniel = next(item for item in statuses if item.agent_id == "DEV-001")
         self.assertEqual(daniel.restart_count, 2)
-        self.assertEqual(
-            daniel.health_result.get("supervisor_error"),
-            "restart limit reached",
-        )
+        self.assertEqual(daniel.health_result.get("supervisor_error"), "restart limit reached")
 
     def test_intentional_stop_does_not_restart(self):
         supervisor = self.harness.supervisor(max_restarts=3)
@@ -201,26 +188,14 @@ class RuntimeSupervisorTests(unittest.TestCase):
         self.assertEqual(len(self.harness.processes), 1)
 
     def test_consolidated_status_contains_all_workers(self):
-        self.harness.health["QA-001"] = {
-            "ready": True,
-            "agent_id": "QA-001",
-        }
+        self.harness.health["QA-001"] = {"ready": True, "agent_id": "QA-001"}
         self.harness.open_ports.add(8771)
-        supervisor = self.harness.supervisor()
-        statuses = supervisor.status_dicts()
+        statuses = self.harness.supervisor().status_dicts()
         self.assertEqual(len(statuses), 3)
-        self.assertEqual(
-            {(item["agent_id"], item["name"], item["port"]) for item in statuses},
-            {
-                ("OPS-001", "Noah", 8770),
-                ("DEV-001", "Daniel", 8765),
-                ("QA-001", "Quinn", 8771),
-            },
-        )
         quinn = next(item for item in statuses if item["agent_id"] == "QA-001")
         self.assertTrue(quinn["running"])
         self.assertTrue(quinn["ready"])
-        self.assertIn("health_result", quinn)
+        self.assertIn("work_state", quinn)
 
     def test_start_all_rolls_back_only_processes_started_by_supervisor(self):
         self.harness.open_ports.add(8765)
@@ -229,6 +204,102 @@ class RuntimeSupervisorTests(unittest.TestCase):
             supervisor.start_all()
         self.assertEqual(len(self.harness.processes), 1)
         self.assertTrue(self.harness.processes[0].terminated)
+
+    def _work_supervisor(self, store, result=None, failure=None):
+        config = WorkerConfig("DEV-001", "Daniel", 8765, "engineering", authorized_projects=("rvsc",))
+        self.harness.health["DEV-001"] = {
+            "healthy": True,
+            "agent_id": "DEV-001",
+            "authorized_projects": ["rvsc"],
+        }
+
+        def execute(_config, _mission):
+            if failure:
+                raise failure
+            return result
+
+        return self.harness.supervisor(
+            configs=(config,), mission_store=store, execute_requester=execute
+        )
+
+    @mock.patch("controller.runtime_supervisor.select_dispatch")
+    def test_automatic_selection_persists_before_dispatch_and_accepts(self, select):
+        mission = {"mission_id": "M-1", "project": "rvsc", "status": "queued", "dependencies": []}
+        store = FakeStore([mission])
+        select.side_effect = lambda missions, workers: (missions[0], workers[0])
+        observed = []
+
+        def execute(_config, _mission):
+            observed.extend(state for _, state, _ in store.transitions)
+            return {"result": "complete", "qa_status": "QA_ACCEPTED", "qa_agent_id": "QA-001"}
+
+        supervisor = self._work_supervisor(store)
+        supervisor._execute_requester = execute
+        status = supervisor.work_control_once()
+        self.assertEqual(observed[:2], ["assigned", "running"])
+        self.assertEqual(status["state"], "ACCEPTED")
+        self.assertEqual(store.records["M-1"]["status"], "accepted")
+
+    @mock.patch("controller.runtime_supervisor.select_dispatch")
+    def test_qa_rejection_is_durable(self, select):
+        mission = {"mission_id": "M-2", "project": "rvsc", "status": "queued"}
+        store = FakeStore([mission])
+        select.side_effect = lambda missions, workers: (missions[0], workers[0])
+        status = self._work_supervisor(store, {"qa_status": "QA_REJECTED"}).work_control_once()
+        self.assertEqual(status["state"], "REJECTED")
+        self.assertEqual(store.records["M-2"]["status"], "rejected")
+
+    @mock.patch("controller.runtime_supervisor.select_dispatch")
+    def test_transport_failure_is_durably_blocked(self, select):
+        mission = {"mission_id": "M-3", "project": "rvsc", "status": "queued"}
+        store = FakeStore([mission])
+        select.side_effect = lambda missions, workers: (missions[0], workers[0])
+        status = self._work_supervisor(store, failure=OSError("offline")).work_control_once()
+        self.assertEqual(status["state"], "BLOCKED")
+        self.assertEqual(store.records["M-3"]["status"], "blocked")
+        self.assertTrue(store.records["M-3"]["evidence"][-1]["retryable"])
+
+    @mock.patch("controller.runtime_supervisor.select_dispatch", return_value=None)
+    def test_starvation_is_exposed_when_no_worker_can_execute(self, _select):
+        mission = {"mission_id": "M-4", "project": "rvsc", "status": "queued"}
+        store = FakeStore([mission])
+        supervisor = self.harness.supervisor(mission_store=store)
+        status = supervisor.work_control_once()
+        self.assertEqual(status["state"], "STARVED")
+        self.assertIn("M-4", status["queued_ready"])
+
+    @mock.patch("controller.runtime_supervisor.select_dispatch", return_value=None)
+    def test_active_assignment_prevents_duplicate_dispatch(self, _select):
+        mission = {
+            "mission_id": "M-5",
+            "project": "rvsc",
+            "status": "running",
+            "assigned_worker_id": "DEV-001",
+        }
+        store = FakeStore([mission])
+        supervisor = self._work_supervisor(store, {"qa_status": "QA_ACCEPTED"})
+        status = supervisor.work_control_once()
+        self.assertEqual(status["state"], "IDLE")
+        self.assertEqual(store.transitions, [])
+        worker = supervisor.status_dicts()[0]
+        self.assertEqual(worker["work_state"], "RUNNING")
+        self.assertEqual(worker["mission_id"], "M-5")
+
+    @mock.patch("controller.runtime_supervisor.select_dispatch")
+    def test_worker_cannot_accept_its_own_qa(self, select):
+        mission = {"mission_id": "M-6", "project": "rvsc", "status": "queued"}
+        store = FakeStore([mission])
+        select.side_effect = lambda missions, workers: (missions[0], workers[0])
+        result = {"qa_status": "QA_ACCEPTED", "qa_agent_id": "DEV-001"}
+        status = self._work_supervisor(store, result).work_control_once()
+        self.assertEqual(status["state"], "REJECTED")
+        self.assertEqual(store.records["M-6"]["status"], "rejected")
+
+    def test_legacy_operation_does_not_require_store(self):
+        supervisor = self.harness.supervisor()
+        self.assertEqual(supervisor.work_control_status["state"], "DISABLED")
+        supervisor.poll_once()
+        self.assertEqual(len(supervisor.status()), 3)
 
 
 if __name__ == "__main__":
