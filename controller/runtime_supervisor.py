@@ -609,6 +609,25 @@ class RuntimeSupervisor:
             next_work = _mission_id(queued[0]) if queued else None
             if mission is None or worker is None:
                 if queued:
+                    if isinstance(self.mission_store, MissionStore):
+                        for candidate in queued:
+                            candidate_id = _mission_id(candidate)
+                            durable_worker = _field(candidate, "implementer", "agent_id")
+                            try:
+                                if not durable_worker:
+                                    raise RuntimeSupervisorError("mission has no durable implementer identity")
+                                self.mission_store.dispatch_contract(candidate_id, str(durable_worker), supported_projects=SUPPORTED_PROJECTS)
+                            except Exception as exc:
+                                evidence = {"event": "contract_validation_failure", "worker_id": str(durable_worker or ""), "reason": "%s: %s" % (type(exc).__name__, exc), "retryable": False}
+                                try:
+                                    self._transition(candidate, "blocked", str(durable_worker) if durable_worker else None, evidence)
+                                except Exception as persist:
+                                    evidence["persistence_error"] = "%s: %s" % (type(persist).__name__, persist)
+                                if durable_worker:
+                                    self._work_states[str(durable_worker)] = {"state": "BLOCKED", "mission_id": candidate_id, "detail": evidence["reason"], "reason": evidence["reason"]}
+                                self._starvation_key = self._starvation_since = None
+                                self._last_work_control = {"state": "BLOCKED", "mission_id": candidate_id, "worker_id": str(durable_worker or ""), "reason": evidence["reason"], "evidence": evidence, "next_eligible_work": None}
+                                return dict(self._last_work_control)
                     key = "|".join(sorted(_mission_id(item) for item in queued))
                     if key != self._starvation_key:
                         self._starvation_key, self._starvation_since = key, now
