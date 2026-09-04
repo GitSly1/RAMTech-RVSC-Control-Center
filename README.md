@@ -9,3 +9,5 @@ Current checkpoint: **RVSC-013 — Git / Source Isolation**.
 ## RVSC Autonomous Qualification
 
 `RVSC-030B-5B-R3-AUTO-001` records the first successfully Controller-dispatched mission in the R3 unattended autonomous-chain qualification.
+
+`RVSC-030B-5B-R3-AUTO-002` records automatic dependency advancement from the first accepted R3 mission to the second Controller-dispatched mission.
