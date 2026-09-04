@@ -20,7 +20,8 @@ class RuntimeProductivityTests(unittest.TestCase):
     def make_supervisor(self, store, clock, payload, result=None, **kwargs):
         config = WorkerConfig("DEV-001", "Daniel", 8765, "engineering", authorized_projects=("rvsc",))
         response = result or {"qa_status": "QA_ACCEPTED", "qa_agent_id": "QA-001"}
-        return RuntimeSupervisor(configs=(config,), mission_store=store, clock=clock, health_checker=lambda _c: payload, port_checker=lambda _p: False, execute_requester=lambda _c, _m: response, **kwargs)
+        execute_requester = kwargs.pop("execute_requester", lambda _c, _m: response)
+        return RuntimeSupervisor(configs=(config,), mission_store=store, clock=clock, health_checker=lambda _c: payload, port_checker=lambda _p: False, execute_requester=execute_requester, **kwargs)
 
     def active_store(self):
         store = MissionStore()
