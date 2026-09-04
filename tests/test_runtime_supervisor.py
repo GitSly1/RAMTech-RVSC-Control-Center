@@ -16,6 +16,97 @@ class Clock:
         return self.value
 
 
+class RuntimeHealthIdentityTests(unittest.TestCase):
+    def live_payload(self):
+        return {
+            "ready": True,
+            "worker": "DEV-001",
+            "name": "Daniel",
+            "service": "rvsc-generic-worker",
+        }
+
+    def make_supervisor(self, payload, store=None):
+        config = WorkerConfig("DEV-001", "Daniel", 8765, "engineering", authorized_projects=("rvsc",))
+        return RuntimeSupervisor(
+            configs=(config,),
+            mission_store=store,
+            health_checker=lambda _c: payload,
+            port_checker=lambda _p: False,
+            execute_requester=lambda _c, _m: {"qa_status": "QA_ACCEPTED", "qa_agent_id": "QA-001"},
+        )
+
+    def test_live_top_level_worker_string_normalises_to_agent_id(self):
+        result = RuntimeSupervisor._normalise_health(self.live_payload())
+        self.assertTrue(result.healthy)
+        self.assertEqual(result.agent_id, "DEV-001")
+
+    def test_live_style_worker_is_ready(self):
+        status = self.make_supervisor(self.live_payload()).status_dicts()[0]
+        self.assertTrue(status["ready"])
+        self.assertEqual(status["health_result"]["agent_id"], "DEV-001")
+
+    def test_live_style_worker_is_eligible_for_autonomous_dispatch(self):
+        store = MissionStore()
+        store.add(Mission("M-LIVE", "rvsc"))
+        supervisor = self.make_supervisor(self.live_payload(), store=store)
+        result = supervisor.work_control_once()
+        self.assertEqual(result["state"], "ACCEPTED")
+        self.assertEqual(result["worker_id"], "DEV-001")
+        self.assertEqual(store.get("M-LIVE").state, MissionState.ACCEPTED)
+
+    def test_conflicting_identity_representations_fail_closed(self):
+        payloads = (
+            {"ready": True, "agent_id": "DEV-001", "worker": "OPS-001"},
+            {"ready": True, "worker": "DEV-001", "agent": {"id": "QA-001"}},
+            {"ready": True, "worker": {"agent_id": "DEV-001", "identity": "OPS-001"}},
+        )
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                result = RuntimeSupervisor._normalise_health(payload)
+                self.assertTrue(result.healthy)
+                self.assertIsNone(result.agent_id)
+
+    def test_malformed_worker_identity_is_not_verified(self):
+        for worker in ("", "   ", None, 123, True, [], object()):
+            with self.subTest(worker=worker):
+                result = RuntimeSupervisor._normalise_health({"ready": True, "worker": worker})
+                self.assertTrue(result.healthy)
+                self.assertIsNone(result.agent_id)
+
+    def test_malformed_worker_cannot_override_another_identity(self):
+        result = RuntimeSupervisor._normalise_health({"ready": True, "agent_id": "DEV-001", "worker": 123})
+        self.assertTrue(result.healthy)
+        self.assertIsNone(result.agent_id)
+
+    def test_existing_identity_formats_remain_supported(self):
+        payloads = (
+            {"healthy": True, "agent_id": "DEV-001"},
+            {"ok": True, "identity": "DEV-001"},
+            {"status": "healthy", "id": "DEV-001"},
+            {"ready": True, "worker": {"agent_id": "DEV-001"}},
+            {"ready": True, "worker": {"identity": "DEV-001"}},
+            {"ready": True, "worker": {"id": "DEV-001"}},
+            {"ready": True, "agent": {"agent_id": "DEV-001"}},
+            {"ready": True, "agent": {"identity": "DEV-001"}},
+            {"ready": True, "agent": {"id": "DEV-001"}},
+        )
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                result = RuntimeSupervisor._normalise_health(payload)
+                self.assertTrue(result.healthy)
+                self.assertEqual(result.agent_id, "DEV-001")
+
+    def test_matching_duplicate_identity_representations_are_accepted(self):
+        result = RuntimeSupervisor._normalise_health({
+            "ready": True,
+            "agent_id": "DEV-001",
+            "identity": "DEV-001",
+            "worker": "DEV-001",
+            "agent": {"id": "DEV-001"},
+        })
+        self.assertEqual(result.agent_id, "DEV-001")
+
+
 class RuntimeProductivityTests(unittest.TestCase):
     def make_supervisor(self, store, clock, payload, result=None, **kwargs):
         config = WorkerConfig("DEV-001", "Daniel", 8765, "engineering", authorized_projects=("rvsc",))

@@ -307,11 +307,34 @@ class RuntimeSupervisor:
         if not isinstance(value, Mapping):
             return HealthResult(False, detail="invalid health response")
         payload = dict(value)
-        identity = payload.get("agent_id") or payload.get("identity") or payload.get("id")
+        identities = []
+        invalid_identity = False
+        for key in ("agent_id", "identity", "id"):
+            candidate = payload.get(key)
+            if candidate:
+                identities.append(str(candidate))
         for key in ("worker", "agent"):
             nested = payload.get(key)
-            if identity is None and isinstance(nested, Mapping):
-                identity = nested.get("agent_id") or nested.get("identity") or nested.get("id")
+            if key == "worker" and key in payload and isinstance(nested, str):
+                candidate = nested.strip()
+                if candidate:
+                    identities.append(candidate)
+                else:
+                    invalid_identity = True
+            elif key == "worker" and key in payload and not isinstance(nested, Mapping):
+                invalid_identity = True
+            if isinstance(nested, Mapping):
+                for identity_key in ("agent_id", "identity", "id"):
+                    candidate = nested.get(identity_key)
+                    if candidate:
+                        identities.append(str(candidate))
+        distinct_identities = set(identities)
+        if invalid_identity or len(distinct_identities) > 1:
+            identity = None
+            identity_detail = "invalid or conflicting health identity"
+        else:
+            identity = identities[0] if identities else None
+            identity_detail = ""
         if "healthy" in payload:
             healthy = bool(payload["healthy"])
         elif "ok" in payload:
@@ -322,7 +345,8 @@ class RuntimeSupervisor:
             healthy = str(payload["status"]).lower() in {"ok", "healthy", "ready", "running"}
         else:
             healthy = True
-        return HealthResult(healthy, str(identity) if identity is not None else None, str(payload.get("detail") or payload.get("message") or ""), payload)
+        detail = str(payload.get("detail") or payload.get("message") or identity_detail)
+        return HealthResult(healthy, identity, detail, payload)
 
     def _http_health(self, c: WorkerConfig) -> HealthResult:
         request = urllib.request.Request("http://127.0.0.1:%s/health" % c.port, headers={"Accept": "application/json"})
