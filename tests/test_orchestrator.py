@@ -1,6 +1,20 @@
+import tempfile
 import unittest
+from pathlib import Path
 
-from controller.orchestrator import Event, OrchestrationError, build_execution_plan, dispatch_order, worker_signal_event
+from controller.orchestrator import (
+    Event,
+    Mission,
+    MissionState,
+    MissionStore,
+    OrchestrationError,
+    WorkerState,
+    build_execution_plan,
+    dispatch_next,
+    dispatch_order,
+    select_dispatch,
+    worker_signal_event,
+)
 from controller.worker_runtime import WorkerSignal, WorkerSignalType
 
 
@@ -24,7 +38,7 @@ CONFIG = {
 }
 
 
-class OrchestratorTests(unittest.TestCase):
+class OrchestratorRegressionTests(unittest.TestCase):
     def test_ready_event_resolves_dispatch_path(self):
         plan = build_execution_plan(CONFIG, Event("work_package.status_changed", {"to": "ready"}))
         self.assertEqual(plan.trigger_id, "wp_ready")
@@ -69,6 +83,151 @@ class OrchestratorTests(unittest.TestCase):
     def test_project_priority_is_deterministic(self):
         order = dispatch_order({"moxie": {"priority": "P1"}, "semantiq": {"priority": "P0"}, "other": {"priority": "P2"}})
         self.assertEqual(order, ("semantiq", "moxie", "other"))
+
+
+class MissionStoreTests(unittest.TestCase):
+    def test_store_serializes_and_reloads_all_mission_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "queue.json"
+            store = MissionStore(path)
+            mission = Mission(
+                "RVSC-2",
+                "rvsc",
+                dependencies=("RVSC-1",),
+                dependency_policy="completed",
+                priority="P1",
+                metadata={"run_id": "run-2", "evidence": ["scope:checked"]},
+            )
+            store.add(Mission("RVSC-1", "rvsc", state=MissionState.ACCEPTED, priority=0))
+            store.add(mission)
+            store.transition("RVSC-2", MissionState.ASSIGNED, worker_id="DEV-001")
+            store.save()
+
+            restored = MissionStore.load(path)
+            self.assertEqual([item.to_dict() for item in restored.all()], [item.to_dict() for item in store.all()])
+            self.assertEqual(restored.get("RVSC-2").implementer, "DEV-001")
+            self.assertEqual(restored.get("RVSC-2").metadata["evidence"], ["scope:checked"])
+
+    def test_duplicate_and_self_dependencies_are_rejected(self):
+        with self.assertRaises(OrchestrationError):
+            Mission("bad", "rvsc", dependencies=("bad",))
+        with self.assertRaises(OrchestrationError):
+            Mission("bad", "rvsc", dependencies=("one", "one"))
+
+    def test_invalid_and_ambiguous_transitions_are_rejected(self):
+        store = MissionStore()
+        store.add(Mission("work", "rvsc"))
+        with self.assertRaises(OrchestrationError):
+            store.transition("work", MissionState.RUNNING, worker_id="DEV-001")
+        with self.assertRaises(OrchestrationError):
+            store.transition("work", MissionState.QUEUED)
+        with self.assertRaises(OrchestrationError):
+            store.transition("work", MissionState.BLOCKED)
+
+    def test_valid_lifecycle_distinguishes_assignment_running_and_qa(self):
+        store = MissionStore()
+        store.add(Mission("work", "rvsc"))
+        store.transition("work", MissionState.ASSIGNED, worker_id="DEV-001")
+        self.assertEqual(store.get("work").assigned_worker, "DEV-001")
+        store.transition("work", MissionState.RUNNING, worker_id="DEV-001")
+        self.assertEqual(store.get("work").state, MissionState.RUNNING)
+        store.transition("work", MissionState.COMPLETED, worker_id="DEV-001")
+        self.assertIsNone(store.get("work").assigned_worker)
+        store.transition("work", MissionState.QA_PENDING, worker_id="QA-001")
+        store.transition("work", MissionState.ACCEPTED, worker_id="QA-001")
+        self.assertEqual(store.get("work").state, MissionState.ACCEPTED)
+
+    def test_implementer_cannot_satisfy_own_qa(self):
+        store = MissionStore()
+        store.add(Mission("work", "rvsc"))
+        store.transition("work", MissionState.ASSIGNED, worker_id="DEV-001")
+        store.transition("work", MissionState.RUNNING)
+        store.transition("work", MissionState.COMPLETED)
+        with self.assertRaises(OrchestrationError):
+            store.transition("work", MissionState.QA_PENDING, worker_id="DEV-001")
+
+    def test_blocked_state_preserves_explicit_reason_and_can_requeue(self):
+        store = MissionStore()
+        store.add(Mission("work", "rvsc"))
+        store.transition("work", MissionState.BLOCKED, reason="authorization unavailable")
+        self.assertEqual(store.get("work").block_reason, "authorization unavailable")
+        store.transition("work", MissionState.QUEUED)
+        self.assertIsNone(store.get("work").block_reason)
+
+
+class DependencyTests(unittest.TestCase):
+    def test_dependency_blocks_and_acceptance_unlocks_mission(self):
+        store = MissionStore()
+        store.add(Mission("first", "rvsc"))
+        store.add(Mission("second", "rvsc", dependencies=("first",)))
+        self.assertEqual(store.readiness("second"), (False, "dependency_not_accepted:first:queued"))
+        first = store.get("first")
+        first.state = MissionState.ACCEPTED
+        self.assertEqual(store.readiness("second"), (True, None))
+
+    def test_completed_policy_unlocks_before_acceptance(self):
+        store = MissionStore()
+        store.add(Mission("first", "rvsc", state=MissionState.COMPLETED))
+        store.add(Mission("second", "rvsc", dependencies=("first",), dependency_policy="completed"))
+        self.assertEqual(store.readiness("second"), (True, None))
+
+    def test_missing_dependency_has_evidence_friendly_reason(self):
+        store = MissionStore()
+        store.add(Mission("second", "rvsc", dependencies=("missing",)))
+        self.assertEqual(store.readiness("second"), (False, "dependency_missing:missing"))
+
+
+class DispatchTests(unittest.TestCase):
+    def test_dispatch_selects_only_authorized_available_worker(self):
+        store = MissionStore()
+        store.add(Mission("work", "rvsc", priority=0))
+        workers = [
+            WorkerState("DEV-BUSY", ("rvsc",), active_mission_id="other"),
+            WorkerState("DEV-WRONG", ("semantiq",)),
+            WorkerState("DEV-RIGHT", ("rvsc",)),
+        ]
+        decision = select_dispatch(store, workers)
+        self.assertEqual((decision.outcome, decision.mission_id, decision.worker_id), ("dispatch", "work", "DEV-RIGHT"))
+
+    def test_dispatch_is_deterministic_by_priority_sequence_and_worker_id(self):
+        store = MissionStore()
+        store.add(Mission("later", "rvsc", priority=2))
+        store.add(Mission("first", "rvsc", priority=1))
+        store.add(Mission("second", "rvsc", priority=1))
+        workers = [WorkerState("DEV-002", ("rvsc",)), WorkerState("DEV-001", ("rvsc",))]
+        decision = select_dispatch(store, workers)
+        self.assertEqual((decision.mission_id, decision.worker_id), ("first", "DEV-001"))
+        self.assertEqual(select_dispatch(store, reversed(workers)), decision)
+
+    def test_starvation_is_explicit_when_eligible_work_has_no_worker(self):
+        store = MissionStore()
+        store.add(Mission("work", "rvsc"))
+        decision = select_dispatch(store, [WorkerState("DEV-001", ("rvsc",), available=False)])
+        self.assertEqual(decision.outcome, "starved")
+        self.assertEqual(decision.reason, "eligible_work_has_no_authorized_available_worker")
+
+    def test_dependency_blocked_queue_reports_idle_not_worker_starvation(self):
+        store = MissionStore()
+        store.add(Mission("work", "rvsc", dependencies=("missing",)))
+        decision = select_dispatch(store, [])
+        self.assertEqual(decision.outcome, "idle")
+        self.assertEqual(decision.reason, "no_eligible_work")
+
+    def test_dispatch_next_records_assignment_and_active_work_is_not_redispatched(self):
+        store = MissionStore()
+        store.add(Mission("work", "rvsc"))
+        worker = WorkerState("DEV-001", ("rvsc",))
+        decision = dispatch_next(store, [worker])
+        self.assertEqual(decision.outcome, "dispatch")
+        self.assertEqual(store.get("work").state, MissionState.ASSIGNED)
+        self.assertEqual(store.get("work").assigned_worker, "DEV-001")
+        self.assertEqual(select_dispatch(store, [worker]).outcome, "idle")
+
+    def test_healthy_worker_with_active_mission_is_not_available(self):
+        store = MissionStore()
+        store.add(Mission("work", "rvsc"))
+        worker = WorkerState("DEV-001", ("rvsc",), healthy=True, available=True, active_mission_id="other")
+        self.assertEqual(select_dispatch(store, [worker]).outcome, "starved")
 
 
 if __name__ == "__main__":
