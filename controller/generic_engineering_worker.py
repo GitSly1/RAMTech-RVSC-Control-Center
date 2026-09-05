@@ -11,7 +11,7 @@ from typing import Any, Callable
 
 from .adapters import WorkerRequest
 from .engineering_environment import ControlledEngineeringEnvironment, EngineeringEnvironmentError
-from .engineering_runner import EngineeringMissionRunner, ValidationCommand
+from .engineering_runner import EngineeringMissionRunner, EngineeringValidationError, ValidationCommand
 
 OPENAI_URL = "https://api.openai.com/v1/responses"
 OLLAMA_URL = os.environ.get(
@@ -294,6 +294,27 @@ def resume_persisted_engineering_result(mission: dict[str, Any], persisted: dict
     return result
 
 
+def _engineering_repair_prompt(
+    agent_id: str,
+    agent_name: str,
+    role: str,
+    mission: dict[str, Any],
+    source_files: dict[str, str],
+    failed_proposal: dict[str, Any],
+    validation_error: str,
+) -> str:
+    return (
+        _engineering_prompt(agent_id, agent_name, role, mission, source_files)
+        + "\n\nREPAIR ATTEMPT: This is the single permitted corrective pass."
+        + "\nThe previous proposal failed controlled validation."
+        + "\nVALIDATION ERROR:\n"
+        + validation_error
+        + "\nPREVIOUS FAILED PROPOSAL:\n"
+        + json.dumps(failed_proposal, sort_keys=True)
+        + "\nReturn one corrected proposal using the exact same JSON contract."
+    )
+
+
 def execute_mission(*, agent_id: str, agent_name: str, role: str, mission: dict[str, Any], checkpoint: CheckpointReporter | None = None, persist_result: ResultReporter | None = None) -> dict[str, Any]:
     worker_request = _worker_request(mission)
     if worker_request.agent_id != agent_id:
@@ -326,19 +347,94 @@ def execute_mission(*, agent_id: str, agent_name: str, role: str, mission: dict[
     if not isinstance(files, dict) or set(files) != set(worker_request.allowed_paths):
         returned = sorted(files) if isinstance(files, dict) else []
         raise RuntimeError(f"worker returned unauthorized or incomplete file set: {returned}")
-    for path in worker_request.allowed_paths:
-        content = files[path]
-        if not isinstance(content, str):
-            raise RuntimeError(f"worker content for {path} is not text")
-        environment.write_text(path, content)
-    changed = runner.evidence_after_change(worker_request.allowed_paths)
-    evidence.extend(changed)
-    if checkpoint:
-        checkpoint("implementation_applied", changed + (f"run_id:{run_id}",))
-    validations = runner.validate()
-    evidence.extend(validations)
-    if checkpoint:
-        checkpoint("tests_passed", validations + (f"run_id:{run_id}",))
+    repair_attempted = False
+    while True:
+        try:
+            for path in worker_request.allowed_paths:
+                content = files[path]
+                if not isinstance(content, str):
+                    raise RuntimeError(f"worker content for {path} is not text")
+                environment.write_text(path, content)
+
+            changed = runner.evidence_after_change(worker_request.allowed_paths)
+            evidence.extend(changed)
+            if checkpoint:
+                checkpoint("implementation_applied", changed + (f"run_id:{run_id}",))
+
+            validations = runner.validate()
+            evidence.extend(validations)
+            if checkpoint:
+                checkpoint("tests_passed", validations + (f"run_id:{run_id}",))
+            break
+
+        except Exception as exc:
+            try:
+                rollback = runner.restore_baseline()
+            except Exception as rollback_exc:
+                raise EngineeringEnvironmentError(
+                    f"engineering execution failed: {exc}; rollback failed: {rollback_exc}"
+                ) from rollback_exc
+
+            if checkpoint:
+                checkpoint(
+                    "implementation_rolled_back",
+                    rollback + (f"run_id:{run_id}", f"failure:{type(exc).__name__}"),
+                )
+
+            if not isinstance(exc, EngineeringValidationError) or repair_attempted:
+                raise
+
+            repair_attempted = True
+            if checkpoint:
+                checkpoint(
+                    "repair_started",
+                    (
+                        f"run_id:{run_id}",
+                        "repair_attempt:1",
+                        f"validation_error:{exc}",
+                    ),
+                )
+
+            repair_response, repair_provider = _provider_call(
+                _engineering_repair_prompt(
+                    agent_id,
+                    agent_name,
+                    role,
+                    mission,
+                    source_files,
+                    proposal,
+                    str(exc),
+                )
+            )
+            repair_status = str(repair_response.get("status", "unknown"))
+            if repair_status != "completed":
+                raise RuntimeError(f"repair provider status was {repair_status}")
+
+            repair_proposal = _json_object(_response_text(repair_response))
+            repair_files = repair_proposal.get("files")
+            if not isinstance(repair_files, dict) or set(repair_files) != set(worker_request.allowed_paths):
+                returned = sorted(repair_files) if isinstance(repair_files, dict) else []
+                raise RuntimeError(
+                    f"repair returned unauthorized or incomplete file set: {returned}"
+                )
+
+            proposal = repair_proposal
+            files = repair_files
+            provider_name = repair_provider
+            provider_response_id = str(repair_response.get("id", provider_response_id))
+            provider_status = repair_status
+            model = str(repair_response.get("model", model))
+
+            if checkpoint:
+                checkpoint(
+                    "repair_proposal_received",
+                    (
+                        f"run_id:{run_id}",
+                        "repair_attempt:1",
+                        f"provider_status:{repair_status}",
+                        f"provider_response_id:{provider_response_id}",
+                    ),
+                )
     commit_message = str(proposal.get("commit_message", "")).strip() or f"{worker_request.wp_id}: {agent_id} controlled engineering"
     committed = runner.commit(worker_request.allowed_paths, commit_message, author_name=author_name, author_email=author_email)
     evidence.extend(committed)

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from controller.adapters import WorkerRequest
 from controller.engineering_environment import EngineeringEnvironmentError
-from controller.engineering_runner import EngineeringMissionRunner, ValidationCommand
+from controller.engineering_runner import EngineeringMissionRunner, EngineeringValidationError, ValidationCommand
 
 
 class EngineeringMissionRunnerTests(unittest.TestCase):
@@ -44,6 +44,24 @@ class EngineeringMissionRunnerTests(unittest.TestCase):
         with self.assertRaises(EngineeringEnvironmentError):
             runner.preflight()
 
+    def test_failed_validation_has_explicit_failure_type(self) -> None:
+        runner = EngineeringMissionRunner(
+            self.request,
+            self.repo,
+            validations=(
+                ValidationCommand(
+                    "FAIL",
+                    ("python", "-c", "import sys; print('broken'); sys.exit(7)"),
+                ),
+            ),
+        )
+
+        with self.assertRaises(EngineeringValidationError) as captured:
+            runner.validate()
+
+        self.assertIn("validation failed [FAIL]", str(captured.exception))
+        self.assertIsInstance(captured.exception, EngineeringEnvironmentError)
+
     def test_validation_and_commit_produce_attributable_evidence(self) -> None:
         runner = EngineeringMissionRunner(
             self.request,
@@ -70,6 +88,26 @@ class EngineeringMissionRunnerTests(unittest.TestCase):
             identity.stdout.strip(),
             "DEV-001 Daniel|dev-001@rvsc.local|DEV-001 Daniel|dev-001@rvsc.local",
         )
+
+    def test_restore_baseline_removes_failed_authorized_changes(self) -> None:
+        runner = EngineeringMissionRunner(self.request, self.repo, validations=())
+
+        runner.environment.write_text("docs/seed.md", "broken\n")
+        runner.environment.write_text("docs/untracked.md", "temporary\n")
+
+        status_before = runner.environment.git_status()
+        self.assertTrue(status_before.stdout.strip())
+
+        evidence = runner.restore_baseline()
+
+        self.assertIn("rollback:success", evidence)
+        self.assertIn("repo_clean:true", evidence)
+        self.assertEqual(
+            (self.repo / "docs" / "seed.md").read_text(encoding="utf-8"),
+            "seed\n",
+        )
+        self.assertFalse((self.repo / "docs" / "untracked.md").exists())
+        self.assertEqual(runner.environment.git_status().stdout.strip(), "")
 
     def test_commit_fails_closed_without_explicit_agent_identity(self) -> None:
         runner = EngineeringMissionRunner(self.request, self.repo, validations=())

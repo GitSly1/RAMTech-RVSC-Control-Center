@@ -8,6 +8,11 @@ from .adapters import WorkerRequest, WorkerResult
 from .engineering_environment import ControlledEngineeringEnvironment, EngineeringEnvironmentError
 
 
+class EngineeringValidationError(EngineeringEnvironmentError):
+    """Raised when an authorized engineering change fails mission validation."""
+
+
+
 @dataclass(frozen=True)
 class ValidationCommand:
     name: str
@@ -54,7 +59,7 @@ class EngineeringMissionRunner:
             evidence.append(f"validation:{check.name}:returncode:{result.returncode}")
             if result.returncode != 0:
                 detail = result.stderr.strip() or result.stdout.strip() or "no output"
-                raise EngineeringEnvironmentError(f"validation failed [{check.name}]: {detail}")
+                raise EngineeringValidationError(f"validation failed [{check.name}]: {detail}")
         return tuple(evidence)
 
     def evidence_after_change(self, changed_paths: Sequence[str]) -> tuple[str, ...]:
@@ -67,6 +72,48 @@ class EngineeringMissionRunner:
             raise EngineeringEnvironmentError(diff.stderr.strip() or "git diff failed")
         evidence.append(f"diff_present:{str(bool(diff.stdout.strip())).lower()}")
         return tuple(evidence)
+
+    def restore_baseline(self) -> tuple[str, ...]:
+        head = self.environment.run(("git", "rev-parse", "HEAD"))
+        if head.returncode != 0 or not head.stdout.strip():
+            raise EngineeringEnvironmentError(
+                head.stderr.strip() or "unable to resolve rollback baseline"
+            )
+        baseline = head.stdout.strip()
+
+        reset = self.environment.run(("git", "reset", "--hard", baseline))
+        if reset.returncode != 0:
+            raise EngineeringEnvironmentError(
+                reset.stderr.strip()
+                or reset.stdout.strip()
+                or "unable to restore engineering baseline"
+            )
+
+        clean = self.environment.run(
+            ("git", "clean", "-fd", "--", *self.request.allowed_paths)
+        )
+        if clean.returncode != 0:
+            raise EngineeringEnvironmentError(
+                clean.stderr.strip()
+                or clean.stdout.strip()
+                or "unable to remove authorized untracked files"
+            )
+
+        status = self.environment.git_status()
+        if status.returncode != 0:
+            raise EngineeringEnvironmentError(
+                status.stderr.strip() or "git status failed after rollback"
+            )
+        if status.stdout.strip():
+            raise EngineeringEnvironmentError(
+                "engineering rollback did not produce a clean workspace"
+            )
+
+        return (
+            f"rollback_baseline:{baseline}",
+            "rollback:success",
+            "repo_clean:true",
+        )
 
     def commit(
         self,
