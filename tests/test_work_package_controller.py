@@ -26,6 +26,26 @@ class WorkPackageControllerTests(unittest.TestCase):
                 self.assertEqual(qa["engineering_commit_sha"], "a" * 40)
                 self.assertEqual(qa["reviewed_commit_sha"], "a" * 40)
 
+    def test_build_qa_mission_assigns_independent_qa_run_id(self):
+        qa = build_qa_mission(engineering_mission=self.mission(), engineering_result=self.result(), qa_agent_id="QA-001")
+        self.assertEqual(qa["engineering_run_id"], "ENG-RUN")
+        self.assertTrue(qa["run_id"].startswith("RVSC-QA-001-"))
+        self.assertNotEqual(qa["run_id"], qa["engineering_run_id"])
+        self.assertEqual(qa["agent_id"], "QA-001")
+
+    def test_build_qa_mission_replaces_stale_engineering_mission_run_id(self):
+        mission = self.mission()
+        mission["run_id"] = "STALE-ENGINEERING-MISSION-RUN"
+        qa = build_qa_mission(engineering_mission=mission, engineering_result=self.result(), qa_agent_id="QA-001")
+        self.assertNotEqual(qa["run_id"], "STALE-ENGINEERING-MISSION-RUN")
+        self.assertEqual(qa["engineering_run_id"], "ENG-RUN")
+
+    def test_build_qa_mission_requires_engineering_run_id(self):
+        result = self.result()
+        result.pop("run_id")
+        with self.assertRaisesRegex(QAHandoffError, "run_id"):
+            build_qa_mission(engineering_mission=self.mission(), engineering_result=result, qa_agent_id="QA-001")
+
     def test_build_qa_mission_requires_repository_context(self):
         mission = self.mission()
         mission.pop("repository")
