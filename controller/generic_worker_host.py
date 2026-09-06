@@ -411,12 +411,18 @@ def dispatch_qa_payload(payload: dict[str, Any], *, endpoint: str | None = None)
         raise QAHandoffError(f"QA transport failure: {reason}", category="transport_failure", retryable=True) from exc
 
 
-def _qa_failure_result(engineering_result: dict[str, Any], mission: dict[str, Any], exc: QAHandoffError) -> dict[str, Any]:
+def _qa_failure_result(
+    engineering_result: dict[str, Any],
+    mission: dict[str, Any],
+    exc: QAHandoffError,
+    *,
+    dispatch_started: bool = False,
+) -> dict[str, Any]:
     branch = str(engineering_result.get("work_branch") or engineering_result.get("branch") or mission.get("work_branch") or mission.get("branch") or "").strip()
     commit_sha = engineering_commit_sha(engineering_result)
     project = str(mission.get("project") or engineering_result.get("project") or "").strip()
     repository = str(mission.get("repository") or engineering_result.get("repository") or "").strip()
-    handoff: dict[str, Any] = {"success": False, "classification": exc.category, "summary": str(exc), "retryable": exc.retryable, "engineering_project": project, "engineering_repository": repository, "engineering_branch": branch, "engineering_commit_sha": commit_sha}
+    handoff: dict[str, Any] = {"success": False, "classification": exc.category, "summary": str(exc), "retryable": exc.retryable, "dispatch_started": bool(dispatch_started), "engineering_project": project, "engineering_repository": repository, "engineering_branch": branch, "engineering_commit_sha": commit_sha}
     if exc.http_status is not None:
         handoff["http_status"] = exc.http_status
     if exc.response is not None:
@@ -425,24 +431,59 @@ def _qa_failure_result(engineering_result: dict[str, Any], mission: dict[str, An
 
 
 def automatic_qa_handoff(implementer: RegisteredAgent, mission: dict[str, Any], engineering_result: dict[str, Any]) -> dict[str, Any]:
+    dispatch_started = False
     try:
         endpoint = configured_qa_worker_endpoint()
         qa_agent = select_registered_qa_agent(implementer.agent_id, str(mission.get("project", "")), endpoint)
         qa_mission = build_qa_mission(engineering_mission=mission, engineering_result=engineering_result, qa_agent_id=qa_agent.agent_id)
         _checkpoint("qa_handoff_dispatching", (f"qa_agent:{qa_agent.agent_id}", f"engineering_commit:{qa_mission['engineering_commit_sha']}", f"engineering_branch:{qa_mission['engineering_branch']}"))
+        _set_runtime_state(
+            qa_dispatch_started=True,
+            last_checkpoint="qa_handoff_dispatched",
+            checkpoint_evidence=(
+                f"qa_agent:{qa_agent.agent_id}",
+                f"qa_run_id:{qa_mission.get('run_id', '')}",
+                f"engineering_run_id:{engineering_result.get('run_id', '')}",
+                f"engineering_commit:{qa_mission['engineering_commit_sha']}",
+                f"engineering_branch:{qa_mission['engineering_branch']}",
+            ),
+        )
+        dispatch_started = True
         qa_result = dispatch_qa_payload({"protocol": "rvsc.worker.v1", "mission": qa_mission}, endpoint=endpoint)
         verdict, evidence = validate_qa_result(qa_result)
     except QAHandoffError as exc:
-        return _qa_failure_result(engineering_result, mission, exc)
+        return _qa_failure_result(engineering_result, mission, exc, dispatch_started=dispatch_started)
     except Exception as exc:
-        return _qa_failure_result(engineering_result, mission, QAHandoffError(str(exc)))
-    combined = {**engineering_result, "success": verdict == QA_ACCEPTED, "verdict": verdict, "qa_evidence": list(evidence), "qa_handoff": {"success": verdict == QA_ACCEPTED, "classification": "qa_accepted" if verdict == QA_ACCEPTED else "qa_rejected", "qa_agent_id": qa_agent.agent_id, "verdict": verdict, "evidence": list(evidence), "engineering_project": qa_mission["engineering_project"], "engineering_repository": qa_mission["engineering_repository"], "engineering_branch": qa_mission["engineering_branch"], "engineering_commit_sha": qa_mission["engineering_commit_sha"]}}
+        return _qa_failure_result(engineering_result, mission, QAHandoffError(str(exc)), dispatch_started=dispatch_started)
+    combined = {**engineering_result, "success": verdict == QA_ACCEPTED, "verdict": verdict, "qa_evidence": list(evidence), "qa_handoff": {"success": verdict == QA_ACCEPTED, "classification": "qa_accepted" if verdict == QA_ACCEPTED else "qa_rejected", "retryable": False, "dispatch_started": True, "qa_agent_id": qa_agent.agent_id, "verdict": verdict, "evidence": list(evidence), "engineering_project": qa_mission["engineering_project"], "engineering_repository": qa_mission["engineering_repository"], "engineering_branch": qa_mission["engineering_branch"], "engineering_commit_sha": qa_mission["engineering_commit_sha"]}}
     if verdict == QA_REJECTED:
         combined["summary"] = "automatic QA rejected the engineering result; progression blocked"
         _checkpoint("qa_rejected", evidence)
     else:
         _checkpoint("qa_accepted", evidence)
     return combined
+
+
+def _safe_pre_dispatch_qa_recovery(result: Any) -> bool:
+    if not isinstance(result, dict) or result.get("success") is True:
+        return False
+    handoff = result.get("qa_handoff")
+    return bool(
+        isinstance(handoff, dict)
+        and handoff.get("retryable") is True
+        and handoff.get("dispatch_started") is False
+    )
+
+
+def _ambiguous_post_dispatch_qa_failure(result: Any) -> bool:
+    if not isinstance(result, dict) or result.get("success") is True:
+        return False
+    handoff = result.get("qa_handoff")
+    return bool(
+        isinstance(handoff, dict)
+        and handoff.get("dispatch_started") is True
+        and not result.get("verdict")
+    )
 
 
 def _persist_engineering_result(result: dict[str, Any]) -> None:
@@ -533,8 +574,90 @@ def execute_payload(payload: dict[str, Any]) -> dict[str, Any]:
         if not configured.qa_eligible and engineering_result.get("success"):
             if recovery and state.get("qa_dispatch_started"):
                 raise RuntimeError("QA handoff was already dispatched; refusing duplicate QA")
-            _set_runtime_state(qa_dispatch_started=True, last_checkpoint="qa_handoff_reserved")
+
+            _set_runtime_state(
+                qa_dispatch_started=False,
+                last_checkpoint="qa_handoff_preparing",
+            )
             result = automatic_qa_handoff(configured, mission, engineering_result)
+
+            if _safe_pre_dispatch_qa_recovery(result):
+                handoff = result["qa_handoff"]
+                _set_runtime_state(
+                    active_mission=wp_id,
+                    active_run_id=run_id or None,
+                    last_result="failed",
+                    lifecycle_state="recovery_required",
+                    recovery_required=True,
+                    last_checkpoint="qa_recovery_pending",
+                    checkpoint_evidence=(
+                        "recovery_boundary:engineering_result_persisted",
+                        f"engineering_run_id:{engineering_result.get('run_id', '')}",
+                        f"engineering_commit:{engineering_commit_sha(engineering_result)}",
+                        f"engineering_branch:{engineering_result.get('work_branch', '')}",
+                        f"qa_failure:{handoff.get('classification', '')}",
+                    ),
+                    engineering_result=engineering_result,
+                    qa_dispatch_started=False,
+                )
+
+                _checkpoint(
+                    "qa_recovery_attempt",
+                    (
+                        "recovery_scope:qa_only",
+                        f"engineering_run_id:{engineering_result.get('run_id', '')}",
+                        f"engineering_commit:{engineering_commit_sha(engineering_result)}",
+                    ),
+                )
+
+                result = automatic_qa_handoff(configured, mission, engineering_result)
+
+            if _safe_pre_dispatch_qa_recovery(result):
+                handoff = result["qa_handoff"]
+                _set_runtime_state(
+                    active_mission=wp_id,
+                    active_run_id=run_id or None,
+                    last_result="failed",
+                    lifecycle_state="recovery_required",
+                    recovery_required=True,
+                    last_checkpoint="qa_recovery_pending",
+                    checkpoint_evidence=(
+                        "recovery_scope:qa_only",
+                        "recovery_outcome:bounded_retry_exhausted",
+                        f"qa_failure:{handoff.get('classification', '')}",
+                    ),
+                    engineering_result=engineering_result,
+                    qa_dispatch_started=False,
+                )
+                return result
+
+            if _ambiguous_post_dispatch_qa_failure(result):
+                handoff = result["qa_handoff"]
+                _set_runtime_state(
+                    active_mission=wp_id,
+                    active_run_id=run_id or None,
+                    last_result="failed",
+                    lifecycle_state="recovery_failed",
+                    recovery_required=True,
+                    last_checkpoint="qa_dispatch_outcome_unknown",
+                    checkpoint_evidence=(
+                        "recovery_scope:qa_only",
+                        "recovery_outcome:manual_reconciliation_required",
+                        f"qa_failure:{handoff.get('classification', '')}",
+                        f"engineering_run_id:{engineering_result.get('run_id', '')}",
+                        f"engineering_commit:{engineering_commit_sha(engineering_result)}",
+                        f"engineering_branch:{engineering_result.get('work_branch', '')}",
+                    ),
+                    engineering_result=engineering_result,
+                    qa_dispatch_started=True,
+                    terminal_recovery={
+                        "wp_id": wp_id,
+                        "run_id": run_id,
+                        "result": "qa_dispatch_outcome_unknown",
+                        "completed_at": _utc_now(),
+                    },
+                )
+                return result
         else:
             result = engineering_result
 

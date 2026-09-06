@@ -84,7 +84,7 @@ class GenericWorkerHostTests(unittest.TestCase):
         self.assertEqual(requested.get_method(), "GET")
 
     def test_endpoint_identity_is_used_in_mission_with_exact_source_revision(self):
-        agents = (self.alternate_qa, self.qa, self.noah)
+        agents = (self.daniel, self.alternate_qa, self.qa, self.noah)
         accepted = {"success": True, "verdict": QA_ACCEPTED, "evidence": ["tests:pass"]}
         with patch("controller.generic_worker_host.load_agents", return_value=agents), patch("controller.generic_worker_host.request.urlopen", return_value=FakeResponse(self.health())), patch("controller.generic_worker_host.dispatch_qa_payload", return_value=accepted) as dispatch, patch("controller.generic_worker_host._checkpoint"):
             result = automatic_qa_handoff(self.noah, self.mission, self.engineering)
@@ -220,6 +220,406 @@ class GenericWorkerHostTests(unittest.TestCase):
                 self.assertTrue(host._restore_runtime_state())
         self.assertTrue(host._RUNTIME_STATE["recovery_required"])
         self.assertEqual(host._RUNTIME_STATE["lifecycle_state"], "recovery_required")
+
+
+    def test_6l5_persists_dispatch_started_before_qa_transport(self):
+        observed = {}
+
+        def dispatch(payload, *, endpoint):
+            observed["qa_dispatch_started"] = host._RUNTIME_STATE["qa_dispatch_started"]
+            observed["checkpoint"] = host._RUNTIME_STATE["last_checkpoint"]
+            return {
+                "success": True,
+                "verdict": "QA_ACCEPTED",
+                "evidence": ["validated"],
+            }
+
+        qa_agent = type("QAAgent", (), {"agent_id": "QA-001"})()
+
+        with patch.object(host, "configured_qa_worker_endpoint", return_value="http://127.0.0.1:8771/execute"), \
+             patch.object(host, "select_registered_qa_agent", return_value=qa_agent), \
+             patch.object(host, "build_qa_mission", return_value={
+                 **self.mission,
+                 "agent_id": "QA-001",
+                 "run_id": "QA-RUN-6L5",
+                 "engineering_run_id": self.engineering["run_id"],
+                 "engineering_project": self.engineering["project"],
+                 "engineering_repository": self.engineering["repository"],
+                 "engineering_branch": self.engineering["work_branch"],
+                 "engineering_commit_sha": self.engineering["commit_sha"],
+             }), \
+             patch.object(host, "dispatch_qa_payload", side_effect=dispatch), \
+             patch.object(host, "validate_qa_result", return_value=("QA_ACCEPTED", ("validated",))):
+            result = host.automatic_qa_handoff(
+                self.daniel,
+                self.mission,
+                self.engineering,
+            )
+
+        self.assertTrue(result["success"])
+        self.assertTrue(observed["qa_dispatch_started"])
+        self.assertEqual(observed["checkpoint"], "qa_handoff_dispatched")
+
+    def test_6l5_ambiguous_post_dispatch_failure_preserves_engineering_and_fails_closed(self):
+        mission = {
+            **self.mission,
+            "agent_id": self.daniel.agent_id,
+            "run_id": self.engineering["run_id"],
+            "project": self.engineering["project"],
+            "repository": self.engineering["repository"],
+            "work_branch": self.engineering["work_branch"],
+        }
+
+        ambiguous = {
+            **self.engineering,
+            "success": False,
+            "summary": "QA transport outcome unknown",
+            "qa_handoff": {
+                "success": False,
+                "classification": "qa_transport_failure",
+                "retryable": True,
+                "dispatch_started": True,
+            },
+        }
+
+        with patch.object(host, "configured_agent", return_value=self.daniel), \
+             patch.object(host, "validate_worker"), \
+             patch.object(host, "execute_generic_engineering", return_value=self.engineering) as engineering, \
+             patch.object(host, "automatic_qa_handoff", return_value=ambiguous):
+            result = host.execute_payload({
+                "protocol": "rvsc.worker.v1",
+                "mission": mission,
+            })
+
+        self.assertFalse(result["success"])
+        engineering.assert_called_once()
+
+        state = host._RUNTIME_STATE
+        self.assertTrue(state["recovery_required"])
+        self.assertTrue(state["qa_dispatch_started"])
+        self.assertEqual(state["last_checkpoint"], "qa_dispatch_outcome_unknown")
+        self.assertEqual(state["lifecycle_state"], "recovery_failed")
+        self.assertEqual(
+            state["engineering_result"]["run_id"],
+            self.engineering["run_id"],
+        )
+        self.assertEqual(
+            state["engineering_result"]["commit_sha"],
+            self.engineering["commit_sha"],
+        )
+
+        with patch.object(host, "configured_agent", return_value=self.daniel), \
+             patch.object(host, "validate_worker"), \
+             patch.object(host, "execute_generic_engineering") as duplicate_engineering, \
+             patch.object(host, "automatic_qa_handoff") as duplicate_qa:
+            with self.assertRaises(RuntimeError):
+                host.execute_payload({
+                    "protocol": "rvsc.worker.v1",
+                    "mission": mission,
+                    "recovery": True,
+                })
+
+        duplicate_engineering.assert_not_called()
+        duplicate_qa.assert_not_called()
+
+    def test_6l5_restart_restores_qa_only_recovery_without_duplicate_engineering(self):
+        context = host._mission_context(self.mission)
+
+        saved = {
+            **host._RUNTIME_STATE,
+            "active_mission": self.mission["wp_id"],
+            "active_run_id": self.mission["run_id"],
+            "last_result": "failed",
+            "last_checkpoint": "qa_recovery_pending",
+            "checkpoint_evidence": (
+                "recovery_boundary:engineering_result_persisted",
+                f"engineering_run_id:{self.engineering['run_id']}",
+                f"engineering_commit:{self.engineering['commit_sha']}",
+            ),
+            "recovery_required": True,
+            "recovery_context": context,
+            "recovery_digest": host._context_digest(context),
+            "recovery_attempted": False,
+            "engineering_result": self.engineering,
+            "qa_dispatch_started": False,
+            "lifecycle_state": "recovery_required",
+        }
+
+        qa_result = {
+            **self.engineering,
+            "success": True,
+            "verdict": QA_ACCEPTED,
+            "qa_handoff": {
+                "success": True,
+                "classification": "qa_accepted",
+                "retryable": False,
+                "dispatch_started": True,
+                "qa_agent_id": "QA-001",
+                "verdict": QA_ACCEPTED,
+                "engineering_project": self.mission["project"],
+                "engineering_repository": self.mission["repository"],
+                "engineering_branch": self.mission["work_branch"],
+                "engineering_commit_sha": self.engineering["commit_sha"],
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as temp:
+            store = DurableRuntimeStateStore(temp)
+            store.save("OPS-001", saved)
+
+            # Simulate a fresh process: discard the active/recovery state first.
+            with host._STATE_LOCK:
+                host._RUNTIME_STATE.update({
+                    "active_mission": None,
+                    "active_run_id": None,
+                    "last_run_id": None,
+                    "last_activity": None,
+                    "last_result": None,
+                    "last_checkpoint": None,
+                    "checkpoint_evidence": (),
+                    "recovery_required": False,
+                    "recovered_checkpoint": None,
+                    "lifecycle_state": "idle",
+                    "recovery_context": None,
+                    "recovery_digest": None,
+                    "recovery_attempted": False,
+                    "engineering_result": None,
+                    "qa_dispatch_started": False,
+                    "terminal_recovery": None,
+                })
+
+            with patch(
+                "controller.generic_worker_host.configured_agent",
+                return_value=self.noah,
+            ), patch(
+                "controller.generic_worker_host._state_store",
+                return_value=store,
+            ):
+                restored = host._restore_runtime_state()
+
+            self.assertTrue(restored)
+            self.assertTrue(host._RUNTIME_STATE["recovery_required"])
+            self.assertEqual(
+                host._RUNTIME_STATE["last_checkpoint"],
+                "runtime_recovered",
+            )
+            self.assertEqual(
+                host._RUNTIME_STATE["recovered_checkpoint"],
+                "qa_recovery_pending",
+            )
+            self.assertEqual(
+                host._RUNTIME_STATE["engineering_result"]["run_id"],
+                self.engineering["run_id"],
+            )
+            self.assertEqual(
+                host._RUNTIME_STATE["engineering_result"]["commit_sha"],
+                self.engineering["commit_sha"],
+            )
+            self.assertFalse(host._RUNTIME_STATE["qa_dispatch_started"])
+
+            with patch(
+                "controller.generic_worker_host.configured_agent",
+                return_value=self.noah,
+            ), patch(
+                "controller.generic_worker_host._state_store",
+                return_value=store,
+            ), patch(
+                "controller.generic_worker_host.execute_generic_engineering",
+            ) as engineering, patch(
+                "controller.generic_worker_host.automatic_qa_handoff",
+                return_value=qa_result,
+            ) as qa:
+                result = execute_payload({
+                    "protocol": "rvsc.worker.v1",
+                    "recovery": True,
+                    "mission": self.mission,
+                })
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["verdict"], QA_ACCEPTED)
+
+        # Critical 6L5 restart invariant:
+        engineering.assert_not_called()
+        qa.assert_called_once()
+
+        recovered_engineering = qa.call_args.args[2]
+        self.assertEqual(
+            recovered_engineering["run_id"],
+            self.engineering["run_id"],
+        )
+        self.assertEqual(
+            recovered_engineering["commit_sha"],
+            self.engineering["commit_sha"],
+        )
+
+
+    def test_6l5_pre_dispatch_qa_failure_retries_qa_only(self):
+        mission = {
+            "agent_id": "OPS-001",
+            "project": "rvsc",
+            "repository": "GitSly1/RAMTech-RVSC-Control-Center",
+            "wp_id": "RVSC-6L5-RECOVERY",
+            "run_id": "ENG-RUN-6L5",
+            "base_branch": "rvsc/base",
+            "work_branch": "rvsc/RVSC-6L5-RECOVERY",
+            "allowed_paths": ["README.md"],
+            "validation_commands": [{"name": "tests", "argv": ["python", "-m", "unittest"]}],
+        }
+        engineering = {
+            "success": True,
+            "run_id": "ENG-RUN-6L5",
+            "project": "rvsc",
+            "repository": mission["repository"],
+            "commit_sha": "a" * 40,
+            "work_branch": mission["work_branch"],
+            "pushed": True,
+        }
+        first_qa = {
+            **engineering,
+            "success": False,
+            "qa_handoff": {
+                "success": False,
+                "classification": "transport_failure",
+                "retryable": True,
+                "dispatch_started": False,
+                "engineering_project": "rvsc",
+                "engineering_repository": mission["repository"],
+                "engineering_branch": mission["work_branch"],
+                "engineering_commit_sha": "a" * 40,
+            },
+        }
+        accepted = {
+            **engineering,
+            "success": True,
+            "verdict": QA_ACCEPTED,
+            "qa_handoff": {
+                "success": True,
+                "classification": "qa_accepted",
+                "retryable": False,
+                "dispatch_started": True,
+                "qa_agent_id": "QA-001",
+                "verdict": QA_ACCEPTED,
+                "engineering_project": "rvsc",
+                "engineering_repository": mission["repository"],
+                "engineering_branch": mission["work_branch"],
+                "engineering_commit_sha": "a" * 40,
+            },
+        }
+
+        with host._STATE_LOCK:
+            host._RUNTIME_STATE.update({
+                "active_mission": None,
+                "active_run_id": None,
+                "last_run_id": None,
+                "last_activity": None,
+                "last_result": None,
+                "last_checkpoint": None,
+                "checkpoint_evidence": (),
+                "recovery_required": False,
+                "recovered_checkpoint": None,
+                "lifecycle_state": "idle",
+                "recovery_context": None,
+                "recovery_digest": None,
+                "recovery_attempted": False,
+                "engineering_result": None,
+                "qa_dispatch_started": False,
+                "terminal_recovery": None,
+            })
+
+        with patch("controller.generic_worker_host.configured_agent", return_value=self.noah), \
+             patch("controller.generic_worker_host._persist_runtime_state"), \
+             patch("controller.generic_worker_host.execute_generic_engineering", return_value=engineering) as engineer, \
+             patch("controller.generic_worker_host.automatic_qa_handoff", side_effect=[first_qa, accepted]) as qa:
+            result = execute_payload({"protocol": "rvsc.worker.v1", "mission": mission})
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["verdict"], QA_ACCEPTED)
+        self.assertEqual(engineer.call_count, 1)
+        self.assertEqual(qa.call_count, 2)
+        self.assertEqual(
+            qa.call_args_list[0].args[2]["run_id"],
+            qa.call_args_list[1].args[2]["run_id"],
+        )
+        self.assertEqual(
+            qa.call_args_list[0].args[2]["commit_sha"],
+            qa.call_args_list[1].args[2]["commit_sha"],
+        )
+
+    def test_6l5_bounded_qa_retry_exhaustion_preserves_engineering_result(self):
+        mission = {
+            "agent_id": "OPS-001",
+            "project": "rvsc",
+            "repository": "GitSly1/RAMTech-RVSC-Control-Center",
+            "wp_id": "RVSC-6L5-EXHAUSTED",
+            "run_id": "ENG-RUN-6L5-EXHAUSTED",
+            "base_branch": "rvsc/base",
+            "work_branch": "rvsc/RVSC-6L5-EXHAUSTED",
+            "allowed_paths": ["README.md"],
+            "validation_commands": [{"name": "tests", "argv": ["python", "-m", "unittest"]}],
+        }
+        engineering = {
+            "success": True,
+            "run_id": "ENG-RUN-6L5-EXHAUSTED",
+            "project": "rvsc",
+            "repository": mission["repository"],
+            "commit_sha": "b" * 40,
+            "work_branch": mission["work_branch"],
+            "pushed": True,
+        }
+        failed_qa = {
+            **engineering,
+            "success": False,
+            "qa_handoff": {
+                "success": False,
+                "classification": "transport_failure",
+                "retryable": True,
+                "dispatch_started": False,
+                "engineering_project": "rvsc",
+                "engineering_repository": mission["repository"],
+                "engineering_branch": mission["work_branch"],
+                "engineering_commit_sha": "b" * 40,
+            },
+        }
+
+        with host._STATE_LOCK:
+            host._RUNTIME_STATE.update({
+                "active_mission": None,
+                "active_run_id": None,
+                "last_run_id": None,
+                "last_activity": None,
+                "last_result": None,
+                "last_checkpoint": None,
+                "checkpoint_evidence": (),
+                "recovery_required": False,
+                "recovered_checkpoint": None,
+                "lifecycle_state": "idle",
+                "recovery_context": None,
+                "recovery_digest": None,
+                "recovery_attempted": False,
+                "engineering_result": None,
+                "qa_dispatch_started": False,
+                "terminal_recovery": None,
+            })
+
+        with patch("controller.generic_worker_host.configured_agent", return_value=self.noah), \
+             patch("controller.generic_worker_host._persist_runtime_state"), \
+             patch("controller.generic_worker_host.execute_generic_engineering", return_value=engineering) as engineer, \
+             patch("controller.generic_worker_host.automatic_qa_handoff", side_effect=[failed_qa, failed_qa]) as qa:
+            result = execute_payload({"protocol": "rvsc.worker.v1", "mission": mission})
+
+        self.assertFalse(result["success"])
+        self.assertEqual(engineer.call_count, 1)
+        self.assertEqual(qa.call_count, 2)
+
+        with host._STATE_LOCK:
+            state = dict(host._RUNTIME_STATE)
+
+        self.assertTrue(state["recovery_required"])
+        self.assertEqual(state["lifecycle_state"], "recovery_required")
+        self.assertEqual(state["last_checkpoint"], "qa_recovery_pending")
+        self.assertEqual(state["engineering_result"]["run_id"], engineering["run_id"])
+        self.assertEqual(state["engineering_result"]["commit_sha"], engineering["commit_sha"])
+        self.assertFalse(state["qa_dispatch_started"])
 
 
 if __name__ == "__main__":
