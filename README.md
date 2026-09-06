@@ -9,3 +9,7 @@ Current checkpoint: **RVSC-013 — Git / Source Isolation**.
 ## RVSC-030B-6L4 Daniel Local Qualification
 
 This section has been added to demonstrate Daniel's ability to autonomously execute a controlled engineering mission using the default local Ollama provider through the hardened 6L3 engineering harness.
+
+## RVSC-030B-6L5 Live Qualification
+
+This qualification validates bounded QA-only downstream recovery after a safe pre-dispatch QA handoff failure.
