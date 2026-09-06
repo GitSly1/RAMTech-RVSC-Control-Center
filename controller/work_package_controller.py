@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any, Iterable
+import uuid
 
 ALLOWED_TRANSITIONS = {
     "draft": {"ready"},
@@ -107,9 +108,10 @@ def engineering_push_succeeded(result: dict[str, Any]) -> bool:
 
 def build_qa_mission(*, engineering_mission: dict[str, Any], engineering_result: dict[str, Any], qa_agent_id: str) -> dict[str, Any]:
     implementer_id = str(engineering_mission.get("agent_id", "")).strip()
-    if not qa_agent_id.strip():
+    qa_agent_id = qa_agent_id.strip()
+    if not qa_agent_id:
         raise QAHandoffError("missing QA candidate")
-    if qa_agent_id.strip().upper() == implementer_id.upper():
+    if qa_agent_id.upper() == implementer_id.upper():
         raise QAHandoffError("implementer cannot be selected as QA")
     if not engineering_result.get("success"):
         raise QAHandoffError("engineering execution was not successful")
@@ -129,18 +131,23 @@ def build_qa_mission(*, engineering_mission: dict[str, Any], engineering_result:
 
     project = _first_text((engineering_mission.get("project"), engineering_result.get("project")))
     repository = _first_text((engineering_mission.get("repository"), engineering_result.get("repository")))
+    engineering_run_id = _first_text((engineering_result.get("run_id"),))
     if not project:
         raise QAHandoffError("missing engineering project")
     if not repository:
         raise QAHandoffError("missing engineering repository")
+    if not engineering_run_id:
+        raise QAHandoffError("missing engineering run_id evidence")
 
+    qa_run_id = f"RVSC-{qa_agent_id.upper()}-{uuid.uuid4().hex[:12].upper()}"
     qa_mission = dict(engineering_mission)
     qa_mission.update({
-        "agent_id": qa_agent_id.strip(),
+        "run_id": qa_run_id,
+        "agent_id": qa_agent_id,
         "mission_type": "qa",
         "qa_mode": "independent_review",
         "implementer_id": implementer_id,
-        "engineering_run_id": engineering_result.get("run_id"),
+        "engineering_run_id": engineering_run_id,
         "engineering_project": project,
         "engineering_repository": repository,
         "engineering_branch": branch,
