@@ -331,7 +331,12 @@ def execute_mission(*, agent_id: str, agent_name: str, role: str, mission: dict[
     evidence = list(runner.preflight())
     if checkpoint:
         checkpoint("preflight_passed", tuple(evidence) + (f"run_id:{run_id}",))
-    source_files = {path: environment.read_text(path) for path in worker_request.allowed_paths}
+    source_files = {}
+    for path in worker_request.allowed_paths:
+        try:
+            source_files[path] = environment.read_text(path)
+        except FileNotFoundError:
+            source_files[path] = ""
     response, provider_name = _provider_call(
         _engineering_prompt(agent_id, agent_name, role, mission, source_files)
     )

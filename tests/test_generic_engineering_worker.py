@@ -409,6 +409,93 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
         self.assertNotIn("repair_started", names)
         self.assertNotIn("repair_proposal_received", names)
 
+    @patch("controller.generic_engineering_worker._provider_call")
+    @patch("controller.generic_engineering_worker._prepare_branch")
+    @patch("controller.generic_engineering_worker._configure_git_identity")
+    @patch("controller.generic_engineering_worker.EngineeringMissionRunner")
+    def test_missing_allowed_file_is_presented_to_provider_as_empty_baseline(
+        self,
+        runner_type,
+        configure_identity,
+        prepare_branch,
+        provider_call,
+    ):
+        runner = runner_type.return_value
+        environment = runner.environment
+        environment.read_text.side_effect = FileNotFoundError(
+            "authorized new file"
+        )
+        runner.preflight.return_value = ("preflight:ok",)
+        runner.validate.return_value = ()
+        runner.evidence_after_change.return_value = ()
+        runner.commit.return_value = ("commit:created",)
+        environment.run.side_effect = [
+            Mock(returncode=0, stdout="a" * 40 + "\n", stderr=""),
+            Mock(returncode=0, stdout="", stderr=""),
+        ]
+        environment.git_status.return_value = Mock(
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+
+        provider_call.return_value = (
+            {
+                "id": "response-new-file",
+                "status": "completed",
+                "model": "test-model",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": (
+                                    '{"files":{"new_file.py":"VALUE = 1\\n"},'
+                                    '"commit_message":"create authorized file",'
+                                    '"engineering_summary":"create authorized file"}'
+                                ),
+                            }
+                        ],
+                    }
+                ],
+            },
+            "test-provider",
+        )
+
+        mission = {
+            "agent_id": "DEV-001",
+            "wp_id": "TEST-NEW-FILE",
+            "project": "rvsc",
+            "repository": "GitSly1/RAMTech-RVSC-Control-Center",
+            "base_branch": "main",
+            "work_branch": "rvsc/TEST-NEW-FILE",
+            "objective": "create authorized new file",
+            "allowed_paths": ["new_file.py"],
+            "acceptance_criteria": ["file is created"],
+            "validation_commands": [
+                {
+                    "name": "TEST",
+                    "argv": ["python", "-c", "print('test')"],
+                }
+            ],
+        }
+
+        execute_mission(
+            agent_id="DEV-001",
+            agent_name="Daniel",
+            role="Engineering",
+            mission=mission,
+        )
+
+        environment.read_text.assert_called_once_with("new_file.py")
+        provider_call.assert_called_once()
+        prompt = provider_call.call_args.args[0]
+        self.assertIn('"new_file.py": ""', prompt)
+        environment.write_text.assert_called_once_with(
+            "new_file.py",
+            "VALUE = 1\n",
+        )
     def test_git_identity_failure_stops_execution(self):
         environment = Mock()
         environment.run.return_value = Mock(returncode=1, stdout="", stderr="failed")
