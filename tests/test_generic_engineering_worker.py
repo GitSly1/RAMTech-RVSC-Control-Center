@@ -8,7 +8,7 @@ from unittest.mock import Mock, call, patch
 
 from controller.engineering_environment import EngineeringEnvironmentError
 from controller.engineering_runner import EngineeringValidationError
-from controller.generic_engineering_worker import _configure_git_identity, _git_identity, _repo_root, _validations, _worker_request, execute_mission
+from controller.generic_engineering_worker import _configure_git_identity, _git_identity, _read_context_files, _repo_root, _validations, _worker_request, execute_mission
 
 
 class GenericEngineeringWorkerTests(unittest.TestCase):
@@ -496,6 +496,241 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
             "new_file.py",
             "VALUE = 1\n",
         )
+    def test_read_context_files_reads_only_requested_repository_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "controller").mkdir()
+            (repo / "controller" / "runtime_supervisor.py").write_text(
+                "STATUS_SURFACE = 'runtime'\n",
+                encoding="utf-8",
+            )
+
+            result = _read_context_files(
+                repo,
+                {"context_paths": ["controller/runtime_supervisor.py"]},
+            )
+
+            self.assertEqual(
+                result,
+                {
+                    "controller/runtime_supervisor.py":
+                    "STATUS_SURFACE = 'runtime'\n"
+                },
+            )
+
+    def test_missing_required_context_file_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "required context file does not exist",
+            ):
+                _read_context_files(
+                    Path(directory),
+                    {"context_paths": ["controller/missing.py"]},
+                )
+
+    @patch("controller.generic_engineering_worker._provider_call")
+    @patch("controller.generic_engineering_worker._prepare_branch")
+    @patch("controller.generic_engineering_worker._configure_git_identity")
+    @patch("controller.generic_engineering_worker.EngineeringMissionRunner")
+    def test_read_only_context_is_supplied_but_not_added_to_write_scope(
+        self,
+        runner_type,
+        configure_identity,
+        prepare_branch,
+        provider_call,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "controller").mkdir()
+            (repo / "controller" / "runtime_supervisor.py").write_text(
+                "def status_dicts():\n    return {'controller': 'running'}\n",
+                encoding="utf-8",
+            )
+
+            runner = runner_type.return_value
+            environment = runner.environment
+            environment.read_text.side_effect = FileNotFoundError(
+                "authorized new file"
+            )
+            runner.preflight.return_value = ("preflight:ok",)
+            runner.validate.return_value = ()
+            runner.evidence_after_change.return_value = ()
+            runner.commit.return_value = ("commit:created",)
+            environment.run.side_effect = [
+                Mock(returncode=0, stdout="a" * 40 + "\n", stderr=""),
+                Mock(returncode=0, stdout="", stderr=""),
+            ]
+            environment.git_status.return_value = Mock(
+                returncode=0,
+                stdout="",
+                stderr="",
+            )
+
+            provider_call.return_value = (
+                {
+                    "id": "response-context",
+                    "status": "completed",
+                    "model": "test-model",
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": (
+                                        '{"files":{"new_file.py":"VALUE = 1\\n"},'
+                                        '"commit_message":"use runtime context",'
+                                        '"engineering_summary":"bounded context"}'
+                                    ),
+                                }
+                            ],
+                        }
+                    ],
+                },
+                "test-provider",
+            )
+
+            mission = {
+                "agent_id": "DEV-001",
+                "wp_id": "TEST-CONTEXT",
+                "project": "rvsc",
+                "repository": "GitSly1/RAMTech-RVSC-Control-Center",
+                "base_branch": "main",
+                "work_branch": "rvsc/TEST-CONTEXT",
+                "objective": "use runtime status surface",
+                "allowed_paths": ["new_file.py"],
+                "context_paths": ["controller/runtime_supervisor.py"],
+                "acceptance_criteria": ["context is read only"],
+                "validation_commands": [
+                    {
+                        "name": "TEST",
+                        "argv": ["python", "-c", "print('test')"],
+                    }
+                ],
+            }
+
+            with patch.dict(
+                os.environ,
+                {"RVSC_RVSC_REPO": str(repo)},
+                clear=False,
+            ):
+                execute_mission(
+                    agent_id="DEV-001",
+                    agent_name="Daniel",
+                    role="Engineering",
+                    mission=mission,
+                )
+
+            prompt = provider_call.call_args.args[0]
+
+            self.assertIn(
+                '"controller/runtime_supervisor.py"',
+                prompt,
+            )
+            self.assertIn(
+                "def status_dicts()",
+                prompt,
+            )
+            self.assertIn(
+                "READ-ONLY CONTEXT FILES",
+                prompt,
+            )
+
+            environment.write_text.assert_called_once_with(
+                "new_file.py",
+                "VALUE = 1\n",
+            )
+
+    @patch("controller.generic_engineering_worker._provider_call")
+    @patch("controller.generic_engineering_worker._prepare_branch")
+    @patch("controller.generic_engineering_worker._configure_git_identity")
+    @patch("controller.generic_engineering_worker.EngineeringMissionRunner")
+    def test_context_only_path_cannot_be_returned_as_output(
+        self,
+        runner_type,
+        configure_identity,
+        prepare_branch,
+        provider_call,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "controller").mkdir()
+            (repo / "controller" / "runtime_supervisor.py").write_text(
+                "STATUS = 'running'\n",
+                encoding="utf-8",
+            )
+
+            runner = runner_type.return_value
+            environment = runner.environment
+            environment.read_text.return_value = "baseline\n"
+            runner.preflight.return_value = ("preflight:ok",)
+
+            provider_call.return_value = (
+                {
+                    "id": "response-unauthorized-context",
+                    "status": "completed",
+                    "model": "test-model",
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": (
+                                        '{"files":{'
+                                        '"source.py":"updated\\n",'
+                                        '"controller/runtime_supervisor.py":"forbidden\\n"'
+                                        '},'
+                                        '"commit_message":"bad scope",'
+                                        '"engineering_summary":"bad scope"}'
+                                    ),
+                                }
+                            ],
+                        }
+                    ],
+                },
+                "test-provider",
+            )
+
+            mission = {
+                "agent_id": "DEV-001",
+                "wp_id": "TEST-CONTEXT-SCOPE",
+                "project": "rvsc",
+                "repository": "GitSly1/RAMTech-RVSC-Control-Center",
+                "base_branch": "main",
+                "work_branch": "rvsc/TEST-CONTEXT-SCOPE",
+                "objective": "prove context remains read only",
+                "allowed_paths": ["source.py"],
+                "context_paths": ["controller/runtime_supervisor.py"],
+                "acceptance_criteria": ["context cannot become output"],
+                "validation_commands": [
+                    {
+                        "name": "TEST",
+                        "argv": ["python", "-c", "print('test')"],
+                    }
+                ],
+            }
+
+            with patch.dict(
+                os.environ,
+                {"RVSC_RVSC_REPO": str(repo)},
+                clear=False,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "unauthorized or incomplete file set",
+                ):
+                    execute_mission(
+                        agent_id="DEV-001",
+                        agent_name="Daniel",
+                        role="Engineering",
+                        mission=mission,
+                    )
+
+            environment.write_text.assert_not_called()
+            runner.commit.assert_not_called()
+
     def test_git_identity_failure_stops_execution(self):
         environment = Mock()
         environment.run.return_value = Mock(returncode=1, stdout="", stderr="failed")

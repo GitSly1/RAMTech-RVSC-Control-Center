@@ -89,6 +89,48 @@ class MissionStoreTests(unittest.TestCase):
         self.assertIn("QA-001", corrective.metadata["excluded_worker_ids"])
         self.assertTrue(corrective.metadata["requires_independent_qa"])
 
+    def test_context_paths_are_validated_and_preserved(self):
+        contract = validate_mission_contract(
+            self.contract(
+                context_paths=[
+                    "controller/runtime_supervisor.py",
+                    "controller/worker_runtime.py",
+                ]
+            ),
+            ("rvsc",),
+        )
+
+        self.assertEqual(
+            contract["context_paths"],
+            [
+                "controller/runtime_supervisor.py",
+                "controller/worker_runtime.py",
+            ],
+        )
+        self.assertEqual(
+            contract["allowed_paths"],
+            ["controller/a.py"],
+        )
+
+    def test_unsafe_and_malformed_context_paths_fail_closed(self):
+        with self.assertRaises(OrchestrationError):
+            validate_mission_contract(
+                self.contract(context_paths=["../secret"]),
+                ("rvsc",),
+            )
+
+        with self.assertRaises(OrchestrationError):
+            validate_mission_contract(
+                self.contract(context_paths="controller/runtime_supervisor.py"),
+                ("rvsc",),
+            )
+
+        with self.assertRaises(OrchestrationError):
+            validate_mission_contract(
+                self.contract(context_paths=[""]),
+                ("rvsc",),
+            )
+
     def test_malformed_unsupported_and_unsafe_contracts_fail_closed(self):
         with self.assertRaises(OrchestrationError):
             validate_mission_contract(self.contract(project="unknown"), ("rvsc",))

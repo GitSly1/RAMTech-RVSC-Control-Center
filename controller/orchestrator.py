@@ -144,11 +144,21 @@ def validate_mission_contract(contract: Mapping[str, Any], supported_projects: I
         data[name] = _required_string(data, name)
     data["acceptance_criteria"] = _required_string_list(data, "acceptance_criteria")
     data["allowed_paths"] = _required_string_list(data, "allowed_paths")
-    for raw_path in data["allowed_paths"]:
-        normalized = raw_path.replace("\\", "/")
-        path = PurePosixPath(normalized)
-        if path.is_absolute() or ".." in path.parts or normalized.startswith("~") or ":" in path.parts[0]:
-            raise OrchestrationError("mission contract contains an unsafe allowed path: %s" % raw_path)
+    if "context_paths" in data:
+        context_paths = data["context_paths"]
+        if not isinstance(context_paths, list) or any(
+            not isinstance(value, str) or not value.strip() for value in context_paths
+        ):
+            raise OrchestrationError("mission context_paths must be a list of non-empty strings")
+        data["context_paths"] = [value.strip() for value in context_paths]
+    for field_name in ("allowed_paths", "context_paths"):
+        for raw_path in data.get(field_name, []):
+            normalized = raw_path.replace("\\", "/")
+            path = PurePosixPath(normalized)
+            if path.is_absolute() or ".." in path.parts or normalized.startswith("~") or ":" in path.parts[0]:
+                raise OrchestrationError(
+                    "mission contract contains an unsafe %s path: %s" % (field_name, raw_path)
+                )
     commands = data.get("validation_commands")
     if not isinstance(commands, list) or not commands:
         raise OrchestrationError("mission contract requires validation_commands")
