@@ -736,6 +736,80 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
     @patch("controller.generic_engineering_worker._prepare_branch")
     @patch("controller.generic_engineering_worker._configure_git_identity")
     @patch("controller.generic_engineering_worker.EngineeringMissionRunner")
+    def test_malformed_files_shape_is_reported_without_contents(
+        self,
+        runner_type,
+        configure_identity,
+        prepare_branch,
+        provider_call,
+    ):
+        runner = runner_type.return_value
+        environment = runner.environment
+        environment.read_text.return_value = "baseline\n"
+        runner.preflight.return_value = ("preflight:ok",)
+
+        provider_call.return_value = (
+            {
+                "id": "response-malformed-files",
+                "status": "completed",
+                "model": "test-model",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": (
+                                    '{"files":null,'
+                                    '"commit_message":"none",'
+                                    '"engineering_summary":"malformed"}'
+                                ),
+                            }
+                        ],
+                    }
+                ],
+            },
+            "test-provider",
+        )
+
+        mission = {
+            "agent_id": "DEV-001",
+            "wp_id": "TEST-PROPOSAL-SHAPE",
+            "project": "rvsc",
+            "repository": "GitSly1/RAMTech-RVSC-Control-Center",
+            "base_branch": "main",
+            "work_branch": "rvsc/TEST-PROPOSAL-SHAPE",
+            "objective": "observe malformed proposal shape",
+            "allowed_paths": ["source.py"],
+            "acceptance_criteria": ["fail closed"],
+            "validation_commands": [
+                {
+                    "name": "TEST",
+                    "argv": ["python", "-m", "unittest"],
+                }
+            ],
+        }
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"files_shape:null; files_count:0",
+        ):
+            execute_mission(
+                agent_id="DEV-001",
+                agent_name="Daniel",
+                role="Engineering",
+                mission=mission,
+            )
+
+        self.assertEqual(provider_call.call_count, 1)
+        environment.write_text.assert_not_called()
+        runner.validate.assert_not_called()
+        runner.commit.assert_not_called()
+
+    @patch("controller.generic_engineering_worker._provider_call")
+    @patch("controller.generic_engineering_worker._prepare_branch")
+    @patch("controller.generic_engineering_worker._configure_git_identity")
+    @patch("controller.generic_engineering_worker.EngineeringMissionRunner")
     def test_missing_authorized_files_receive_one_bounded_proposal_repair(
         self,
         runner_type,

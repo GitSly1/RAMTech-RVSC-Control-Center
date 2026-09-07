@@ -385,7 +385,19 @@ def execute_mission(*, agent_id: str, agent_name: str, role: str, mission: dict[
 
     if not isinstance(files, dict) or unauthorized_files:
         returned = sorted(files) if isinstance(files, dict) else []
-        raise RuntimeError(f"worker returned unauthorized or incomplete file set: {returned}")
+        if "files" not in proposal:
+            files_shape = "missing"
+        elif files is None:
+            files_shape = "null"
+        elif isinstance(files, dict):
+            files_shape = "dict"
+        else:
+            files_shape = type(files).__name__
+        raise RuntimeError(
+            "worker returned unauthorized or incomplete file set: "
+            f"{returned}; files_shape:{files_shape}; "
+            f"files_count:{len(files) if isinstance(files, dict) else 0}"
+        )
 
     proposal_repair_attempted = False
     if missing_files:
