@@ -61,6 +61,46 @@ class GenericWorkerHostTests(unittest.TestCase):
         generic.assert_called_once()
         legacy.assert_not_called()
 
+    def test_missing_run_id_is_assigned_before_durable_recovery_context(self):
+        mission = {
+            "agent_id": "OPS-001",
+            "project": "rvsc",
+            "repository": "GitSly1/RAMTech-RVSC-Control-Center",
+            "wp_id": "RVSC-RUNID-DURABILITY",
+            "base_branch": "rvsc/base",
+            "work_branch": "rvsc/RVSC-RUNID-DURABILITY",
+            "allowed_paths": ["controller/generic_worker_host.py"],
+            "validation_commands": [{"name": "tests", "argv": ["python", "-m", "unittest"]}],
+        }
+        observed = {}
+
+        def execute_engineering(*, agent_id, agent_name, role, mission, checkpoint, persist_result):
+            observed["mission"] = dict(mission)
+            observed["state"] = host._snapshot_state()
+            return {
+                "success": False,
+                "run_id": mission["run_id"],
+                "project": mission["project"],
+                "repository": mission["repository"],
+                "work_branch": mission["work_branch"],
+            }
+
+        with patch("controller.generic_worker_host.configured_agent", return_value=self.noah), patch(
+            "controller.generic_worker_host.execute_generic_engineering",
+            side_effect=execute_engineering,
+        ):
+            result = execute_payload({"protocol": "rvsc.worker.v1", "mission": mission})
+
+        assigned_run_id = observed["mission"]["run_id"]
+        self.assertTrue(assigned_run_id.startswith("RVSC-OPS-001-"))
+        self.assertEqual(observed["state"]["active_run_id"], assigned_run_id)
+        self.assertEqual(observed["state"]["recovery_context"]["run_id"], assigned_run_id)
+        self.assertEqual(
+            observed["state"]["recovery_digest"],
+            host._context_digest(observed["state"]["recovery_context"]),
+        )
+        self.assertEqual(result["run_id"], assigned_run_id)
+
     def test_authorization_is_checked_before_routing(self):
         mission = {"agent_id": "DEV-001", "project": "rvsc", "wp_id": "RVSC-UNAUTHORIZED"}
         with patch("controller.generic_worker_host.configured_agent", return_value=self.daniel), patch("controller.generic_worker_host.execute_generic_engineering") as generic:

@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import threading
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -531,10 +532,14 @@ def execute_payload(payload: dict[str, Any]) -> dict[str, Any]:
     try:
         with _STATE_LOCK:
             state = dict(_RUNTIME_STATE)
-        context = _mission_context(mission)
-        digest = _context_digest(context)
         wp_id = str(mission.get("wp_id", "")).strip() or "unknown"
         run_id = str(mission.get("run_id", "")).strip()
+        if not recovery and not run_id:
+            run_id = f"RVSC-{configured.agent_id}-{uuid.uuid4().hex[:12].upper()}"
+            mission = dict(mission)
+            mission["run_id"] = run_id
+        context = _mission_context(mission)
+        digest = _context_digest(context)
         if recovery:
             if not state["recovery_required"]:
                 raise RuntimeError("no interrupted mission requires recovery")
