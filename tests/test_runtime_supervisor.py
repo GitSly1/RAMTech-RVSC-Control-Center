@@ -56,6 +56,11 @@ class RuntimeSupervisorTests(unittest.TestCase):
             with self.subTest(payload=payload):
                 self.assertIsNone(RuntimeSupervisor._normalise_health(payload).agent_id)
 
+    def test_default_execute_timeout_exceeds_longest_provider_window(self):
+        supervisor = self.make_supervisor()
+        self.assertEqual(supervisor.execute_timeout, 660.0)
+        self.assertGreater(supervisor.execute_timeout, 600.0)
+
     def test_http_execute_sends_exact_worker_protocol_envelope(self):
         supervisor = self.make_supervisor()
         config = supervisor.configs[0]
