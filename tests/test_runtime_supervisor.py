@@ -354,6 +354,264 @@ class RuntimeSupervisorTests(unittest.TestCase):
                 MissionStore.load(store_path).add_contract(self.contract(), supported_projects=("rvsc",))
 
 
+    def test_run_owns_control_transport_for_runtime_lifetime(self):
+        supervisor = RuntimeSupervisor(
+            configs=[],
+            mission_store=None,
+        )
+
+        events = []
+
+        supervisor.start_control_transport = (
+            lambda port=0: events.append("control-start")
+            or ("127.0.0.1", 0)
+        )
+        supervisor.start_all = (
+            lambda: events.append("workers-start")
+        )
+        supervisor.stop_control_transport = (
+            lambda: events.append("control-stop")
+        )
+        supervisor.stop_all = (
+            lambda: events.append("workers-stop")
+        )
+
+        supervisor._shutdown_requested.set()
+        supervisor.run(poll_interval=0.05)
+
+        self.assertEqual(
+            events,
+            [
+                "control-start",
+                "workers-start",
+                "control-stop",
+                "workers-stop",
+            ],
+        )
+
+    def test_control_transport_lifecycle_is_runtime_owned(self):
+        supervisor = RuntimeSupervisor(
+            configs=[],
+            mission_store=MissionStore(),
+        )
+
+        self.assertIsNone(supervisor.control_server)
+
+        address = supervisor.start_control_transport(port=0)
+
+        try:
+            self.assertIsNotNone(supervisor.control_server)
+            self.assertIsNotNone(supervisor.control_thread)
+            self.assertTrue(supervisor.control_thread.is_alive())
+            self.assertEqual(address[0], "127.0.0.1")
+            self.assertGreater(address[1], 0)
+        finally:
+            supervisor.stop_control_transport()
+
+        self.assertIsNone(supervisor.control_server)
+        self.assertIsNone(supervisor.control_thread)
+
+    def test_control_transport_rejects_duplicate_start(self):
+        supervisor = RuntimeSupervisor(
+            configs=[],
+            mission_store=MissionStore(),
+        )
+
+        supervisor.start_control_transport(port=0)
+
+        try:
+            with self.assertRaises(RuntimeSupervisorError):
+                supervisor.start_control_transport(port=0)
+        finally:
+            supervisor.stop_control_transport()
+
+    def test_shutdown_stops_control_transport(self):
+        supervisor = RuntimeSupervisor(
+            configs=[],
+            mission_store=MissionStore(),
+        )
+
+        supervisor.start_control_transport(port=0)
+
+        self.assertIsNotNone(supervisor.control_server)
+        self.assertTrue(supervisor.control_thread.is_alive())
+
+        supervisor.request_shutdown()
+
+        self.assertIsNone(supervisor.control_server)
+        self.assertIsNone(supervisor.control_thread)
+
+    def test_control_server_is_loopback_only(self):
+        supervisor = RuntimeSupervisor(
+            configs=[],
+            mission_store=MissionStore(),
+        )
+
+        server = supervisor.build_control_server(port=0)
+
+        try:
+            host, port = server.server_address
+            self.assertEqual(host, "127.0.0.1")
+            self.assertGreater(port, 0)
+        finally:
+            server.server_close()
+
+    def test_control_http_post_delegates_to_same_supervisor(self):
+        supervisor = RuntimeSupervisor(
+            configs=[],
+            mission_store=MissionStore(),
+        )
+
+        seen = []
+
+        def handle(payload):
+            seen.append(payload)
+            return {
+                "action": "requeue",
+                "mission": {
+                    "mission_id": payload["mission_id"],
+                    "state": "queued",
+                },
+            }
+
+        supervisor.handle_control_request = handle
+
+        status, response = supervisor.dispatch_control_http(
+            "POST",
+            "/control",
+            b'{"action":"requeue","mission_id":"UX196"}',
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0]["mission_id"], "UX196")
+        self.assertEqual(response["action"], "requeue")
+
+    def test_control_http_rejects_invalid_json_and_unknown_path(self):
+        supervisor = RuntimeSupervisor(
+            configs=[],
+            mission_store=MissionStore(),
+        )
+
+        status, response = supervisor.dispatch_control_http(
+            "POST",
+            "/control",
+            b"{not-json",
+        )
+
+        self.assertEqual(status, 400)
+        self.assertIn("error", response)
+
+        status, response = supervisor.dispatch_control_http(
+            "POST",
+            "/anything",
+            b'{"action":"requeue","mission_id":"UX196"}',
+        )
+
+        self.assertEqual(status, 404)
+        self.assertIn("error", response)
+
+    def test_control_http_rejects_non_post_method(self):
+        supervisor = RuntimeSupervisor(
+            configs=[],
+            mission_store=MissionStore(),
+        )
+
+        status, response = supervisor.dispatch_control_http(
+            "GET",
+            "/control",
+            b"",
+        )
+
+        self.assertEqual(status, 405)
+        self.assertIn("error", response)
+
+    def test_control_request_requeues_through_resident_supervisor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MissionStore(path=Path(tmp) / "mission-store.json")
+
+            mission = store.add_contract(
+                self.contract(wp_id="UX194-CONTROL"),
+                supported_projects=("rvsc",),
+            )
+
+            store.transition(
+                mission.mission_id,
+                MissionState.ASSIGNED,
+                worker_id="DEV-001",
+            )
+            store.transition(
+                mission.mission_id,
+                MissionState.RUNNING,
+                worker_id="DEV-001",
+            )
+            store.transition(
+                mission.mission_id,
+                MissionState.BLOCKED,
+                worker_id="DEV-001",
+                reason="retryable failure",
+            )
+
+            supervisor = RuntimeSupervisor(
+                configs=[],
+                mission_store=store,
+            )
+
+            result = supervisor.handle_control_request(
+                {
+                    "action": "requeue",
+                    "mission_id": mission.mission_id,
+                }
+            )
+
+            self.assertEqual(result["action"], "requeue")
+            self.assertEqual(result["mission"]["state"], "queued")
+
+            durable = store.get(mission.mission_id)
+            self.assertEqual(durable.state, MissionState.QUEUED)
+            self.assertEqual(durable.implementer, "DEV-001")
+            self.assertIsNone(durable.assigned_worker)
+            self.assertIsNone(durable.block_reason)
+
+    def test_control_request_rejects_unknown_action_without_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MissionStore(path=Path(tmp) / "mission-store.json")
+
+            mission = store.add_contract(
+                self.contract(wp_id="UX194-UNKNOWN-ACTION"),
+                supported_projects=("rvsc",),
+            )
+
+            supervisor = RuntimeSupervisor(
+                configs=[],
+                mission_store=store,
+            )
+
+            with self.assertRaises(RuntimeSupervisorError):
+                supervisor.handle_control_request(
+                    {
+                        "action": "delete_everything",
+                        "mission_id": mission.mission_id,
+                    }
+                )
+
+            self.assertEqual(
+                store.get(mission.mission_id).state,
+                MissionState.QUEUED,
+            )
+
+    def test_control_request_requires_mapping_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MissionStore(path=Path(tmp) / "mission-store.json")
+
+            supervisor = RuntimeSupervisor(
+                configs=[],
+                mission_store=store,
+            )
+
+            with self.assertRaises(RuntimeSupervisorError):
+                supervisor.handle_control_request("requeue")
+
     def test_resident_requeue_blocked_mission_without_dispatch(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = MissionStore(path=Path(tmp) / "mission-store.json")

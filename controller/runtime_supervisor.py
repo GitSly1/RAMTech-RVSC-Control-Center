@@ -20,6 +20,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from controller.orchestrator import MissionStore, MissionState, OrchestrationError, WorkerState, select_dispatch
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 REPOSITORY_ENV_KEYS = ("RVSC_RVSC_REPO", "RVSC_SEMANTIQ_REPO", "RVSC_MOXIE_REPO")
 QA_ROUTING_ENV_KEYS = ("RVSC_QA_ENDPOINT", "RVSC_QA_URL", "RVSC_QA_WORKER_ENDPOINT", "RVSC_QA_WORKER_URL")
@@ -184,6 +185,8 @@ class RuntimeSupervisor:
             raise ValueError("supply mission_store or mission_store_path, not both")
         self.mission_store = mission_store if mission_store_path is None else MissionStore.load_or_create(mission_store_path)
         self._last_work_control = {"state": "IDLE", "reason": "durable mission store configured; no work-control cycle completed"} if self.mission_store is not None else {"state": "DISABLED", "reason": "no mission store configured"}
+        self.control_server = None
+        self.control_thread = None
 
     @staticmethod
     def _validate_configs(configs: Sequence[WorkerConfig]) -> Tuple[WorkerConfig, ...]:
@@ -615,6 +618,153 @@ class RuntimeSupervisor:
         eligible.sort(key=lambda item: (int(_field(item, "priority", default=999)), int(_field(item, "sequence", default=-1)), _mission_id(item)))
         return {"state": "IDLE" if not eligible else "READY", "missions": records, "next_eligible_work": _mission_id(eligible[0]) if eligible else None, "work_control": self.work_control_status}
 
+    def dispatch_control_http(
+        self,
+        method: str,
+        path: str,
+        body: bytes,
+    ) -> Tuple[int, Dict[str, Any]]:
+        if path != "/control":
+            return 404, {"error": "not found"}
+
+        if method.upper() != "POST":
+            return 405, {"error": "method not allowed"}
+
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return 400, {"error": "invalid json"}
+
+        try:
+            result = self.handle_control_request(payload)
+        except RuntimeSupervisorError as exc:
+            return 400, {"error": str(exc)}
+
+        return 200, result
+
+    def start_control_transport(
+        self,
+        port: int = 0,
+    ) -> Tuple[str, int]:
+        if self.control_server is not None or self.control_thread is not None:
+            raise RuntimeSupervisorError(
+                "control transport already started"
+            )
+
+        server = self.build_control_server(port=port)
+
+        thread = threading.Thread(
+            target=server.serve_forever,
+            name="rvsc-control",
+            daemon=True,
+        )
+
+        try:
+            thread.start()
+        except Exception:
+            server.server_close()
+            raise
+
+        self.control_server = server
+        self.control_thread = thread
+
+        host, bound_port = server.server_address
+        return str(host), int(bound_port)
+
+    def stop_control_transport(self) -> None:
+        server = self.control_server
+        thread = self.control_thread
+
+        self.control_server = None
+        self.control_thread = None
+
+        if server is None:
+            return
+
+        server.shutdown()
+        server.server_close()
+
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+
+    def build_control_server(
+        self,
+        port: int = 0,
+    ) -> ThreadingHTTPServer:
+        supervisor = self
+
+        class ControlHandler(BaseHTTPRequestHandler):
+            def _respond(self, method: str) -> None:
+                length_text = self.headers.get("Content-Length", "0")
+
+                try:
+                    length = int(length_text)
+                except ValueError:
+                    length = 0
+
+                body = self.rfile.read(length) if length > 0 else b""
+
+                status, payload = supervisor.dispatch_control_http(
+                    method,
+                    self.path,
+                    body,
+                )
+
+                encoded = json.dumps(payload).encode("utf-8")
+
+                self.send_response(status)
+                self.send_header(
+                    "Content-Type",
+                    "application/json; charset=utf-8",
+                )
+                self.send_header(
+                    "Content-Length",
+                    str(len(encoded)),
+                )
+                self.end_headers()
+                self.wfile.write(encoded)
+
+            def do_POST(self) -> None:
+                self._respond("POST")
+
+            def do_GET(self) -> None:
+                self._respond("GET")
+
+            def log_message(self, format: str, *args: Any) -> None:
+                return
+
+        return ThreadingHTTPServer(
+            ("127.0.0.1", port),
+            ControlHandler,
+        )
+
+    def handle_control_request(self, payload: Mapping[str, Any]) -> Dict[str, Any]:
+        if not isinstance(payload, Mapping):
+            raise RuntimeSupervisorError(
+                "control request must be a mapping"
+            )
+
+        action = str(payload.get("action", "")).strip().lower()
+
+        if action != "requeue":
+            raise RuntimeSupervisorError(
+                "unsupported control action: %s" % (action or "<missing>")
+            )
+
+        mission_id = str(payload.get("mission_id", "")).strip()
+
+        if not mission_id:
+            raise RuntimeSupervisorError(
+                "requeue requires mission_id"
+            )
+
+        mission = self.requeue_mission(mission_id)
+
+        return {
+            "action": "requeue",
+            "mission": mission,
+        }
+
     def requeue_mission(self, mission_id: str) -> Dict[str, Any]:
         if self.mission_store is None:
             raise RuntimeSupervisorError("no mission store configured")
@@ -828,16 +978,19 @@ class RuntimeSupervisor:
         return self._config_by_id[str(worker)]
 
     def request_shutdown(self) -> None:
+        self.stop_control_transport()
         self._shutdown_requested.set()
 
     def run(self, poll_interval: float = 1.0) -> None:
-        self.start_all()
-        if self.mission_store is not None:
-            self.work_control_once()
+        self.start_control_transport()
         try:
+            self.start_all()
+            if self.mission_store is not None:
+                self.work_control_once()
             while not self._shutdown_requested.wait(max(.05, poll_interval)):
                 self.poll_once()
         finally:
+            self.stop_control_transport()
             self.stop_all()
 
 
