@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from controller.orchestrator import Mission, MissionState, MissionStore, OrchestrationError
-from controller.runtime_supervisor import RuntimeSupervisor, WorkerConfig, main, production_mission_store_path
+from controller.runtime_supervisor import RuntimeSupervisor, WorkerConfig, main, production_mission_store_path, RuntimeSupervisorError
 
 
 class Clock:
@@ -352,6 +352,179 @@ class RuntimeSupervisorTests(unittest.TestCase):
                 self.assertEqual(main(["status", "--mission-store", str(store_path)]), 0)
             with self.assertRaises(OrchestrationError):
                 MissionStore.load(store_path).add_contract(self.contract(), supported_projects=("rvsc",))
+
+
+    def test_resident_requeue_blocked_mission_without_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MissionStore(path=Path(tmp) / "mission-store.json")
+
+            mission = store.add_contract(
+                self.contract(wp_id="UX189-RESIDENT"),
+                supported_projects=("rvsc",),
+            )
+
+            store.transition(
+                mission.mission_id,
+                MissionState.ASSIGNED,
+                worker_id="DEV-001",
+            )
+            store.transition(
+                mission.mission_id,
+                MissionState.RUNNING,
+                worker_id="DEV-001",
+            )
+            store.transition(
+                mission.mission_id,
+                MissionState.BLOCKED,
+                worker_id="DEV-001",
+                reason="retryable worker execution failure",
+            )
+
+            supervisor = RuntimeSupervisor(
+                configs=[],
+                mission_store=store,
+            )
+
+            result = supervisor.requeue_mission(mission.mission_id)
+
+            self.assertEqual(result["state"], "queued")
+
+            durable = store.get(mission.mission_id)
+            self.assertEqual(durable.state, MissionState.QUEUED)
+            self.assertEqual(durable.implementer, "DEV-001")
+            self.assertIsNone(durable.assigned_worker)
+            self.assertIsNone(durable.block_reason)
+
+    def test_resident_requeue_rejects_non_blocked_mission(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MissionStore(path=Path(tmp) / "mission-store.json")
+
+            mission = store.add_contract(
+                self.contract(wp_id="UX189-NOT-BLOCKED"),
+                supported_projects=("rvsc",),
+            )
+
+            supervisor = RuntimeSupervisor(
+                configs=[],
+                mission_store=store,
+            )
+
+            with self.assertRaises(RuntimeSupervisorError):
+                supervisor.requeue_mission(mission.mission_id)
+
+            self.assertEqual(
+                store.get(mission.mission_id).state,
+                MissionState.QUEUED,
+            )
+
+    def test_resident_requeue_rejects_unknown_mission(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MissionStore(path=Path(tmp) / "mission-store.json")
+
+            supervisor = RuntimeSupervisor(
+                configs=[],
+                mission_store=store,
+            )
+
+            with self.assertRaises(RuntimeSupervisorError):
+                supervisor.requeue_mission("DOES-NOT-EXIST")
+
+    def test_cli_requeue_blocked_mission_without_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store_path = Path(tmp) / "mission-store.json"
+            store = MissionStore(path=store_path)
+
+            contract = self.contract(wp_id="UX185-REQUEUE")
+            mission = store.add_contract(
+                contract,
+                supported_projects=("rvsc",),
+            )
+
+            store.transition(
+                mission.mission_id,
+                MissionState.ASSIGNED,
+                worker_id="DEV-001",
+            )
+            store.transition(
+                mission.mission_id,
+                MissionState.RUNNING,
+                worker_id="DEV-001",
+            )
+            store.transition(
+                mission.mission_id,
+                MissionState.BLOCKED,
+                worker_id="DEV-001",
+                reason="retryable worker execution failure",
+                evidence={
+                    "event": "dispatch_failure",
+                    "retryable": True,
+                    "worker_id": "DEV-001",
+                },
+            )
+
+            rc = main([
+                "requeue",
+                "--mission-store", str(store_path),
+                "--mission-id", mission.mission_id,
+            ])
+
+            self.assertEqual(rc, 0)
+
+            durable = MissionStore.load(store_path).get(
+                mission.mission_id
+            )
+
+            self.assertEqual(
+                durable.state,
+                MissionState.QUEUED,
+            )
+            self.assertEqual(
+                durable.implementer,
+                "DEV-001",
+            )
+            self.assertIsNone(durable.assigned_worker)
+            self.assertIsNone(durable.block_reason)
+
+    def test_cli_requeue_rejects_non_blocked_mission(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store_path = Path(tmp) / "mission-store.json"
+            store = MissionStore(path=store_path)
+
+            contract = self.contract(wp_id="UX185-NOT-BLOCKED")
+            mission = store.add_contract(
+                contract,
+                supported_projects=("rvsc",),
+            )
+
+            rc = main([
+                "requeue",
+                "--mission-store", str(store_path),
+                "--mission-id", mission.mission_id,
+            ])
+
+            self.assertEqual(rc, 2)
+
+            durable = MissionStore.load(store_path).get(
+                mission.mission_id
+            )
+            self.assertEqual(
+                durable.state,
+                MissionState.QUEUED,
+            )
+
+    def test_cli_requeue_rejects_unknown_mission(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store_path = Path(tmp) / "mission-store.json"
+            MissionStore(path=store_path)
+
+            rc = main([
+                "requeue",
+                "--mission-store", str(store_path),
+                "--mission-id", "DOES-NOT-EXIST",
+            ])
+
+            self.assertEqual(rc, 2)
+
 
 
 if __name__ == "__main__":

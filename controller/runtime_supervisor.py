@@ -19,7 +19,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-from controller.orchestrator import MissionStore, OrchestrationError, WorkerState, select_dispatch
+from controller.orchestrator import MissionStore, MissionState, OrchestrationError, WorkerState, select_dispatch
 
 REPOSITORY_ENV_KEYS = ("RVSC_RVSC_REPO", "RVSC_SEMANTIQ_REPO", "RVSC_MOXIE_REPO")
 QA_ROUTING_ENV_KEYS = ("RVSC_QA_ENDPOINT", "RVSC_QA_URL", "RVSC_QA_WORKER_ENDPOINT", "RVSC_QA_WORKER_URL")
@@ -615,6 +615,52 @@ class RuntimeSupervisor:
         eligible.sort(key=lambda item: (int(_field(item, "priority", default=999)), int(_field(item, "sequence", default=-1)), _mission_id(item)))
         return {"state": "IDLE" if not eligible else "READY", "missions": records, "next_eligible_work": _mission_id(eligible[0]) if eligible else None, "work_control": self.work_control_status}
 
+    def requeue_mission(self, mission_id: str) -> Dict[str, Any]:
+        if self.mission_store is None:
+            raise RuntimeSupervisorError("no mission store configured")
+
+        try:
+            mission = self.mission_store.get(mission_id)
+        except OrchestrationError as exc:
+            raise RuntimeSupervisorError(str(exc)) from exc
+
+        if mission is None:
+            raise RuntimeSupervisorError(
+                "unknown mission: %s" % mission_id
+            )
+
+        if mission.state != MissionState.BLOCKED:
+            raise RuntimeSupervisorError(
+                "mission is not blocked: %s" % mission_id
+            )
+
+        implementer = mission.implementer
+
+        if not implementer:
+            raise RuntimeSupervisorError(
+                "blocked mission has no durable implementer identity"
+            )
+
+        self.mission_store.transition(
+            mission.mission_id,
+            MissionState.QUEUED,
+        )
+
+        requeued = self.mission_store.get(mission.mission_id)
+
+        if (
+            requeued is None
+            or requeued.state != MissionState.QUEUED
+            or requeued.implementer != implementer
+            or requeued.assigned_worker is not None
+            or requeued.block_reason is not None
+        ):
+            raise RuntimeSupervisorError(
+                "requeue postcondition failed"
+            )
+
+        return requeued.to_dict()
+
     def work_control_once(self) -> Dict[str, Any]:
         if self.mission_store is not None:
             sync_external = getattr(
@@ -797,13 +843,14 @@ class RuntimeSupervisor:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="RVSC Golden Team runtime supervisor")
-    parser.add_argument("action", nargs="?", choices=("run", "status", "add"), default="run")
+    parser.add_argument("action", nargs="?", choices=("run", "status", "add", "requeue"), default="run")
     parser.add_argument("--poll-interval", type=float, default=1.0)
     parser.add_argument("--max-restarts", type=int, default=3)
     parser.add_argument("--qa-endpoint", default=DEFAULT_QA_ENDPOINT)
     parser.add_argument("--worker-module", default="controller.generic_worker_host")
     parser.add_argument("--mission-store")
     parser.add_argument("--mission-file")
+    parser.add_argument("--mission-id")
     parser.add_argument("--stall-threshold", type=float, default=300.0)
     parser.add_argument("--starvation-threshold", type=float, default=0.0)
     parser.add_argument("--max-recovery-attempts", type=int, default=2)
@@ -816,6 +863,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     store_path = Path(args.mission_store).expanduser() if args.mission_store else production_mission_store_path()
     try:
         supervisor = RuntimeSupervisor(qa_endpoint=args.qa_endpoint, worker_module=args.worker_module, max_restarts=args.max_restarts, mission_store_path=str(store_path), stall_threshold=args.stall_threshold, starvation_threshold=args.starvation_threshold, max_recovery_attempts=args.max_recovery_attempts, max_rework_attempts=args.max_rework_attempts)
+        if args.action == "requeue":
+            if not args.mission_id:
+                raise RuntimeSupervisorError(
+                    "requeue requires --mission-id"
+                )
+
+            supervisor.requeue_mission(args.mission_id)
+            return 0
+
         if args.action == "add":
             if not args.mission_file:
                 raise RuntimeSupervisorError("add requires --mission-file")
