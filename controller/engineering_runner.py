@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -55,7 +56,13 @@ class EngineeringMissionRunner:
     def validate(self) -> tuple[str, ...]:
         evidence: list[str] = []
         for check in self.validations:
-            result = self.environment.run(check.argv)
+            try:
+                result = self.environment.run(check.argv)
+            except subprocess.TimeoutExpired as exc:
+                raise EngineeringValidationError(
+                    f"validation timed out [{check.name}] after "
+                    f"{exc.timeout} seconds"
+                ) from exc
             evidence.append(f"validation:{check.name}:returncode:{result.returncode}")
             if result.returncode != 0:
                 detail = result.stderr.strip() or result.stdout.strip() or "no output"

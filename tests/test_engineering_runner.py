@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from controller.adapters import WorkerRequest
 from controller.engineering_environment import EngineeringEnvironmentError
@@ -43,6 +44,40 @@ class EngineeringMissionRunnerTests(unittest.TestCase):
         (self.repo / "docs" / "dirty.md").write_text("dirty", encoding="utf-8")
         with self.assertRaises(EngineeringEnvironmentError):
             runner.preflight()
+
+    def test_validation_timeout_is_classified(self) -> None:
+        runner = EngineeringMissionRunner(
+            self.request,
+            self.repo,
+            validations=(
+                ValidationCommand(
+                    "targeted",
+                    ("python", "-m", "unittest"),
+                ),
+            ),
+        )
+
+        timeout = subprocess.TimeoutExpired(
+            cmd=["python", "-m", "unittest"],
+            timeout=120,
+        )
+
+        with patch.object(
+            runner.environment,
+            "run",
+            side_effect=timeout,
+        ):
+            with self.assertRaises(
+                EngineeringValidationError
+            ) as captured:
+                runner.validate()
+
+        message = str(captured.exception)
+        self.assertIn(
+            "validation timed out [targeted]",
+            message,
+        )
+        self.assertIn("120", message)
 
     def test_failed_validation_has_explicit_failure_type(self) -> None:
         runner = EngineeringMissionRunner(
