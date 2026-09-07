@@ -9,7 +9,7 @@ from unittest.mock import Mock, call, patch
 
 from controller.engineering_environment import EngineeringEnvironmentError
 from controller.engineering_runner import EngineeringValidationError
-from controller.generic_engineering_worker import _configure_git_identity, _git_identity, _ollama_call, _ollama_proposal_schema, _read_context_files, _repo_root, _validations, _worker_request, execute_mission
+from controller.generic_engineering_worker import _budget_context_files, _bounded_context_text, _configure_git_identity, _git_identity, _ollama_call, _ollama_proposal_schema, _read_context_files, _repo_root, _validations, _worker_request, execute_mission
 
 
 class GenericEngineeringWorkerTests(unittest.TestCase):
@@ -542,6 +542,105 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
             "new_file.py",
             "VALUE = 1\n",
         )
+    def test_bounded_context_text_preserves_head_tail_and_marker(self):
+        text = "HEAD-" + ("x" * 200) + "-TAIL"
+
+        bounded = _bounded_context_text(
+            "controller/runtime_supervisor.py",
+            text,
+            120,
+        )
+
+        self.assertEqual(len(bounded), 120)
+        self.assertTrue(bounded.startswith("HEAD-"))
+        self.assertTrue(bounded.endswith("-TAIL"))
+        self.assertIn("RVSC CONTEXT OMITTED", bounded)
+        self.assertIn("controller/runtime_supervisor.py", bounded)
+
+    def test_context_budget_is_deterministic_and_bounded(self):
+        context = {
+            "controller/runtime_supervisor.py": "A" * 10000,
+            "tests/test_runtime_supervisor.py": "B" * 6000,
+        }
+
+        first, first_evidence = _budget_context_files(
+            context,
+            total_budget=4000,
+        )
+        second, second_evidence = _budget_context_files(
+            context,
+            total_budget=4000,
+        )
+
+        self.assertEqual(first, second)
+        self.assertEqual(first_evidence, second_evidence)
+
+        self.assertEqual(
+            list(first),
+            [
+                "controller/runtime_supervisor.py",
+                "tests/test_runtime_supervisor.py",
+            ],
+        )
+
+        supplied = sum(len(value) for value in first.values())
+
+        self.assertLessEqual(supplied, 4000)
+        self.assertIn(
+            "context_original_chars:16000",
+            first_evidence,
+        )
+        self.assertIn(
+            f"context_supplied_chars:{supplied}",
+            first_evidence,
+        )
+        self.assertIn(
+            "context_truncated:true",
+            first_evidence,
+        )
+
+        for value in first.values():
+            self.assertIn("RVSC CONTEXT OMITTED", value)
+
+    def test_non_ollama_provider_preserves_full_context(self):
+        source = Path(
+            "controller/generic_engineering_worker.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            'provider = os.environ.get("RVSC_AI_PROVIDER", "ollama").strip().lower()',
+            source,
+        )
+        self.assertIn(
+            'if provider == "ollama":',
+            source,
+        )
+        self.assertIn(
+            'bounded_context_files = dict(context_files)',
+            source,
+        )
+        self.assertIn(
+            '"context_budget_chars:unbounded"',
+            source,
+        )
+
+    def test_context_budget_preserves_small_context_exactly(self):
+        context = {
+            "controller/runtime_supervisor.py":
+                "STATUS = 'running'\n",
+        }
+
+        bounded, evidence = _budget_context_files(
+            context,
+            total_budget=4000,
+        )
+
+        self.assertEqual(bounded, context)
+        self.assertIn(
+            "context_truncated:false",
+            evidence,
+        )
+
     def test_read_context_files_reads_only_requested_repository_files(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)

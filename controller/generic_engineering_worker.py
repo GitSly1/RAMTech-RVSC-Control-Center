@@ -223,6 +223,83 @@ def _configure_git_identity(environment: ControlledEngineeringEnvironment, agent
             raise EngineeringEnvironmentError(result.stderr.strip() or result.stdout.strip() or f"unable to configure repository-local Git {setting}")
 
 
+
+# Read-only repository context is evidence for the provider, not write
+# authorization. Bound it deterministically so local providers retain
+# capacity for complete structured engineering output.
+OLLAMA_READONLY_CONTEXT_CHAR_BUDGET = 1000
+
+
+def _bounded_context_text(path: str, text: str, budget: int) -> str:
+    if budget < 0:
+        raise ValueError("context budget must be non-negative")
+
+    if len(text) <= budget:
+        return text
+
+    if budget == 0:
+        return ""
+
+    marker = (
+        f"\n[RVSC CONTEXT OMITTED: {path}; "
+        f"original_chars={len(text)}; budget_chars={budget}]\n"
+    )
+
+    if budget <= len(marker):
+        return marker[:budget]
+
+    available = budget - len(marker)
+    head = (available + 1) // 2
+    tail = available - head
+
+    if tail:
+        return text[:head] + marker + text[-tail:]
+
+    return text[:head] + marker
+
+
+def _budget_context_files(
+    context_files: dict[str, str],
+    *,
+    total_budget: int = OLLAMA_READONLY_CONTEXT_CHAR_BUDGET,
+) -> tuple[dict[str, str], tuple[str, ...]]:
+    if total_budget < 0:
+        raise ValueError("context budget must be non-negative")
+
+    original_chars = sum(len(text) for text in context_files.values())
+
+    if not context_files or original_chars <= total_budget:
+        return dict(context_files), (
+            f"context_budget_chars:{total_budget}",
+            f"context_original_chars:{original_chars}",
+            f"context_supplied_chars:{original_chars}",
+            "context_truncated:false",
+        )
+
+    paths = list(context_files)
+    base = total_budget // len(paths)
+    remainder = total_budget % len(paths)
+
+    bounded: dict[str, str] = {}
+
+    for index, path in enumerate(paths):
+        share = base + (1 if index < remainder else 0)
+        bounded[path] = _bounded_context_text(
+            path,
+            context_files[path],
+            share,
+        )
+
+    supplied_chars = sum(len(text) for text in bounded.values())
+
+    return bounded, (
+        f"context_budget_chars:{total_budget}",
+        f"context_original_chars:{original_chars}",
+        f"context_supplied_chars:{supplied_chars}",
+        "context_truncated:true",
+    )
+
+
 def _engineering_prompt(
     agent_id: str,
     agent_name: str,
@@ -382,8 +459,35 @@ def execute_mission(*, agent_id: str, agent_name: str, role: str, mission: dict[
         except FileNotFoundError:
             source_files[path] = ""
     context_files = _read_context_files(_repo_root(mission), mission)
+    provider = os.environ.get("RVSC_AI_PROVIDER", "ollama").strip().lower()
+
+    if provider == "ollama":
+        bounded_context_files, context_budget_evidence = _budget_context_files(
+            context_files
+        )
+    else:
+        bounded_context_files = dict(context_files)
+        context_chars = sum(len(text) for text in context_files.values())
+        context_budget_evidence = (
+            "context_budget_chars:unbounded",
+            f"context_original_chars:{context_chars}",
+            f"context_supplied_chars:{context_chars}",
+            "context_truncated:false",
+        )
+    if checkpoint:
+        checkpoint(
+            "context_budget_applied",
+            (f"run_id:{run_id}",) + context_budget_evidence,
+        )
     response, provider_name = _provider_call(
-        _engineering_prompt(agent_id, agent_name, role, mission, source_files, context_files)
+        _engineering_prompt(
+            agent_id,
+            agent_name,
+            role,
+            mission,
+            source_files,
+            bounded_context_files,
+        )
     )
     provider_response_id = str(response.get("id", ""))
     provider_status = str(response.get("status", "unknown"))
@@ -435,7 +539,7 @@ def execute_mission(*, agent_id: str, agent_name: str, role: str, mission: dict[
                 role,
                 mission,
                 source_files,
-                context_files,
+                bounded_context_files,
                 proposal,
                 f"incomplete authorized file set; missing: {', '.join(missing_files)}",
             )
@@ -536,7 +640,7 @@ def execute_mission(*, agent_id: str, agent_name: str, role: str, mission: dict[
                     role,
                     mission,
                     source_files,
-                    context_files,
+                    bounded_context_files,
                     proposal,
                     str(exc),
                 )
