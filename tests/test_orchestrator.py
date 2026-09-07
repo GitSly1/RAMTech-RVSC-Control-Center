@@ -53,7 +53,9 @@ class MissionStoreTests(unittest.TestCase):
     def test_contract_ingestion_and_dispatch_contract_validate_identity(self):
         store = MissionStore()
         expected = validate_mission_contract(self.contract(), ("rvsc",))
-        store.add_contract(self.contract(), supported_projects=("rvsc",))
+        mission = store.add_contract(self.contract(), supported_projects=("rvsc",))
+        self.assertEqual(mission.implementer, "DEV-001")
+        self.assertIsNone(mission.assigned_worker)
         self.assertEqual(store.dispatch_contract("WP-1", "DEV-001", supported_projects=("rvsc",)), expected)
         for field, value in (("wp_id", "OTHER"), ("project", "moxie"), ("agent_id", "DEV-002")):
             with self.subTest(field=field):

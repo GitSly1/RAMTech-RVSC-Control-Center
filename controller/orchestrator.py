@@ -295,7 +295,7 @@ class MissionStore:
 
     def add_contract(self, contract: Mapping[str, Any], *, supported_projects: Iterable[str]) -> Mission:
         data = validate_mission_contract(contract, supported_projects)
-        mission = Mission(data["wp_id"], data["project"], dependencies=tuple(data.get("dependencies", ())), dependency_policy=str(data.get("dependency_policy", "accepted")), priority=data.get("priority", 999), metadata={"contract": data, "requires_independent_qa": True, "ingestion": "validated_cli"})
+        mission = Mission(data["wp_id"], data["project"], dependencies=tuple(data.get("dependencies", ())), dependency_policy=str(data.get("dependency_policy", "accepted")), priority=data.get("priority", 999), implementer=data["agent_id"], metadata={"contract": data, "requires_independent_qa": True, "ingestion": "validated_cli"})
         return self.add(mission)
 
     def dispatch_contract(self, mission_id: str, worker_id: str, *, supported_projects: Iterable[str]) -> dict[str, Any]:
