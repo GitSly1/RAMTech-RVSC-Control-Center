@@ -2,16 +2,62 @@ from __future__ import annotations
 
 import os
 import tempfile
+import json
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, call, patch
 
 from controller.engineering_environment import EngineeringEnvironmentError
 from controller.engineering_runner import EngineeringValidationError
-from controller.generic_engineering_worker import _configure_git_identity, _git_identity, _read_context_files, _repo_root, _validations, _worker_request, execute_mission
+from controller.generic_engineering_worker import _configure_git_identity, _git_identity, _ollama_call, _ollama_proposal_schema, _read_context_files, _repo_root, _validations, _worker_request, execute_mission
 
 
 class GenericEngineeringWorkerTests(unittest.TestCase):
+    def test_ollama_proposal_schema_requires_exact_engineering_contract(self):
+        schema = _ollama_proposal_schema()
+
+        self.assertEqual(schema["type"], "object")
+        self.assertEqual(
+            set(schema["required"]),
+            {"files", "commit_message", "engineering_summary"},
+        )
+        self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(
+            set(schema["properties"]),
+            {"files", "commit_message", "engineering_summary"},
+        )
+        self.assertEqual(schema["properties"]["files"]["type"], "object")
+        self.assertEqual(
+            schema["properties"]["files"]["additionalProperties"],
+            {"type": "string"},
+        )
+        self.assertEqual(
+            schema["properties"]["commit_message"],
+            {"type": "string"},
+        )
+        self.assertEqual(
+            schema["properties"]["engineering_summary"],
+            {"type": "string"},
+        )
+
+    @patch("controller.generic_engineering_worker.urllib.request.urlopen")
+    def test_ollama_call_sends_structured_proposal_schema(self, urlopen):
+        response = Mock()
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        response.read.return_value = b'{"response":"{}"}'
+        urlopen.return_value = response
+
+        _ollama_call("bounded mission")
+
+        request = urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+
+        self.assertEqual(payload["format"], _ollama_proposal_schema())
+        self.assertNotEqual(payload["format"], "json")
+        self.assertEqual(payload["prompt"], "bounded mission")
+        self.assertFalse(payload["stream"])
+
     def test_worker_request_is_mission_driven(self):
         request = _worker_request({"agent_id": "DEV-001", "wp_id": "SEM-123", "project": "semantiq", "repository": "GitSly1/RAMTech-SEMANTIQ", "base_branch": "main", "work_branch": "rvsc/SEM-123", "objective": "change", "allowed_paths": ["source.py"], "acceptance_criteria": ["works"]})
         self.assertEqual(request.agent_id, "DEV-001")

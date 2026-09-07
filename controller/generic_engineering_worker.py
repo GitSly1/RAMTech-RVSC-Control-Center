@@ -53,13 +53,29 @@ def _openai_call(api_key: str, prompt: str) -> dict[str, Any]:
         raise RuntimeError(f"OpenAI transport error: {exc.reason}") from exc
 
 
+def _ollama_proposal_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "files": {
+                "type": "object",
+                "additionalProperties": {"type": "string"},
+            },
+            "commit_message": {"type": "string"},
+            "engineering_summary": {"type": "string"},
+        },
+        "required": ["files", "commit_message", "engineering_summary"],
+        "additionalProperties": False,
+    }
+
+
 def _ollama_call(prompt: str) -> dict[str, Any]:
     body = json.dumps(
         {
             "model": DEFAULT_OLLAMA_MODEL,
             "prompt": prompt,
             "stream": False,
-            "format": "json",
+            "format": _ollama_proposal_schema(),
         }
     ).encode("utf-8")
     req = urllib.request.Request(
