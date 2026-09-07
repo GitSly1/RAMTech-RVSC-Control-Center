@@ -731,6 +731,202 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
             environment.write_text.assert_not_called()
             runner.commit.assert_not_called()
 
+
+    @patch("controller.generic_engineering_worker._provider_call")
+    @patch("controller.generic_engineering_worker._prepare_branch")
+    @patch("controller.generic_engineering_worker._configure_git_identity")
+    @patch("controller.generic_engineering_worker.EngineeringMissionRunner")
+    def test_missing_authorized_files_receive_one_bounded_proposal_repair(
+        self,
+        runner_type,
+        configure_identity,
+        prepare_branch,
+        provider_call,
+    ):
+        runner = runner_type.return_value
+        environment = runner.environment
+        environment.read_text.return_value = "baseline\n"
+        runner.preflight.return_value = ("preflight:ok",)
+        runner.evidence_after_change.return_value = ("diff:ok",)
+        runner.validate.return_value = ("validation:ok",)
+        runner.commit.return_value = ("commit:created",)
+        environment.run.side_effect = [
+            Mock(returncode=0, stdout="a" * 40 + "\n", stderr=""),
+            Mock(returncode=0, stdout="", stderr=""),
+        ]
+        environment.git_status.return_value = Mock(
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+
+        provider_call.side_effect = [
+            (
+                {
+                    "id": "response-incomplete",
+                    "status": "completed",
+                    "model": "test-model",
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": (
+                                        '{"files":{},'
+                                        '"commit_message":"first",'
+                                        '"engineering_summary":"incomplete"}'
+                                    ),
+                                }
+                            ],
+                        }
+                    ],
+                },
+                "test-provider",
+            ),
+            (
+                {
+                    "id": "response-repaired",
+                    "status": "completed",
+                    "model": "test-model",
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": (
+                                        '{"files":{"source.py":"updated\\n"},'
+                                        '"commit_message":"fixed",'
+                                        '"engineering_summary":"complete"}'
+                                    ),
+                                }
+                            ],
+                        }
+                    ],
+                },
+                "test-provider",
+            ),
+        ]
+
+        mission = {
+            "agent_id": "DEV-001",
+            "wp_id": "TEST-INCOMPLETE-REPAIR",
+            "project": "rvsc",
+            "repository": "GitSly1/RAMTech-RVSC-Control-Center",
+            "base_branch": "main",
+            "work_branch": "rvsc/TEST-INCOMPLETE-REPAIR",
+            "objective": "repair one incomplete authorized proposal",
+            "allowed_paths": ["source.py"],
+            "acceptance_criteria": ["return exact authorized file set"],
+            "validation_commands": [
+                {
+                    "name": "TEST",
+                    "argv": ["python", "-c", "print('test')"],
+                }
+            ],
+        }
+
+        checkpoints = []
+
+        result = execute_mission(
+            agent_id="DEV-001",
+            agent_name="Daniel",
+            role="Engineering",
+            mission=mission,
+            checkpoint=lambda name, evidence: checkpoints.append(
+                (name, evidence)
+            ),
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(provider_call.call_count, 2)
+        environment.write_text.assert_called_once_with(
+            "source.py",
+            "updated\n",
+        )
+        names = [name for name, _ in checkpoints]
+        self.assertIn("proposal_repair_started", names)
+        self.assertIn("proposal_repair_received", names)
+
+    @patch("controller.generic_engineering_worker._provider_call")
+    @patch("controller.generic_engineering_worker._prepare_branch")
+    @patch("controller.generic_engineering_worker._configure_git_identity")
+    @patch("controller.generic_engineering_worker.EngineeringMissionRunner")
+    def test_second_incomplete_proposal_fails_closed_without_writes(
+        self,
+        runner_type,
+        configure_identity,
+        prepare_branch,
+        provider_call,
+    ):
+        runner = runner_type.return_value
+        environment = runner.environment
+        environment.read_text.return_value = "baseline\n"
+        runner.preflight.return_value = ("preflight:ok",)
+
+        incomplete_response = (
+            {
+                "id": "response-incomplete",
+                "status": "completed",
+                "model": "test-model",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": (
+                                    '{"files":{},'
+                                    '"commit_message":"still incomplete",'
+                                    '"engineering_summary":"incomplete"}'
+                                ),
+                            }
+                        ],
+                    }
+                ],
+            },
+            "test-provider",
+        )
+        provider_call.side_effect = [
+            incomplete_response,
+            incomplete_response,
+        ]
+
+        mission = {
+            "agent_id": "DEV-001",
+            "wp_id": "TEST-INCOMPLETE-FAIL-CLOSED",
+            "project": "rvsc",
+            "repository": "GitSly1/RAMTech-RVSC-Control-Center",
+            "base_branch": "main",
+            "work_branch": "rvsc/TEST-INCOMPLETE-FAIL-CLOSED",
+            "objective": "prove bounded incomplete repair",
+            "allowed_paths": ["source.py"],
+            "acceptance_criteria": ["return exact authorized file set"],
+            "validation_commands": [
+                {
+                    "name": "TEST",
+                    "argv": ["python", "-c", "print('test')"],
+                }
+            ],
+        }
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "repair returned unauthorized or incomplete file set",
+        ):
+            execute_mission(
+                agent_id="DEV-001",
+                agent_name="Daniel",
+                role="Engineering",
+                mission=mission,
+            )
+
+        self.assertEqual(provider_call.call_count, 2)
+        environment.write_text.assert_not_called()
+        runner.validate.assert_not_called()
+        runner.commit.assert_not_called()
+
     def test_git_identity_failure_stops_execution(self):
         environment = Mock()
         environment.run.return_value = Mock(returncode=1, stdout="", stderr="failed")

@@ -378,10 +378,82 @@ def execute_mission(*, agent_id: str, agent_name: str, role: str, mission: dict[
         checkpoint("proposal_received", (f"run_id:{run_id}", f"provider_status:{provider_status}", f"provider_response_id:{provider_response_id}"))
     proposal = _json_object(_response_text(response))
     files = proposal.get("files")
-    if not isinstance(files, dict) or set(files) != set(worker_request.allowed_paths):
+    allowed_file_set = set(worker_request.allowed_paths)
+    returned_file_set = set(files) if isinstance(files, dict) else set()
+    unauthorized_files = sorted(returned_file_set - allowed_file_set)
+    missing_files = sorted(allowed_file_set - returned_file_set)
+
+    if not isinstance(files, dict) or unauthorized_files:
         returned = sorted(files) if isinstance(files, dict) else []
         raise RuntimeError(f"worker returned unauthorized or incomplete file set: {returned}")
-    repair_attempted = False
+
+    proposal_repair_attempted = False
+    if missing_files:
+        proposal_repair_attempted = True
+        if checkpoint:
+            checkpoint(
+                "proposal_repair_started",
+                (
+                    f"run_id:{run_id}",
+                    "repair_attempt:1",
+                    f"missing_files:{','.join(missing_files)}",
+                ),
+            )
+
+        repair_response, repair_provider = _provider_call(
+            _engineering_repair_prompt(
+                agent_id,
+                agent_name,
+                role,
+                mission,
+                source_files,
+                context_files,
+                proposal,
+                f"incomplete authorized file set; missing: {', '.join(missing_files)}",
+            )
+        )
+        repair_status = str(repair_response.get("status", "unknown"))
+        if repair_status != "completed":
+            raise RuntimeError(f"repair provider status was {repair_status}")
+
+        repair_proposal = _json_object(_response_text(repair_response))
+        repair_files = repair_proposal.get("files")
+        repair_returned_file_set = (
+            set(repair_files) if isinstance(repair_files, dict) else set()
+        )
+        repair_unauthorized = sorted(repair_returned_file_set - allowed_file_set)
+
+        if (
+            not isinstance(repair_files, dict)
+            or repair_unauthorized
+            or repair_returned_file_set != allowed_file_set
+        ):
+            returned = sorted(repair_files) if isinstance(repair_files, dict) else []
+            raise RuntimeError(
+                f"repair returned unauthorized or incomplete file set: {returned}"
+            )
+
+        proposal = repair_proposal
+        files = repair_files
+        provider_name = repair_provider
+        provider_response_id = str(
+            repair_response.get("id", provider_response_id)
+        )
+        provider_status = repair_status
+        model = str(repair_response.get("model", model))
+
+        if checkpoint:
+            checkpoint(
+                "proposal_repair_received",
+                (
+                    f"run_id:{run_id}",
+                    "repair_attempt:1",
+                    f"provider_status:{repair_status}",
+                    f"provider_response_id:{provider_response_id}",
+                ),
+            )
+
+    repair_attempted = proposal_repair_attempted
     while True:
         try:
             for path in worker_request.allowed_paths:
