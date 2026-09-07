@@ -8,6 +8,8 @@ from unittest import mock
 
 from controller.orchestrator import Mission, MissionState, MissionStore, OrchestrationError
 from controller.runtime_supervisor import RuntimeSupervisor, WorkerConfig, main, production_mission_store_path, RuntimeSupervisorError
+import threading
+import http.client
 
 
 class Clock:
@@ -353,6 +355,100 @@ class RuntimeSupervisorTests(unittest.TestCase):
             with self.assertRaises(OrchestrationError):
                 MissionStore.load(store_path).add_contract(self.contract(), supported_projects=("rvsc",))
 
+
+    def test_control_port_defaults_to_stable_loopback_port(self):
+        supervisor = RuntimeSupervisor(
+            configs=[],
+            mission_store=None,
+        )
+
+        self.assertEqual(supervisor.control_port, 8766)
+
+    def test_run_uses_configured_control_port(self):
+        supervisor = RuntimeSupervisor(
+            configs=[],
+            mission_store=None,
+            control_port=9123,
+        )
+
+        observed = []
+
+        supervisor.start_control_transport = (
+            lambda port=0:
+            observed.append(port) or ("127.0.0.1", port)
+        )
+        supervisor.start_all = lambda: None
+        supervisor.stop_control_transport = lambda: None
+        supervisor.stop_all = lambda: None
+
+        supervisor._shutdown_requested.set()
+        supervisor.run(poll_interval=0.05)
+
+        self.assertEqual(observed, [9123])
+
+    def test_control_http_rejects_oversized_request_body(self):
+        supervisor = RuntimeSupervisor(
+            configs=[],
+            mission_store=None,
+        )
+
+        status, payload = supervisor.dispatch_control_http(
+            "POST",
+            "/control",
+            b"x" * 16385,
+        )
+
+        self.assertEqual(status, 413)
+        self.assertEqual(
+            payload,
+            {"error": "request body too large"},
+        )
+
+    def test_control_server_rejects_oversized_content_length_before_read(self):
+        supervisor = RuntimeSupervisor(
+            configs=[],
+            mission_store=None,
+        )
+
+        server = supervisor.build_control_server(port=0)
+        thread = threading.Thread(
+            target=server.serve_forever,
+            daemon=True,
+        )
+        thread.start()
+
+        try:
+            host, port = server.server_address
+            connection = http.client.HTTPConnection(
+                host,
+                port,
+                timeout=2,
+            )
+            connection.putrequest("POST", "/control")
+            connection.putheader(
+                "Content-Type",
+                "application/json",
+            )
+            connection.putheader(
+                "Content-Length",
+                "16385",
+            )
+            connection.endheaders()
+
+            response = connection.getresponse()
+            body = json.loads(
+                response.read().decode("utf-8")
+            )
+
+            self.assertEqual(response.status, 413)
+            self.assertEqual(
+                body,
+                {"error": "request body too large"},
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
     def test_run_owns_control_transport_for_runtime_lifetime(self):
         supervisor = RuntimeSupervisor(

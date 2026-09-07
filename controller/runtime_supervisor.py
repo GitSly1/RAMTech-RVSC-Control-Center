@@ -149,7 +149,7 @@ def _identity(checkpoint: Any, evidence: Any) -> str:
 
 
 class RuntimeSupervisor:
-    def __init__(self, configs: Optional[Iterable[WorkerConfig]] = None, repository_mappings: Optional[Mapping[str, str]] = None, qa_endpoint: str = DEFAULT_QA_ENDPOINT, worker_module: str = "controller.generic_worker_host", max_restarts: int = 3, health_timeout: float = 1.0, process_factory: Optional[Callable[..., Any]] = None, health_checker: Optional[Callable[[WorkerConfig], Any]] = None, port_checker: Optional[Callable[[int], bool]] = None, mission_store: Optional[Any] = None, mission_store_path: Optional[str] = None, execute_timeout: float = 660.0, execute_requester: Optional[Callable[[WorkerConfig, Mapping[str, Any]], Any]] = None, clock: Optional[Callable[[], float]] = None, stall_threshold: float = 300.0, starvation_threshold: float = 0.0, max_recovery_attempts: int = 2, recovery_handler: Optional[Callable[[WorkerConfig, Any, int], Any]] = None, max_rework_attempts: int = 2) -> None:
+    def __init__(self, configs: Optional[Iterable[WorkerConfig]] = None, repository_mappings: Optional[Mapping[str, str]] = None, qa_endpoint: str = DEFAULT_QA_ENDPOINT, worker_module: str = "controller.generic_worker_host", max_restarts: int = 3, health_timeout: float = 1.0, process_factory: Optional[Callable[..., Any]] = None, health_checker: Optional[Callable[[WorkerConfig], Any]] = None, port_checker: Optional[Callable[[int], bool]] = None, mission_store: Optional[Any] = None, mission_store_path: Optional[str] = None, execute_timeout: float = 660.0, execute_requester: Optional[Callable[[WorkerConfig, Mapping[str, Any]], Any]] = None, clock: Optional[Callable[[], float]] = None, stall_threshold: float = 300.0, starvation_threshold: float = 0.0, max_recovery_attempts: int = 2, recovery_handler: Optional[Callable[[WorkerConfig, Any, int], Any]] = None, max_rework_attempts: int = 2, control_port: int = 8766) -> None:
         self._configs = self._validate_configs(tuple(configs or golden_team_configs()))
         self._config_by_id = {config.agent_id: config for config in self._configs}
         self.qa_endpoint = qa_endpoint.rstrip("/")
@@ -185,6 +185,9 @@ class RuntimeSupervisor:
             raise ValueError("supply mission_store or mission_store_path, not both")
         self.mission_store = mission_store if mission_store_path is None else MissionStore.load_or_create(mission_store_path)
         self._last_work_control = {"state": "IDLE", "reason": "durable mission store configured; no work-control cycle completed"} if self.mission_store is not None else {"state": "DISABLED", "reason": "no mission store configured"}
+        self.control_port = int(control_port)
+        if not 1 <= self.control_port <= 65535:
+            raise ValueError("control_port must be between 1 and 65535")
         self.control_server = None
         self.control_thread = None
 
@@ -624,6 +627,9 @@ class RuntimeSupervisor:
         path: str,
         body: bytes,
     ) -> Tuple[int, Dict[str, Any]]:
+        if len(body) > 16384:
+            return 413, {"error": "request body too large"}
+
         if path != "/control":
             return 404, {"error": "not found"}
 
@@ -694,24 +700,12 @@ class RuntimeSupervisor:
         supervisor = self
 
         class ControlHandler(BaseHTTPRequestHandler):
-            def _respond(self, method: str) -> None:
-                length_text = self.headers.get("Content-Length", "0")
-
-                try:
-                    length = int(length_text)
-                except ValueError:
-                    length = 0
-
-                body = self.rfile.read(length) if length > 0 else b""
-
-                status, payload = supervisor.dispatch_control_http(
-                    method,
-                    self.path,
-                    body,
-                )
-
+            def _send_json(
+                self,
+                status: int,
+                payload: Mapping[str, Any],
+            ) -> None:
                 encoded = json.dumps(payload).encode("utf-8")
-
                 self.send_response(status)
                 self.send_header(
                     "Content-Type",
@@ -723,6 +717,42 @@ class RuntimeSupervisor:
                 )
                 self.end_headers()
                 self.wfile.write(encoded)
+
+            def _respond(self, method: str) -> None:
+                length_text = self.headers.get("Content-Length", "0")
+
+                try:
+                    length = int(length_text)
+                except ValueError:
+                    self._send_json(
+                        400,
+                        {"error": "invalid content length"},
+                    )
+                    return
+
+                if length < 0:
+                    self._send_json(
+                        400,
+                        {"error": "invalid content length"},
+                    )
+                    return
+
+                if length > 16384:
+                    self._send_json(
+                        413,
+                        {"error": "request body too large"},
+                    )
+                    return
+
+                body = self.rfile.read(length) if length > 0 else b""
+
+                status, payload = supervisor.dispatch_control_http(
+                    method,
+                    self.path,
+                    body,
+                )
+
+                self._send_json(status, payload)
 
             def do_POST(self) -> None:
                 self._respond("POST")
@@ -982,7 +1012,7 @@ class RuntimeSupervisor:
         self._shutdown_requested.set()
 
     def run(self, poll_interval: float = 1.0) -> None:
-        self.start_control_transport()
+        self.start_control_transport(port=self.control_port)
         try:
             self.start_all()
             if self.mission_store is not None:
@@ -1001,6 +1031,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-restarts", type=int, default=3)
     parser.add_argument("--qa-endpoint", default=DEFAULT_QA_ENDPOINT)
     parser.add_argument("--worker-module", default="controller.generic_worker_host")
+    parser.add_argument("--control-port", type=int, default=8766)
     parser.add_argument("--mission-store")
     parser.add_argument("--mission-file")
     parser.add_argument("--mission-id")
@@ -1015,7 +1046,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
     store_path = Path(args.mission_store).expanduser() if args.mission_store else production_mission_store_path()
     try:
-        supervisor = RuntimeSupervisor(qa_endpoint=args.qa_endpoint, worker_module=args.worker_module, max_restarts=args.max_restarts, mission_store_path=str(store_path), stall_threshold=args.stall_threshold, starvation_threshold=args.starvation_threshold, max_recovery_attempts=args.max_recovery_attempts, max_rework_attempts=args.max_rework_attempts)
+        supervisor = RuntimeSupervisor(qa_endpoint=args.qa_endpoint, worker_module=args.worker_module, max_restarts=args.max_restarts, mission_store_path=str(store_path), stall_threshold=args.stall_threshold, starvation_threshold=args.starvation_threshold, max_recovery_attempts=args.max_recovery_attempts, max_rework_attempts=args.max_rework_attempts, control_port=args.control_port)
         if args.action == "requeue":
             if not args.mission_id:
                 raise RuntimeSupervisorError(
