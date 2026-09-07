@@ -80,6 +80,8 @@ class MissionStoreTests(unittest.TestCase):
         self.completed(store, original.mission_id)
         result = store.process_qa_outcome(original.mission_id, "QA_REJECTED", qa_worker="QA-001", evidence={"reason": "tests failed", "commit": "abc"})
         corrective = store.get(result.corrective_mission_id)
+        self.assertEqual(corrective.implementer, "DEV-001")
+        self.assertIsNone(corrective.assigned_worker)
         contract = store.dispatch_contract(corrective.mission_id, "DEV-001", supported_projects=("rvsc",))
         self.assertEqual(contract["wp_id"], corrective.mission_id)
         self.assertEqual(contract["repository"], self.contract()["repository"])

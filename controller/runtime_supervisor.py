@@ -616,6 +616,14 @@ class RuntimeSupervisor:
         return {"state": "IDLE" if not eligible else "READY", "missions": records, "next_eligible_work": _mission_id(eligible[0]) if eligible else None, "work_control": self.work_control_status}
 
     def work_control_once(self) -> Dict[str, Any]:
+        if self.mission_store is not None:
+            sync_external = getattr(
+                self.mission_store,
+                "sync_external_admissions",
+                None,
+            )
+            if callable(sync_external):
+                sync_external()
         with self._lock:
             if self.mission_store is None:
                 return dict(self._last_work_control)

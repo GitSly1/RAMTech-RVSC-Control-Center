@@ -143,6 +143,153 @@ class RuntimeSupervisorTests(unittest.TestCase):
                 self.assertEqual(calls, [])
                 self.assertEqual(mission.state, MissionState.BLOCKED)
 
+    def test_external_durable_admission_becomes_visible_without_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "missions.json"
+
+            live_store = MissionStore.load_or_create(path)
+            calls = []
+            supervisor = self.make_supervisor(
+                live_store,
+                execute_requester=lambda _config, payload:
+                    calls.append(payload["wp_id"]) or {
+                        "qa_status": "QA_ACCEPTED",
+                        "qa_agent_id": "QA-001",
+                    },
+            )
+
+            external_store = MissionStore.load_or_create(path)
+            external_store.add_contract(
+                self.contract(wp_id="LIVE-INGEST"),
+                supported_projects=("rvsc",),
+            )
+
+            result = supervisor.work_control_once()
+
+            self.assertEqual(result["state"], "ACCEPTED")
+            self.assertEqual(calls, ["LIVE-INGEST"])
+            self.assertEqual(
+                live_store.get("LIVE-INGEST").implementer,
+                "DEV-001",
+            )
+
+    def test_external_sync_does_not_overwrite_supervisor_owned_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "missions.json"
+
+            live_store = MissionStore.load_or_create(path)
+            live = live_store.add_contract(
+                self.contract(wp_id="OWNED"),
+                supported_projects=("rvsc",),
+            )
+            live_store.transition(
+                "OWNED",
+                "assigned",
+                worker_id="DEV-001",
+            )
+
+            external_store = MissionStore.load_or_create(path)
+
+            live_store.transition(
+                "OWNED",
+                "running",
+                worker_id="DEV-001",
+            )
+
+            external_store.add_contract(
+                self.contract(wp_id="NEW"),
+                supported_projects=("rvsc",),
+            )
+
+            supervisor = self.make_supervisor(
+                live_store,
+                execute_requester=lambda _config, _payload: {
+                    "qa_status": "QA_ACCEPTED",
+                    "qa_agent_id": "QA-001",
+                },
+            )
+
+            supervisor.work_control_once()
+
+            self.assertEqual(
+                live_store.get("OWNED").state,
+                MissionState.RUNNING,
+            )
+            self.assertEqual(
+                live_store.get("OWNED").assigned_worker,
+                "DEV-001",
+            )
+            self.assertIsNotNone(live_store.get("NEW"))
+
+    def test_external_sync_advances_resident_sequence_allocator(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "missions.json"
+
+            live_store = MissionStore.load_or_create(path)
+            live_store.add_contract(
+                self.contract(wp_id="LOCAL"),
+                supported_projects=("rvsc",),
+            )
+
+            external_store = MissionStore.load_or_create(path)
+            external = external_store.add_contract(
+                self.contract(wp_id="EXTERNAL"),
+                supported_projects=("rvsc",),
+            )
+
+            supervisor = self.make_supervisor(live_store)
+            supervisor.work_control_once()
+
+            later = live_store.add_contract(
+                self.contract(wp_id="LATER"),
+                supported_projects=("rvsc",),
+            )
+
+            self.assertGreater(
+                later.sequence,
+                external.sequence,
+            )
+
+    def test_external_conflicting_existing_mission_is_not_imported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "missions.json"
+
+            live_store = MissionStore.load_or_create(path)
+            live_store.add_contract(
+                self.contract(wp_id="EXISTING"),
+                supported_projects=("rvsc",),
+            )
+
+            external_store = MissionStore.load_or_create(path)
+
+            live_store.transition(
+                "EXISTING",
+                "assigned",
+                worker_id="DEV-001",
+            )
+
+            external = external_store.get("EXISTING")
+            external.block_reason = "stale external mutation"
+            external_store.save()
+
+            supervisor = self.make_supervisor(live_store)
+            supervisor.work_control_once()
+
+            current = live_store.get("EXISTING")
+
+            self.assertEqual(
+                current.state,
+                MissionState.ASSIGNED,
+            )
+            self.assertEqual(
+                current.assigned_worker,
+                "DEV-001",
+            )
+            self.assertNotEqual(
+                current.block_reason,
+                "stale external mutation",
+            )
+
     def test_dependency_aware_dispatch_remains_intact(self):
         store = MissionStore()
         store.add_contract(self.contract(wp_id="origin"), supported_projects=("rvsc",))

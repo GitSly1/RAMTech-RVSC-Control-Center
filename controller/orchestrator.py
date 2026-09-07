@@ -497,10 +497,35 @@ class MissionStore:
             corrective_contract["dependencies"] = []
             corrective_contract["objective"] = "Correct independent QA rejection for %s: %s\n\nOriginal objective:\n%s" % (root_id, reason, originating.get("objective", ""))
             corrective_contract = validate_mission_contract(corrective_contract, (root.project_id,))
-            corrective = Mission(corrective_id, root.project_id, priority=root.priority, metadata={"contract": corrective_contract, "corrective_work": True, "attempt_number": attempt, "originating_mission_id": root_id, "parent_mission_id": mission_id, "qa_rejection_evidence": evidence_data, "rejection_reason": reason, "reviewed_commit": evidence_data.get("reviewed_commit") or evidence_data.get("commit"), "reviewed_branch": evidence_data.get("reviewed_branch") or evidence_data.get("branch"), "excluded_worker_ids": [qa_worker], "requires_independent_qa": True, "ingestion": "validated_corrective"}, parent_mission_id=mission_id, root_mission_id=root_id)
+            corrective = Mission(corrective_id, root.project_id, priority=root.priority, implementer=corrective_contract["agent_id"], metadata={"contract": corrective_contract, "corrective_work": True, "attempt_number": attempt, "originating_mission_id": root_id, "parent_mission_id": mission_id, "qa_rejection_evidence": evidence_data, "rejection_reason": reason, "reviewed_commit": evidence_data.get("reviewed_commit") or evidence_data.get("commit"), "reviewed_branch": evidence_data.get("reviewed_branch") or evidence_data.get("branch"), "excluded_worker_ids": [qa_worker], "requires_independent_qa": True, "ingestion": "validated_corrective"}, parent_mission_id=mission_id, root_mission_id=root_id)
             self.add(corrective)
         self._persist()
         return QAOutcomeResult("REWORK_QUEUED", mission_id, root_id, corrective_id, attempt)
+
+    def sync_external_admissions(self) -> int:
+        """Import newly admitted durable missions without replacing live state."""
+        if self.path is None or not self.path.exists():
+            return 0
+
+        durable = MissionStore.load(self.path)
+        imported = 0
+
+        for external in durable.all():
+            if external.mission_id in self._missions:
+                continue
+
+            contract = external.metadata.get("contract")
+            if not isinstance(contract, Mapping):
+                continue
+
+            self._missions[external.mission_id] = external
+            self._next_sequence = max(
+                self._next_sequence,
+                int(external.sequence) + 1,
+            )
+            imported += 1
+
+        return imported
 
     def save(self, path: Optional[os.PathLike[str] | str] = None) -> None:
         destination = Path(path) if path is not None else self.path
