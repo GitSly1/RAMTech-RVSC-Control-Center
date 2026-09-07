@@ -43,6 +43,77 @@ class GenericWorkerHostTests(unittest.TestCase):
         with host._STATE_LOCK:
             host._RUNTIME_STATE.update({"active_mission": None, "active_run_id": None, "last_run_id": None, "last_activity": None, "last_result": None, "last_checkpoint": None, "checkpoint_evidence": (), "recovery_required": False, "recovered_checkpoint": None, "lifecycle_state": "idle", "recovery_context": None, "recovery_digest": None, "recovery_attempted": False, "engineering_result": None, "qa_dispatch_started": False, "terminal_recovery": None})
 
+    def test_terminal_recovery_failure_can_be_acknowledged_without_deleting_evidence(self):
+        terminal = {
+            "wp_id": self.mission["wp_id"],
+            "run_id": self.mission["run_id"],
+            "result": "recovery_failed",
+            "completed_at": "2026-09-07T00:00:00+00:00",
+        }
+        context = dict(self.mission)
+        with host._STATE_LOCK:
+            host._RUNTIME_STATE.update({
+                "active_mission": self.mission["wp_id"],
+                "active_run_id": self.mission["run_id"],
+                "last_run_id": self.mission["run_id"],
+                "recovery_required": True,
+                "recovered_checkpoint": "preflight_passed",
+                "lifecycle_state": "recovery_failed",
+                "recovery_context": context,
+                "recovery_digest": host._context_digest(context),
+                "recovery_attempted": True,
+                "engineering_result": {"success": False},
+                "qa_dispatch_started": False,
+                "terminal_recovery": terminal,
+            })
+
+        with patch("controller.generic_worker_host._persist_runtime_state") as persist:
+            state = host.acknowledge_terminal_recovery_failure()
+
+        persist.assert_called_once()
+        self.assertIsNone(state["active_mission"])
+        self.assertIsNone(state["active_run_id"])
+        self.assertFalse(state["recovery_required"])
+        self.assertEqual(state["lifecycle_state"], "idle")
+        self.assertEqual(state["last_result"], "failed")
+        self.assertEqual(state["last_checkpoint"], "recovery_failure_acknowledged")
+        self.assertIn("recovery_failure:acknowledged", state["checkpoint_evidence"])
+        self.assertEqual(state["last_run_id"], self.mission["run_id"])
+        self.assertEqual(state["terminal_recovery"], terminal)
+        self.assertIsNone(state["recovery_context"])
+        self.assertIsNone(state["recovery_digest"])
+        self.assertFalse(state["recovery_attempted"])
+        self.assertIsNone(state["engineering_result"])
+
+    def test_terminal_recovery_acknowledgement_fails_closed(self):
+        with self.assertRaisesRegex(RuntimeError, "requires recovery_failed"):
+            host.acknowledge_terminal_recovery_failure()
+
+        terminal = {
+            "wp_id": self.mission["wp_id"],
+            "run_id": self.mission["run_id"],
+            "result": "recovery_failed",
+        }
+        with host._STATE_LOCK:
+            host._RUNTIME_STATE.update({
+                "active_mission": self.mission["wp_id"],
+                "active_run_id": self.mission["run_id"],
+                "recovery_required": True,
+                "lifecycle_state": "recovery_failed",
+                "recovery_attempted": True,
+                "terminal_recovery": terminal,
+            })
+
+        class LockedExecution:
+            @staticmethod
+            def locked():
+                return True
+
+        with patch.object(host, "_EXECUTION_LOCK", LockedExecution()):
+            with self.assertRaisesRegex(RuntimeError, "execution is in progress"):
+                host.acknowledge_terminal_recovery_failure()
+
+
     def health(self, worker="QA-001", **updates):
         payload = {"protocol": "rvsc.worker.health.v1", "service": "rvsc-generic-worker", "worker": worker, "ready": True, "worker_enabled": True, "qa_eligible": True}
         payload.update(updates)

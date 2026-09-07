@@ -258,6 +258,57 @@ def _checkpoint(name: str, evidence: tuple[str, ...] = ()) -> None:
     _set_runtime_state(**updates)
 
 
+def acknowledge_terminal_recovery_failure() -> dict[str, Any]:
+    """Acknowledge a terminal recovery failure and return the worker to idle."""
+    if _EXECUTION_LOCK.locked():
+        raise RuntimeError("cannot acknowledge recovery failure while execution is in progress")
+    recovery_thread = _RECOVERY_THREAD
+    if recovery_thread is not None and recovery_thread.is_alive():
+        raise RuntimeError("cannot acknowledge recovery failure while automatic recovery is in progress")
+
+    with _STATE_LOCK:
+        state = dict(_RUNTIME_STATE)
+
+    if state.get("lifecycle_state") != "recovery_failed":
+        raise RuntimeError("terminal recovery acknowledgement requires recovery_failed state")
+    if not state.get("recovery_required"):
+        raise RuntimeError("terminal recovery acknowledgement requires recovery_required state")
+    if not state.get("recovery_attempted"):
+        raise RuntimeError("terminal recovery acknowledgement requires an attempted recovery")
+    terminal = state.get("terminal_recovery")
+    if not isinstance(terminal, dict) or terminal.get("result") not in {
+        "recovery_failed",
+        "failed",
+        "qa_dispatch_outcome_unknown",
+    }:
+        raise RuntimeError("terminal recovery acknowledgement requires terminal recovery evidence")
+
+    prior_wp = state.get("active_mission")
+    prior_run = state.get("active_run_id") or state.get("last_run_id")
+    evidence = ["recovery_failure:acknowledged"]
+    if prior_wp:
+        evidence.append(f"wp_id:{prior_wp}")
+    if prior_run:
+        evidence.append(f"run_id:{prior_run}")
+
+    _set_runtime_state(
+        active_mission=None,
+        active_run_id=None,
+        last_result="failed",
+        last_checkpoint="recovery_failure_acknowledged",
+        checkpoint_evidence=tuple(evidence),
+        recovery_required=False,
+        recovered_checkpoint=None,
+        lifecycle_state="idle",
+        recovery_context=None,
+        recovery_digest=None,
+        recovery_attempted=False,
+        engineering_result=None,
+        qa_dispatch_started=False,
+    )
+    return _snapshot_state()
+
+
 def _mission_context(mission: dict[str, Any]) -> dict[str, Any]:
     sanitized = sanitize_for_persistence(mission)
     if not isinstance(sanitized, dict):
