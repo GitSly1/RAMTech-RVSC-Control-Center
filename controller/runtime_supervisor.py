@@ -535,7 +535,7 @@ class RuntimeSupervisor:
                 return [str(value)]
             if isinstance(value, Mapping):
                 details = []
-                for key in ("detail", "message", "error", "reason", "title", "code", "type"):
+                for key in ("detail", "message", "error", "reason", "summary", "title", "code", "type"):
                     if key in value:
                         details.extend(useful(value[key], depth + 1))
                 return details

@@ -881,5 +881,59 @@ class RuntimeSupervisorTests(unittest.TestCase):
 
 
 
+
+class WorkerHttpErrorSummaryRegressionTests(unittest.TestCase):
+    def test_worker_http_500_summary_survives_supervisor_boundary(self):
+        supervisor = RuntimeSupervisor.__new__(RuntimeSupervisor)
+        supervisor.execute_timeout = 5
+
+        config = WorkerConfig(
+            agent_id="DEV-001",
+            name="Daniel",
+            role="engineering",
+            port=8765,
+        )
+
+        body = {
+            "success": False,
+            "summary": (
+                "validation timed out "
+                "[operator-console-targeted] after 120 seconds"
+            ),
+            "evidence": ["worker_host:rvsc-generic"],
+            "retryable": False,
+        }
+
+        http_error = urllib.error.HTTPError(
+            "http://127.0.0.1:8765/execute",
+            500,
+            "Internal Server Error",
+            {},
+            io.BytesIO(json.dumps(body).encode("utf-8")),
+        )
+
+        with mock.patch(
+            "controller.runtime_supervisor.urllib.request.urlopen",
+            side_effect=http_error,
+        ):
+            with self.assertRaises(RuntimeSupervisorError) as captured:
+                supervisor._http_execute(
+                    config,
+                    {"wp_id": "UX169"},
+                )
+
+        message = str(captured.exception)
+
+        self.assertIn(
+            "worker execute returned HTTP 500",
+            message,
+        )
+        self.assertIn(
+            "validation timed out "
+            "[operator-console-targeted] after 120 seconds",
+            message,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
