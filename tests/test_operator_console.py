@@ -15,7 +15,11 @@ class TestOperatorConsole(unittest.TestCase):
         runtime_supervisor = RuntimeSupervisor()
         console = OperatorConsole(runtime_supervisor)
         console.refresh()
-        # Placeholder for assert statements to validate refresh behavior
+        self.assertIn('Controller State', console.controller_state.cget('text'))
+        self.assertIn('OPS-001', console.ops_worker_status.cget('text'))
+        self.assertIn('DEV-001', console.dev_worker_status.cget('text'))
+        self.assertIn('QA-001', console.qa_worker_status.cget('text'))
+        self.assertIn('Queue Summary', console.queue_summary.cget('text'))
 
 
 if __name__ == '__main__':
