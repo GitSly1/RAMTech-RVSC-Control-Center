@@ -53,13 +53,24 @@ def _openai_call(api_key: str, prompt: str) -> dict[str, Any]:
         raise RuntimeError(f"OpenAI transport error: {exc.reason}") from exc
 
 
-def _ollama_proposal_schema() -> dict[str, Any]:
+def _ollama_proposal_schema(allowed_paths: tuple[str, ...]) -> dict[str, Any]:
+    authorized = tuple(str(path) for path in allowed_paths)
+    if not authorized:
+        raise ValueError("Ollama proposal schema requires at least one allowed path")
+    if len(set(authorized)) != len(authorized):
+        raise ValueError("Ollama proposal schema requires unique allowed paths")
+
     return {
         "type": "object",
         "properties": {
             "files": {
                 "type": "object",
-                "additionalProperties": {"type": "string"},
+                "properties": {
+                    path: {"type": "string"}
+                    for path in authorized
+                },
+                "required": list(authorized),
+                "additionalProperties": False,
             },
             "commit_message": {"type": "string"},
             "engineering_summary": {"type": "string"},
@@ -69,13 +80,13 @@ def _ollama_proposal_schema() -> dict[str, Any]:
     }
 
 
-def _ollama_call(prompt: str) -> dict[str, Any]:
+def _ollama_call(prompt: str, allowed_paths: tuple[str, ...]) -> dict[str, Any]:
     body = json.dumps(
         {
             "model": DEFAULT_OLLAMA_MODEL,
             "prompt": prompt,
             "stream": False,
-            "format": _ollama_proposal_schema(),
+            "format": _ollama_proposal_schema(allowed_paths),
         }
     ).encode("utf-8")
     req = urllib.request.Request(
@@ -115,11 +126,11 @@ def _ollama_call(prompt: str) -> dict[str, Any]:
     }
 
 
-def _provider_call(prompt: str) -> tuple[dict[str, Any], str]:
+def _provider_call(prompt: str, allowed_paths: tuple[str, ...]) -> tuple[dict[str, Any], str]:
     provider = os.environ.get("RVSC_AI_PROVIDER", "ollama").strip().lower()
 
     if provider == "ollama":
-        return _ollama_call(prompt), "ollama"
+        return _ollama_call(prompt, allowed_paths), "ollama"
 
     if provider == "openai":
         api_key = os.environ.get("OPENAI_API_KEY", "").strip()
@@ -487,7 +498,8 @@ def execute_mission(*, agent_id: str, agent_name: str, role: str, mission: dict[
             mission,
             source_files,
             bounded_context_files,
-        )
+        ),
+        worker_request.allowed_paths,
     )
     provider_response_id = str(response.get("id", ""))
     provider_status = str(response.get("status", "unknown"))
@@ -542,7 +554,8 @@ def execute_mission(*, agent_id: str, agent_name: str, role: str, mission: dict[
                 bounded_context_files,
                 proposal,
                 f"incomplete authorized file set; missing: {', '.join(missing_files)}",
-            )
+            ),
+            worker_request.allowed_paths,
         )
         repair_status = str(repair_response.get("status", "unknown"))
         if repair_status != "completed":
@@ -643,7 +656,8 @@ def execute_mission(*, agent_id: str, agent_name: str, role: str, mission: dict[
                     bounded_context_files,
                     proposal,
                     str(exc),
-                )
+                ),
+                worker_request.allowed_paths,
             )
             repair_status = str(repair_response.get("status", "unknown"))
             if repair_status != "completed":

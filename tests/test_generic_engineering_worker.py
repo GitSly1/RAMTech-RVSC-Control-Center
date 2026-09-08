@@ -14,7 +14,8 @@ from controller.generic_engineering_worker import _budget_context_files, _bounde
 
 class GenericEngineeringWorkerTests(unittest.TestCase):
     def test_ollama_proposal_schema_requires_exact_engineering_contract(self):
-        schema = _ollama_proposal_schema()
+        allowed_paths = ("controller/a.py", "tests/test_a.py")
+        schema = _ollama_proposal_schema(allowed_paths)
 
         self.assertEqual(schema["type"], "object")
         self.assertEqual(
@@ -26,11 +27,25 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
             set(schema["properties"]),
             {"files", "commit_message", "engineering_summary"},
         )
-        self.assertEqual(schema["properties"]["files"]["type"], "object")
+
+        files_schema = schema["properties"]["files"]
+        self.assertEqual(files_schema["type"], "object")
         self.assertEqual(
-            schema["properties"]["files"]["additionalProperties"],
-            {"type": "string"},
+            set(files_schema["properties"]),
+            set(allowed_paths),
         )
+        self.assertEqual(
+            files_schema["required"],
+            list(allowed_paths),
+        )
+        self.assertFalse(files_schema["additionalProperties"])
+
+        for path in allowed_paths:
+            self.assertEqual(
+                files_schema["properties"][path],
+                {"type": "string"},
+            )
+
         self.assertEqual(
             schema["properties"]["commit_message"],
             {"type": "string"},
@@ -40,6 +55,9 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
             {"type": "string"},
         )
 
+        with self.assertRaises(ValueError):
+            _ollama_proposal_schema(())
+
     @patch("controller.generic_engineering_worker.urllib.request.urlopen")
     def test_ollama_call_sends_structured_proposal_schema(self, urlopen):
         response = Mock()
@@ -48,12 +66,23 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
         response.read.return_value = b'{"response":"{}"}'
         urlopen.return_value = response
 
-        _ollama_call("bounded mission")
+        allowed_paths = ("controller/a.py",)
+        _ollama_call("bounded mission", allowed_paths)
 
         request = urlopen.call_args.args[0]
         payload = json.loads(request.data.decode("utf-8"))
 
-        self.assertEqual(payload["format"], _ollama_proposal_schema())
+        self.assertEqual(
+            payload["format"],
+            _ollama_proposal_schema(allowed_paths),
+        )
+        self.assertEqual(
+            set(payload["format"]["properties"]["files"]["properties"]),
+            set(allowed_paths),
+        )
+        self.assertFalse(
+            payload["format"]["properties"]["files"]["additionalProperties"]
+        )
         self.assertNotEqual(payload["format"], "json")
         self.assertEqual(payload["prompt"], "bounded mission")
         self.assertFalse(payload["stream"])
