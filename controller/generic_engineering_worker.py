@@ -428,6 +428,11 @@ def _engineering_repair_prompt(
         + validation_error
         + "\nPREVIOUS FAILED PROPOSAL:\n"
         + json.dumps(failed_proposal, sort_keys=True)
+        + "\nBefore producing the corrected proposal, diagnose the validation failure from the supplied error and previous failed proposal."
+        + "\nIdentify the concrete defective generated code or configuration that caused the validation failure."
+        + "\nRe-evaluate the proposed replacement files against the supplied BASELINE FILES and READ-ONLY CONTEXT FILES."
+        + "\nThe corrected proposal must address the observed validation failure; do not merely repeat or cosmetically rewrite the failed construction."
+        + "\nPreserve unrelated behavior and remain strictly within the original mission and allowed_paths authorization."
         + "\nReturn one corrected proposal using the exact same JSON contract."
     )
 

@@ -9,7 +9,7 @@ from unittest.mock import Mock, call, patch
 
 from controller.engineering_environment import EngineeringEnvironmentError
 from controller.engineering_runner import EngineeringValidationError
-from controller.generic_engineering_worker import _budget_context_files, _bounded_context_text, _configure_git_identity, _git_identity, _ollama_call, _ollama_proposal_schema, _read_context_files, _repo_root, _validations, _worker_request, execute_mission
+from controller.generic_engineering_worker import _budget_context_files, _bounded_context_text, _configure_git_identity, _git_identity, _ollama_call, _ollama_proposal_schema, _engineering_repair_prompt, _read_context_files, _repo_root, _validations, _worker_request, execute_mission
 
 
 class GenericEngineeringWorkerTests(unittest.TestCase):
@@ -105,6 +105,41 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _repo_root({"project": "unknown"})
 
+    def test_repair_prompt_requires_validation_diagnosis(self):
+        mission = {
+            "agent_id": "DEV-001",
+            "wp_id": "TEST-REPAIR-DIAGNOSIS",
+            "project": "rvsc",
+            "repository": "GitSly1/RAMTech-RVSC-Control-Center",
+            "base_branch": "main",
+            "work_branch": "rvsc/TEST-REPAIR-DIAGNOSIS",
+            "objective": "prove diagnostic repair contract",
+            "allowed_paths": ["source.py"],
+            "acceptance_criteria": ["validation passes"],
+        }
+
+        prompt = _engineering_repair_prompt(
+            "DEV-001",
+            "Daniel",
+            "Engineering",
+            mission,
+            {"source.py": "baseline\n"},
+            {"context.py": "reference\n"},
+            {
+                "files": {"source.py": "from source import broken\n"},
+                "commit_message": "failed",
+                "engineering_summary": "failed",
+            },
+            "ImportError: circular import in source.py",
+        )
+
+        self.assertIn("diagnose the validation failure", prompt)
+        self.assertIn("concrete defective generated code", prompt)
+        self.assertIn("BASELINE FILES", prompt)
+        self.assertIn("READ-ONLY CONTEXT FILES", prompt)
+        self.assertIn("do not merely repeat", prompt)
+        self.assertIn("ImportError: circular import in source.py", prompt)
+        self.assertIn("from source import broken", prompt)
     def test_validations_reject_more_than_two_commands(self):
         mission = {
             "validation_commands": [
