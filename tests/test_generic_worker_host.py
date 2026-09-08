@@ -114,6 +114,101 @@ class GenericWorkerHostTests(unittest.TestCase):
                 host.acknowledge_terminal_recovery_failure()
 
 
+    def test_terminal_recovery_acknowledges_ambiguous_qa_dispatch_without_fabricating_recovery_attempt(self):
+        terminal = {
+            "wp_id": self.mission["wp_id"],
+            "run_id": self.mission["run_id"],
+            "result": "qa_dispatch_outcome_unknown",
+            "completed_at": "2026-09-08T00:00:00+00:00",
+        }
+        context = dict(self.mission)
+        with host._STATE_LOCK:
+            host._RUNTIME_STATE.update({
+                "active_mission": self.mission["wp_id"],
+                "active_run_id": self.mission["run_id"],
+                "last_run_id": self.mission["run_id"],
+                "recovery_required": True,
+                "lifecycle_state": "recovery_failed",
+                "recovery_context": context,
+                "recovery_digest": host._context_digest(context),
+                "recovery_attempted": False,
+                "engineering_result": dict(self.engineering),
+                "qa_dispatch_started": True,
+                "terminal_recovery": terminal,
+            })
+
+        with patch("controller.generic_worker_host._persist_runtime_state") as persist:
+            state = host.acknowledge_terminal_recovery_failure()
+
+        persist.assert_called_once()
+        self.assertIsNone(state["active_mission"])
+        self.assertFalse(state["recovery_required"])
+        self.assertEqual(state["lifecycle_state"], "idle")
+        self.assertEqual(state["last_checkpoint"], "recovery_failure_acknowledged")
+        self.assertEqual(state["terminal_recovery"], terminal)
+        self.assertFalse(state["recovery_attempted"])
+        self.assertIsNone(state["engineering_result"])
+        self.assertFalse(state["qa_dispatch_started"])
+
+    def test_terminal_recovery_still_requires_attempt_for_non_ambiguous_failure(self):
+        with host._STATE_LOCK:
+            host._RUNTIME_STATE.update({
+                "active_mission": self.mission["wp_id"],
+                "active_run_id": self.mission["run_id"],
+                "recovery_required": True,
+                "lifecycle_state": "recovery_failed",
+                "recovery_attempted": False,
+                "terminal_recovery": {
+                    "wp_id": self.mission["wp_id"],
+                    "run_id": self.mission["run_id"],
+                    "result": "recovery_failed",
+                },
+            })
+
+        with self.assertRaisesRegex(RuntimeError, "requires an attempted recovery"):
+            host.acknowledge_terminal_recovery_failure()
+
+    def test_terminal_recovery_http_route_is_bounded_to_acknowledgement(self):
+        handler = object.__new__(host.GenericWorkerHandler)
+        responses = []
+
+        handler.path = "/acknowledge-terminal-recovery"
+        handler.headers = {"Content-Length": "0"}
+        handler.rfile = io.BytesIO(b"")
+        handler._send_json = lambda status, payload: responses.append((status, payload))
+
+        expected = {
+            "lifecycle_state": "idle",
+            "last_checkpoint": "recovery_failure_acknowledged",
+        }
+
+        with patch.object(
+            host,
+            "acknowledge_terminal_recovery_failure",
+            return_value=expected,
+        ) as acknowledge:
+            handler.do_POST()
+
+        acknowledge.assert_called_once_with()
+        self.assertEqual(responses, [(200, expected)])
+
+    def test_terminal_recovery_http_route_rejects_unsupported_payload(self):
+        handler = object.__new__(host.GenericWorkerHandler)
+        responses = []
+        raw = json.dumps({"action": "anything_else"}).encode("utf-8")
+
+        handler.path = "/acknowledge-terminal-recovery"
+        handler.headers = {"Content-Length": str(len(raw))}
+        handler.rfile = io.BytesIO(raw)
+        handler._send_json = lambda status, payload: responses.append((status, payload))
+
+        with patch.object(host, "acknowledge_terminal_recovery_failure") as acknowledge:
+            handler.do_POST()
+
+        acknowledge.assert_not_called()
+        self.assertEqual(responses[0][0], 409)
+        self.assertFalse(responses[0][1]["success"])
+
     def health(self, worker="QA-001", **updates):
         payload = {"protocol": "rvsc.worker.health.v1", "service": "rvsc-generic-worker", "worker": worker, "ready": True, "worker_enabled": True, "qa_eligible": True}
         payload.update(updates)

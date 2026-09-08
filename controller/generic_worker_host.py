@@ -273,8 +273,6 @@ def acknowledge_terminal_recovery_failure() -> dict[str, Any]:
         raise RuntimeError("terminal recovery acknowledgement requires recovery_failed state")
     if not state.get("recovery_required"):
         raise RuntimeError("terminal recovery acknowledgement requires recovery_required state")
-    if not state.get("recovery_attempted"):
-        raise RuntimeError("terminal recovery acknowledgement requires an attempted recovery")
     terminal = state.get("terminal_recovery")
     if not isinstance(terminal, dict) or terminal.get("result") not in {
         "recovery_failed",
@@ -282,6 +280,8 @@ def acknowledge_terminal_recovery_failure() -> dict[str, Any]:
         "qa_dispatch_outcome_unknown",
     }:
         raise RuntimeError("terminal recovery acknowledgement requires terminal recovery evidence")
+    if not state.get("recovery_attempted") and terminal.get("result") != "qa_dispatch_outcome_unknown":
+        raise RuntimeError("terminal recovery acknowledgement requires an attempted recovery")
 
     prior_wp = state.get("active_mission")
     prior_run = state.get("active_run_id") or state.get("last_run_id")
@@ -795,6 +795,18 @@ class GenericWorkerHandler(BaseHTTPRequestHandler):
         self._send_json(200, health_payload())
 
     def do_POST(self) -> None:
+        if self.path == "/acknowledge-terminal-recovery":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length:
+                    payload = json.loads(self.rfile.read(length).decode("utf-8"))
+                    if payload not in ({}, {"action": "acknowledge_terminal_recovery"}):
+                        raise ValueError("unsupported terminal recovery acknowledgement payload")
+                result = acknowledge_terminal_recovery_failure()
+                self._send_json(200, result)
+            except Exception as exc:
+                self._send_json(409, {"success": False, "summary": str(exc), "evidence": ["worker_host:rvsc-generic"], "retryable": False})
+            return
         if self.path != "/execute":
             self.send_error(404)
             return
