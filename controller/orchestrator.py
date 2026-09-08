@@ -162,6 +162,10 @@ def validate_mission_contract(contract: Mapping[str, Any], supported_projects: I
     commands = data.get("validation_commands")
     if not isinstance(commands, list) or not commands:
         raise OrchestrationError("mission contract requires validation_commands")
+    if len(commands) > 2:
+        raise OrchestrationError(
+            "mission contract permits at most two validation commands"
+        )
     normalized_commands = []
     for command in commands:
         if not isinstance(command, Mapping) or not isinstance(command.get("argv"), list) or not command["argv"]:

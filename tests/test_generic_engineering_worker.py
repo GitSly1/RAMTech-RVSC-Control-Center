@@ -105,6 +105,21 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _repo_root({"project": "unknown"})
 
+    def test_validations_reject_more_than_two_commands(self):
+        mission = {
+            "validation_commands": [
+                {"name": "one", "argv": ["python", "-c", "print(1)"]},
+                {"name": "two", "argv": ["python", "-c", "print(2)"]},
+                {"name": "three", "argv": ["python", "-c", "print(3)"]},
+            ]
+        }
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "at most two validation commands",
+        ):
+            _validations(mission)
+
     def test_validations_reject_uncontrolled_executable(self):
         with self.assertRaises(ValueError):
             _validations({"validation_commands": [{"name": "bad", "argv": ["sh", "-c", "true"]}]})

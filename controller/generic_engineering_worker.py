@@ -190,6 +190,10 @@ def _validations(mission: dict[str, Any]) -> tuple[ValidationCommand, ...]:
     raw = mission.get("validation_commands")
     if not isinstance(raw, list) or not raw:
         raise ValueError("generic engineering mission requires validation_commands")
+    if len(raw) > 2:
+        raise ValueError(
+            "generic engineering mission permits at most two validation commands"
+        )
     checks: list[ValidationCommand] = []
     for index, item in enumerate(raw):
         if not isinstance(item, dict):

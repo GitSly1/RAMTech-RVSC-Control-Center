@@ -93,6 +93,23 @@ class MissionStoreTests(unittest.TestCase):
         self.assertIn("QA-001", corrective.metadata["excluded_worker_ids"])
         self.assertTrue(corrective.metadata["requires_independent_qa"])
 
+    def test_contract_rejects_more_than_two_validation_commands(self):
+        contract = self.contract()
+        contract["validation_commands"] = [
+            {"name": "targeted", "argv": ["python", "-m", "unittest", "tests.test_runtime_supervisor"]},
+            {"name": "full", "argv": ["python", "-m", "unittest", "discover"]},
+            {"name": "extra", "argv": ["python", "-c", "print('extra')"]},
+        ]
+
+        with self.assertRaisesRegex(
+            OrchestrationError,
+            "at most two validation commands",
+        ):
+            MissionStore().add_contract(
+                contract,
+                supported_projects=("rvsc",),
+            )
+
     def test_context_paths_are_validated_and_preserved(self):
         contract = validate_mission_contract(
             self.contract(
