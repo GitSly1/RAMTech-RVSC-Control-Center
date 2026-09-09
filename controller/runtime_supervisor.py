@@ -20,6 +20,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from controller.orchestrator import MissionStore, MissionState, OrchestrationError, WorkerState, select_dispatch
+from controller.runtime_preflight import StartupPreflightError, run_startup_preflight
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 REPOSITORY_ENV_KEYS = ("RVSC_RVSC_REPO", "RVSC_SEMANTIQ_REPO", "RVSC_MOXIE_REPO")
@@ -1046,6 +1047,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
     store_path = Path(args.mission_store).expanduser() if args.mission_store else production_mission_store_path()
     try:
+        if args.action == "run":
+            repository_mappings = {
+                key: os.environ[key]
+                for key in REPOSITORY_ENV_KEYS
+                if os.environ.get(key)
+            }
+            run_startup_preflight(
+                repository_mappings,
+                mission_store_path=store_path,
+            )
+
         supervisor = RuntimeSupervisor(qa_endpoint=args.qa_endpoint, worker_module=args.worker_module, max_restarts=args.max_restarts, mission_store_path=str(store_path), stall_threshold=args.stall_threshold, starvation_threshold=args.starvation_threshold, max_recovery_attempts=args.max_recovery_attempts, max_rework_attempts=args.max_rework_attempts, control_port=args.control_port)
         if args.action == "requeue":
             if not args.mission_id:
@@ -1069,7 +1081,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.action == "status":
             print(json.dumps({"workers": supervisor.status_dicts(), "work_control": supervisor.work_control_status, "queue": supervisor.queue_status(), "mission_store": str(store_path)}, indent=2, sort_keys=True))
             return 0
-    except (OSError, ValueError, json.JSONDecodeError, OrchestrationError, RuntimeSupervisorError) as exc:
+    except (OSError, ValueError, json.JSONDecodeError, OrchestrationError, RuntimeSupervisorError, StartupPreflightError) as exc:
         print("runtime supervisor input error: %s" % exc, file=sys.stderr)
         return 2
 
