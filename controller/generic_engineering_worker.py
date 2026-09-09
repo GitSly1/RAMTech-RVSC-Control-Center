@@ -53,6 +53,157 @@ def _openai_call(api_key: str, prompt: str) -> dict[str, Any]:
         raise RuntimeError(f"OpenAI transport error: {exc.reason}") from exc
 
 
+def _apply_bounded_edits(
+    source_files: dict[str, str],
+    edits: list[dict[str, Any]],
+    *,
+    existing_paths: set[str],
+) -> dict[str, str]:
+    """Apply exact, sequential text edits in memory without filesystem mutation."""
+    if not isinstance(edits, list) or not edits:
+        raise RuntimeError(
+            "bounded edit proposal requires at least one edit"
+        )
+
+    result = dict(source_files)
+    authorized = set(source_files)
+
+    if not isinstance(existing_paths, set):
+        raise RuntimeError(
+            "existing_paths must be a set"
+        )
+
+    present = set(existing_paths)
+
+    unauthorized_existing = present - authorized
+    if unauthorized_existing:
+        raise RuntimeError(
+            "existing_paths contains unauthorized path: "
+            + ", ".join(sorted(unauthorized_existing))
+        )
+
+    for index, edit in enumerate(edits, start=1):
+        if not isinstance(edit, dict):
+            raise RuntimeError(
+                f"bounded edit {index} is not an object"
+            )
+
+        operation = edit.get("operation")
+
+        if operation == "replace":
+            if set(edit) != {
+                "operation",
+                "path",
+                "old_text",
+                "new_text",
+            }:
+                raise RuntimeError(
+                    f"bounded edit {index} must contain exactly "
+                    "operation, path, old_text, new_text"
+                )
+
+            path = edit["path"]
+            old_text = edit["old_text"]
+            new_text = edit["new_text"]
+
+            if (
+                not isinstance(path, str)
+                or path not in authorized
+            ):
+                raise RuntimeError(
+                    f"bounded edit {index} targets "
+                    f"unauthorized path: {path!r}"
+                )
+
+            if path not in present:
+                raise RuntimeError(
+                    f"bounded replace {index} targets "
+                    f"absent path: {path}"
+                )
+
+            if (
+                not isinstance(old_text, str)
+                or not old_text
+            ):
+                raise RuntimeError(
+                    f"bounded edit {index} requires "
+                    "non-empty old_text"
+                )
+
+            if not isinstance(new_text, str):
+                raise RuntimeError(
+                    f"bounded edit {index} new_text "
+                    "is not text"
+                )
+
+            if old_text == new_text:
+                raise RuntimeError(
+                    f"bounded replace {index} "
+                    f"is a no-op for {path}"
+                )
+
+            content = result[path]
+            occurrences = content.count(old_text)
+
+            if occurrences != 1:
+                raise RuntimeError(
+                    f"bounded edit {index} anchor "
+                    f"occurrence count for {path}: "
+                    f"{occurrences}"
+                )
+
+            result[path] = content.replace(
+                old_text,
+                new_text,
+                1,
+            )
+
+        elif operation == "create":
+            if set(edit) != {
+                "operation",
+                "path",
+                "content",
+            }:
+                raise RuntimeError(
+                    f"bounded edit {index} must contain exactly "
+                    "operation, path, content"
+                )
+
+            path = edit["path"]
+            content = edit["content"]
+
+            if (
+                not isinstance(path, str)
+                or path not in authorized
+            ):
+                raise RuntimeError(
+                    f"bounded edit {index} targets "
+                    f"unauthorized path: {path!r}"
+                )
+
+            if path in present:
+                raise RuntimeError(
+                    f"bounded create {index} targets "
+                    f"existing path: {path}"
+                )
+
+            if not isinstance(content, str):
+                raise RuntimeError(
+                    f"bounded create {index} content "
+                    "is not text"
+                )
+
+            result[path] = content
+            present.add(path)
+
+        else:
+            raise RuntimeError(
+                f"bounded edit {index} has unsupported "
+                f"operation: {operation!r}"
+            )
+
+    return result
+
 def _ollama_proposal_schema(allowed_paths: tuple[str, ...]) -> dict[str, Any]:
     authorized = tuple(str(path) for path in allowed_paths)
     if not authorized:
@@ -60,22 +211,81 @@ def _ollama_proposal_schema(allowed_paths: tuple[str, ...]) -> dict[str, Any]:
     if len(set(authorized)) != len(authorized):
         raise ValueError("Ollama proposal schema requires unique allowed paths")
 
+    path_schema = {
+        "type": "string",
+        "enum": list(authorized),
+    }
+
+    replace_edit = {
+        "type": "object",
+        "properties": {
+            "operation": {
+                "type": "string",
+                "enum": ["replace"],
+            },
+            "path": path_schema,
+            "old_text": {
+                "type": "string",
+                "minLength": 1,
+            },
+            "new_text": {
+                "type": "string",
+            },
+        },
+        "required": [
+            "operation",
+            "path",
+            "old_text",
+            "new_text",
+        ],
+        "additionalProperties": False,
+    }
+
+    create_edit = {
+        "type": "object",
+        "properties": {
+            "operation": {
+                "type": "string",
+                "enum": ["create"],
+            },
+            "path": path_schema,
+            "content": {
+                "type": "string",
+            },
+        },
+        "required": [
+            "operation",
+            "path",
+            "content",
+        ],
+        "additionalProperties": False,
+    }
+
     return {
         "type": "object",
         "properties": {
-            "files": {
-                "type": "object",
-                "properties": {
-                    path: {"type": "string"}
-                    for path in authorized
+            "edits": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                    "oneOf": [
+                        replace_edit,
+                        create_edit,
+                    ],
                 },
-                "required": list(authorized),
-                "additionalProperties": False,
             },
-            "commit_message": {"type": "string"},
-            "engineering_summary": {"type": "string"},
+            "commit_message": {
+                "type": "string",
+            },
+            "engineering_summary": {
+                "type": "string",
+            },
         },
-        "required": ["files", "commit_message", "engineering_summary"],
+        "required": [
+            "edits",
+            "commit_message",
+            "engineering_summary",
+        ],
         "additionalProperties": False,
     }
 
@@ -325,7 +535,7 @@ def _engineering_prompt(
 ) -> str:
     max_core = _load_text(MAX_CORE_PATH, "Max Platinum Engineering Core")
     readonly_context = context_files or {}
-    return (f"You are {agent_id} {agent_name}, serving as {role} inside RVSC. Operate only within the supplied mission contract. The Max Platinum Engineering Core defines the engineering methodology you must apply; do not quote or summarize it. Mission scope, repository authorization, allowed paths, and safety restrictions override all broader capability language. Never expose credentials or secrets.\n\nMAX PLATINUM ENGINEERING CORE:\n{max_core}\n\nPerform the bounded engineering mission. Independently inspect the supplied baseline files and read-only context files, implement the smallest general solution that satisfies the acceptance criteria, and preserve unrelated behavior. READ-ONLY CONTEXT FILES are evidence only and are never authorized outputs unless the same path is independently present in allowed_paths. Do not claim filesystem actions, tests, commits, pushes, or QA; the controlled runtime performs and records those actions. Return ONLY valid JSON with exactly these top-level keys: files, commit_message, engineering_summary. files must contain exactly the authorized file paths, each mapped to COMPLETE replacement UTF-8 content. No markdown fences.\n\nMISSION:\n{json.dumps(mission, indent=2)}\n\nBASELINE FILES:\n{json.dumps(source_files, indent=2)}\n\nREAD-ONLY CONTEXT FILES:\n{json.dumps(readonly_context, indent=2)}")
+    return (f"You are {agent_id} {agent_name}, serving as {role} inside RVSC. Operate only within the supplied mission contract. The Max Platinum Engineering Core defines the engineering methodology you must apply; do not quote or summarize it. Mission scope, repository authorization, allowed paths, and safety restrictions override all broader capability language. Never expose credentials or secrets.\n\nMAX PLATINUM ENGINEERING CORE:\n{max_core}\n\nPerform the bounded engineering mission. Independently inspect the supplied baseline files and read-only context files, implement the smallest general solution that satisfies the acceptance criteria, and preserve unrelated behavior. READ-ONLY CONTEXT FILES are evidence only and are never authorized outputs unless the same path is independently present in allowed_paths. Do not claim filesystem actions, tests, commits, pushes, or QA; the controlled runtime performs and records those actions. Return ONLY valid JSON with exactly these top-level keys: edits, commit_message, engineering_summary. edits must be a non-empty ordered list containing only the smallest necessary authorized operations. Use operation=replace for an existing file and provide path, a non-empty old_text anchor that occurs exactly once in the supplied baseline, and new_text. Use operation=create only for an authorized path that is absent from the baseline and provide path and complete content for that new file. Do not return unchanged authorized files. Edits are applied sequentially, so later edits observe earlier edits. Never target READ-ONLY CONTEXT FILES unless that path is independently authorized. No markdown fences.\n\nMISSION:\n{json.dumps(mission, indent=2)}\n\nBASELINE FILES:\n{json.dumps(source_files, indent=2)}\n\nREAD-ONLY CONTEXT FILES:\n{json.dumps(readonly_context, indent=2)}")
 
 
 def _command_value(environment: ControlledEngineeringEnvironment, argv: tuple[str, ...], error_message: str) -> str:
@@ -430,7 +640,7 @@ def _engineering_repair_prompt(
         + json.dumps(failed_proposal, sort_keys=True)
         + "\nBefore producing the corrected proposal, diagnose the validation failure from the supplied error and previous failed proposal."
         + "\nIdentify the concrete defective generated code or configuration that caused the validation failure."
-        + "\nRe-evaluate the proposed replacement files against the supplied BASELINE FILES and READ-ONLY CONTEXT FILES."
+        + "\nRe-evaluate the proposed bounded edits against the supplied BASELINE FILES and READ-ONLY CONTEXT FILES."
         + "\nThe corrected proposal must address the observed validation failure; do not merely repeat or cosmetically rewrite the failed construction."
         + "\nPreserve unrelated behavior and remain strictly within the original mission and allowed_paths authorization."
         + "\nReturn one corrected proposal using the exact same JSON contract."
@@ -473,9 +683,11 @@ def execute_mission(*, agent_id: str, agent_name: str, role: str, mission: dict[
     if checkpoint:
         checkpoint("preflight_passed", tuple(evidence) + (f"run_id:{run_id}",))
     source_files = {}
+    existing_paths: set[str] = set()
     for path in worker_request.allowed_paths:
         try:
             source_files[path] = environment.read_text(path)
+            existing_paths.add(path)
         except FileNotFoundError:
             source_files[path] = ""
     context_files = _read_context_files(_repo_root(mission), mission)
@@ -518,113 +730,63 @@ def execute_mission(*, agent_id: str, agent_name: str, role: str, mission: dict[
     if checkpoint:
         checkpoint("proposal_received", (f"run_id:{run_id}", f"provider_status:{provider_status}", f"provider_response_id:{provider_response_id}"))
     proposal = _json_object(_response_text(response))
-    files = proposal.get("files")
-    allowed_file_set = set(worker_request.allowed_paths)
-    returned_file_set = set(files) if isinstance(files, dict) else set()
-    unauthorized_files = sorted(returned_file_set - allowed_file_set)
-    missing_files = sorted(allowed_file_set - returned_file_set)
-
-    if not isinstance(files, dict) or unauthorized_files:
-        returned = sorted(files) if isinstance(files, dict) else []
-        if "files" not in proposal:
-            files_shape = "missing"
-        elif files is None:
-            files_shape = "null"
-        elif isinstance(files, dict):
-            files_shape = "dict"
+    edits = proposal.get("edits")
+    if not isinstance(edits, list) or not edits:
+        if "edits" not in proposal:
+            edits_shape = "missing"
+        elif edits is None:
+            edits_shape = "null"
         else:
-            files_shape = type(files).__name__
+            edits_shape = type(edits).__name__
         raise RuntimeError(
-            "worker returned unauthorized or incomplete file set: "
-            f"{returned}; files_shape:{files_shape}; "
-            f"files_count:{len(files) if isinstance(files, dict) else 0}"
+            "worker returned invalid bounded edit proposal: "
+            f"edits_shape:{edits_shape}; "
+            f"edits_count:{len(edits) if isinstance(edits, list) else 0}"
         )
 
-    proposal_repair_attempted = False
-    if missing_files:
-        proposal_repair_attempted = True
-        if checkpoint:
-            checkpoint(
-                "proposal_repair_started",
-                (
-                    f"run_id:{run_id}",
-                    "repair_attempt:1",
-                    f"missing_files:{','.join(missing_files)}",
-                ),
-            )
-
-        repair_response, repair_provider = _provider_call(
-            _engineering_repair_prompt(
-                agent_id,
-                agent_name,
-                role,
-                mission,
-                source_files,
-                bounded_context_files,
-                proposal,
-                f"incomplete authorized file set; missing: {', '.join(missing_files)}",
-            ),
-            worker_request.allowed_paths,
+    files = _apply_bounded_edits(
+        source_files,
+        edits,
+        existing_paths=existing_paths,
+    )
+    touched_paths = tuple(
+        dict.fromkeys(
+            edit.get("path")
+            for edit in edits
+            if isinstance(edit, dict)
+            and isinstance(edit.get("path"), str)
         )
-        repair_status = str(repair_response.get("status", "unknown"))
-        if repair_status != "completed":
-            raise RuntimeError(f"repair provider status was {repair_status}")
+    )
 
-        repair_proposal = _json_object(_response_text(repair_response))
-        repair_files = repair_proposal.get("files")
-        repair_returned_file_set = (
-            set(repair_files) if isinstance(repair_files, dict) else set()
+    if not touched_paths:
+        raise RuntimeError(
+            "worker returned bounded edits without touched paths"
         )
-        repair_unauthorized = sorted(repair_returned_file_set - allowed_file_set)
 
-        if (
-            not isinstance(repair_files, dict)
-            or repair_unauthorized
-            or repair_returned_file_set != allowed_file_set
-        ):
-            returned = sorted(repair_files) if isinstance(repair_files, dict) else []
-            raise RuntimeError(
-                f"repair returned unauthorized or incomplete file set: {returned}"
-            )
+    repair_attempted = False
 
-        proposal = repair_proposal
-        files = repair_files
-        provider_name = repair_provider
-        provider_response_id = str(
-            repair_response.get("id", provider_response_id)
-        )
-        provider_status = repair_status
-        model = str(repair_response.get("model", model))
-
-        if checkpoint:
-            checkpoint(
-                "proposal_repair_received",
-                (
-                    f"run_id:{run_id}",
-                    "repair_attempt:1",
-                    f"provider_status:{repair_status}",
-                    f"provider_response_id:{provider_response_id}",
-                ),
-            )
-
-    repair_attempted = proposal_repair_attempted
     while True:
         try:
-            for path in worker_request.allowed_paths:
-                content = files[path]
-                if not isinstance(content, str):
-                    raise RuntimeError(f"worker content for {path} is not text")
-                environment.write_text(path, content)
+            for path in touched_paths:
+                environment.write_text(path, files[path])
 
-            changed = runner.evidence_after_change(worker_request.allowed_paths)
+            changed = runner.evidence_after_change(
+                worker_request.allowed_paths
+            )
             evidence.extend(changed)
             if checkpoint:
-                checkpoint("implementation_applied", changed + (f"run_id:{run_id}",))
+                checkpoint(
+                    "implementation_applied",
+                    changed + (f"run_id:{run_id}",),
+                )
 
             validations = runner.validate()
             evidence.extend(validations)
             if checkpoint:
-                checkpoint("tests_passed", validations + (f"run_id:{run_id}",))
+                checkpoint(
+                    "tests_passed",
+                    validations + (f"run_id:{run_id}",),
+                )
             break
 
         except Exception as exc:
@@ -632,19 +794,31 @@ def execute_mission(*, agent_id: str, agent_name: str, role: str, mission: dict[
                 rollback = runner.restore_baseline()
             except Exception as rollback_exc:
                 raise EngineeringEnvironmentError(
-                    f"engineering execution failed: {exc}; rollback failed: {rollback_exc}"
+                    f"engineering execution failed: {exc}; "
+                    f"rollback failed: {rollback_exc}"
                 ) from rollback_exc
 
             if checkpoint:
                 checkpoint(
                     "implementation_rolled_back",
-                    rollback + (f"run_id:{run_id}", f"failure:{type(exc).__name__}"),
+                    rollback
+                    + (
+                        f"run_id:{run_id}",
+                        f"failure:{type(exc).__name__}",
+                    ),
                 )
 
-            if not isinstance(exc, EngineeringValidationError) or repair_attempted:
+            if (
+                not isinstance(
+                    exc,
+                    EngineeringValidationError,
+                )
+                or repair_attempted
+            ):
                 raise
 
             repair_attempted = True
+
             if checkpoint:
                 checkpoint(
                     "repair_started",
@@ -668,24 +842,90 @@ def execute_mission(*, agent_id: str, agent_name: str, role: str, mission: dict[
                 ),
                 worker_request.allowed_paths,
             )
-            repair_status = str(repair_response.get("status", "unknown"))
-            if repair_status != "completed":
-                raise RuntimeError(f"repair provider status was {repair_status}")
 
-            repair_proposal = _json_object(_response_text(repair_response))
-            repair_files = repair_proposal.get("files")
-            if not isinstance(repair_files, dict) or set(repair_files) != set(worker_request.allowed_paths):
-                returned = sorted(repair_files) if isinstance(repair_files, dict) else []
+            repair_status = str(
+                repair_response.get(
+                    "status",
+                    "unknown",
+                )
+            )
+
+            if repair_status != "completed":
                 raise RuntimeError(
-                    f"repair returned unauthorized or incomplete file set: {returned}"
+                    "repair provider status was "
+                    f"{repair_status}"
+                )
+
+            repair_proposal = _json_object(
+                _response_text(repair_response)
+            )
+
+            repair_edits = repair_proposal.get("edits")
+
+            if (
+                not isinstance(repair_edits, list)
+                or not repair_edits
+            ):
+                if "edits" not in repair_proposal:
+                    repair_shape = "missing"
+                elif repair_edits is None:
+                    repair_shape = "null"
+                else:
+                    repair_shape = type(
+                        repair_edits
+                    ).__name__
+
+                raise RuntimeError(
+                    "repair returned invalid bounded "
+                    "edit proposal: "
+                    f"edits_shape:{repair_shape}; "
+                    "edits_count:"
+                    f"{len(repair_edits) if isinstance(repair_edits, list) else 0}"
+                )
+
+            # restore_baseline() has already restored the
+            # original mission state. Apply the corrective
+            # proposal against that same original baseline.
+            files = _apply_bounded_edits(
+                source_files,
+                repair_edits,
+                existing_paths=existing_paths,
+            )
+
+            touched_paths = tuple(
+                dict.fromkeys(
+                    edit.get("path")
+                    for edit in repair_edits
+                    if isinstance(edit, dict)
+                    and isinstance(
+                        edit.get("path"),
+                        str,
+                    )
+                )
+            )
+
+            if not touched_paths:
+                raise RuntimeError(
+                    "repair returned bounded edits "
+                    "without touched paths"
                 )
 
             proposal = repair_proposal
-            files = repair_files
+            edits = repair_edits
             provider_name = repair_provider
-            provider_response_id = str(repair_response.get("id", provider_response_id))
+            provider_response_id = str(
+                repair_response.get(
+                    "id",
+                    provider_response_id,
+                )
+            )
             provider_status = repair_status
-            model = str(repair_response.get("model", model))
+            model = str(
+                repair_response.get(
+                    "model",
+                    model,
+                )
+            )
 
             if checkpoint:
                 checkpoint(
@@ -694,7 +934,8 @@ def execute_mission(*, agent_id: str, agent_name: str, role: str, mission: dict[
                         f"run_id:{run_id}",
                         "repair_attempt:1",
                         f"provider_status:{repair_status}",
-                        f"provider_response_id:{provider_response_id}",
+                        "provider_response_id:"
+                        f"{provider_response_id}",
                     ),
                 )
     commit_message = str(proposal.get("commit_message", "")).strip() or f"{worker_request.wp_id}: {agent_id} controlled engineering"

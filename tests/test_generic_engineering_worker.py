@@ -9,42 +9,405 @@ from unittest.mock import Mock, call, patch
 
 from controller.engineering_environment import EngineeringEnvironmentError
 from controller.engineering_runner import EngineeringValidationError
-from controller.generic_engineering_worker import _budget_context_files, _bounded_context_text, _configure_git_identity, _git_identity, _ollama_call, _ollama_proposal_schema, _engineering_repair_prompt, _read_context_files, _repo_root, _validations, _worker_request, execute_mission
+from controller.generic_engineering_worker import _apply_bounded_edits, _budget_context_files, _bounded_context_text, _configure_git_identity, _git_identity, _ollama_call, _ollama_proposal_schema, _engineering_repair_prompt, _read_context_files, _repo_root, _validations, _worker_request, execute_mission
 
 
 class GenericEngineeringWorkerTests(unittest.TestCase):
+    def test_bounded_edits_apply_exact_authorized_anchor(self):
+        source = {
+            "controller/a.py": "before = 1\nafter = 2\n",
+            "tests/test_a.py": "assert before == 1\n",
+        }
+
+        result = _apply_bounded_edits(
+            source,
+            [
+                {
+                    "operation": "replace",
+                    "path": "controller/a.py",
+                    "old_text": "before = 1",
+                    "new_text": "before = 3",
+                }
+            ],
+            existing_paths={"controller/a.py", "tests/test_a.py"},
+        )
+
+        self.assertEqual(
+            result["controller/a.py"],
+            "before = 3\nafter = 2\n",
+        )
+        self.assertEqual(
+            result["tests/test_a.py"],
+            source["tests/test_a.py"],
+        )
+
+    def test_bounded_edits_support_sequential_edits(self):
+        result = _apply_bounded_edits(
+            {"source.py": "VALUE = 1\n"},
+            [
+                {
+                    "operation": "replace",
+                    "path": "source.py",
+                    "old_text": "VALUE = 1",
+                    "new_text": "VALUE = 2",
+                },
+                {
+                    "operation": "replace",
+                    "path": "source.py",
+                    "old_text": "VALUE = 2",
+                    "new_text": "VALUE = 3",
+                },
+            ],
+            existing_paths={"source.py"},
+        )
+
+        self.assertEqual(result["source.py"], "VALUE = 3\n")
+
+    def test_bounded_edits_reject_unauthorized_path(self):
+        with self.assertRaisesRegex(RuntimeError, "unauthorized path"):
+            _apply_bounded_edits(
+                {"allowed.py": "VALUE = 1\n"},
+                [
+                    {
+                        "operation": "replace",
+                        "path": "outside.py",
+                        "old_text": "VALUE = 1",
+                        "new_text": "VALUE = 2",
+                    }
+                ],
+                existing_paths={"allowed.py"},
+            )
+
+    def test_bounded_edits_reject_missing_anchor_atomically(self):
+        source = {
+            "a.py": "A = 1\n",
+            "b.py": "B = 1\n",
+        }
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "anchor occurrence count",
+        ):
+            _apply_bounded_edits(
+                source,
+                [
+                    {
+                        "operation": "replace",
+                        "path": "a.py",
+                        "old_text": "A = 1",
+                        "new_text": "A = 2",
+                    },
+                    {
+                        "operation": "replace",
+                        "path": "b.py",
+                        "old_text": "MISSING",
+                        "new_text": "B = 2",
+                    },
+                ],
+                existing_paths={"a.py", "b.py"},
+            )
+
+        self.assertEqual(source["a.py"], "A = 1\n")
+        self.assertEqual(source["b.py"], "B = 1\n")
+
+    def test_bounded_edits_reject_ambiguous_anchor(self):
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "anchor occurrence count",
+        ):
+            _apply_bounded_edits(
+                {"source.py": "VALUE\nVALUE\n"},
+                [
+                    {
+                        "operation": "replace",
+                        "path": "source.py",
+                        "old_text": "VALUE",
+                        "new_text": "OTHER",
+                    }
+                ],
+                existing_paths={"source.py"},
+            )
+
+    def test_bounded_edits_reject_empty_anchor(self):
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "non-empty old_text",
+        ):
+            _apply_bounded_edits(
+                {"source.py": "VALUE = 1\n"},
+                [
+                    {
+                        "operation": "replace",
+                        "path": "source.py",
+                        "old_text": "",
+                        "new_text": "VALUE = 2",
+                    }
+                ],
+                existing_paths={"source.py"},
+            )
+
+    def test_bounded_edits_reject_malformed_operation(self):
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "exactly operation, path, old_text, new_text",
+        ):
+            _apply_bounded_edits(
+                {"source.py": "VALUE = 1\n"},
+                [
+                    {
+                        "operation": "replace",
+                        "path": "source.py",
+                        "old_text": "VALUE = 1",
+                    }
+                ],
+                existing_paths={"source.py"},
+            )
+
+    def test_bounded_create_accepts_absent_authorized_file(self):
+        result = _apply_bounded_edits(
+            {"new.py": ""},
+            [
+                {
+                    "operation": "create",
+                    "path": "new.py",
+                    "content": "VALUE = 1\n",
+                }
+            ],
+            existing_paths=set(),
+        )
+
+        self.assertEqual(result["new.py"], "VALUE = 1\n")
+
+    def test_bounded_create_accepts_empty_content_for_absent_file(self):
+        result = _apply_bounded_edits(
+            {"new.py": ""},
+            [
+                {
+                    "operation": "create",
+                    "path": "new.py",
+                    "content": "",
+                }
+            ],
+            existing_paths=set(),
+        )
+
+        self.assertEqual(result["new.py"], "")
+
+    def test_bounded_create_rejects_existing_empty_file(self):
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "targets existing path",
+        ):
+            _apply_bounded_edits(
+                {"empty.py": ""},
+                [
+                    {
+                        "operation": "create",
+                        "path": "empty.py",
+                        "content": "VALUE = 1\n",
+                    }
+                ],
+                existing_paths={"empty.py"},
+            )
+
+    def test_bounded_create_rejects_existing_nonempty_file(self):
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "targets existing path",
+        ):
+            _apply_bounded_edits(
+                {"source.py": "VALUE = 1\n"},
+                [
+                    {
+                        "operation": "create",
+                        "path": "source.py",
+                        "content": "VALUE = 2\n",
+                    }
+                ],
+                existing_paths={"source.py"},
+            )
+
+    def test_bounded_create_rejects_unauthorized_path(self):
+        with self.assertRaisesRegex(RuntimeError, "unauthorized path"):
+            _apply_bounded_edits(
+                {"allowed.py": ""},
+                [
+                    {
+                        "operation": "create",
+                        "path": "outside.py",
+                        "content": "VALUE = 1\n",
+                    }
+                ],
+                existing_paths=set(),
+            )
+
+    def test_bounded_create_rejects_duplicate_creation(self):
+        with self.assertRaisesRegex(RuntimeError, "targets existing path"):
+            _apply_bounded_edits(
+                {"new.py": ""},
+                [
+                    {
+                        "operation": "create",
+                        "path": "new.py",
+                        "content": "first\n",
+                    },
+                    {
+                        "operation": "create",
+                        "path": "new.py",
+                        "content": "second\n",
+                    },
+                ],
+                existing_paths=set(),
+            )
+
+
+    def test_bounded_create_then_replace_same_path(self):
+        result = _apply_bounded_edits(
+            {"new.py": ""},
+            [
+                {
+                    "operation": "create",
+                    "path": "new.py",
+                    "content": "VALUE = 1\n",
+                },
+                {
+                    "operation": "replace",
+                    "path": "new.py",
+                    "old_text": "VALUE = 1",
+                    "new_text": "VALUE = 2",
+                },
+            ],
+            existing_paths=set(),
+        )
+
+        self.assertEqual(
+            result["new.py"],
+            "VALUE = 2\n",
+        )
+
+    def test_bounded_replace_rejects_absent_authorized_file(self):
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "targets absent path",
+        ):
+            _apply_bounded_edits(
+                {"new.py": ""},
+                [
+                    {
+                        "operation": "replace",
+                        "path": "new.py",
+                        "old_text": "VALUE",
+                        "new_text": "OTHER",
+                    }
+                ],
+                existing_paths=set(),
+            )
+
+    def test_bounded_replace_rejects_noop(self):
+        with self.assertRaisesRegex(RuntimeError, "no-op"):
+            _apply_bounded_edits(
+                {"source.py": "VALUE = 1\n"},
+                [
+                    {
+                        "operation": "replace",
+                        "path": "source.py",
+                        "old_text": "VALUE = 1",
+                        "new_text": "VALUE = 1",
+                    }
+                ],
+                existing_paths={"source.py"},
+            )
+
+    def test_bounded_existing_paths_must_be_authorized(self):
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "existing_paths contains unauthorized path",
+        ):
+            _apply_bounded_edits(
+                {"source.py": "VALUE = 1\n"},
+                [
+                    {
+                        "operation": "replace",
+                        "path": "source.py",
+                        "old_text": "1",
+                        "new_text": "2",
+                    }
+                ],
+                existing_paths={"source.py", "outside.py"},
+            )
+
     def test_ollama_proposal_schema_requires_exact_engineering_contract(self):
         allowed_paths = ("controller/a.py", "tests/test_a.py")
         schema = _ollama_proposal_schema(allowed_paths)
 
         self.assertEqual(schema["type"], "object")
         self.assertEqual(
-            set(schema["required"]),
-            {"files", "commit_message", "engineering_summary"},
+            schema["required"],
+            [
+                "edits",
+                "commit_message",
+                "engineering_summary",
+            ],
         )
         self.assertFalse(schema["additionalProperties"])
         self.assertEqual(
             set(schema["properties"]),
-            {"files", "commit_message", "engineering_summary"},
+            {
+                "edits",
+                "commit_message",
+                "engineering_summary",
+            },
         )
 
-        files_schema = schema["properties"]["files"]
-        self.assertEqual(files_schema["type"], "object")
-        self.assertEqual(
-            set(files_schema["properties"]),
-            set(allowed_paths),
-        )
-        self.assertEqual(
-            files_schema["required"],
-            list(allowed_paths),
-        )
-        self.assertFalse(files_schema["additionalProperties"])
+        edits_schema = schema["properties"]["edits"]
+        self.assertEqual(edits_schema["type"], "array")
+        self.assertEqual(edits_schema["minItems"], 1)
 
-        for path in allowed_paths:
+        variants = edits_schema["items"]["oneOf"]
+        self.assertEqual(len(variants), 2)
+
+        replace_schema, create_schema = variants
+
+        self.assertEqual(
+            replace_schema["properties"]["operation"]["enum"],
+            ["replace"],
+        )
+        self.assertEqual(
+            create_schema["properties"]["operation"]["enum"],
+            ["create"],
+        )
+
+        for variant in variants:
             self.assertEqual(
-                files_schema["properties"][path],
-                {"type": "string"},
+                variant["properties"]["path"]["enum"],
+                list(allowed_paths),
             )
+            self.assertFalse(
+                variant["additionalProperties"]
+            )
+
+        self.assertEqual(
+            replace_schema["required"],
+            [
+                "operation",
+                "path",
+                "old_text",
+                "new_text",
+            ],
+        )
+        self.assertEqual(
+            replace_schema["properties"]["old_text"]["minLength"],
+            1,
+        )
+
+        self.assertEqual(
+            create_schema["required"],
+            [
+                "operation",
+                "path",
+                "content",
+            ],
+        )
 
         self.assertEqual(
             schema["properties"]["commit_message"],
@@ -57,6 +420,11 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             _ollama_proposal_schema(())
+
+        with self.assertRaises(ValueError):
+            _ollama_proposal_schema(
+                ("controller/a.py", "controller/a.py")
+            )
 
     @patch("controller.generic_engineering_worker.urllib.request.urlopen")
     def test_ollama_call_sends_structured_proposal_schema(self, urlopen):
@@ -76,13 +444,33 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
             payload["format"],
             _ollama_proposal_schema(allowed_paths),
         )
+
+        schema = payload["format"]
+
         self.assertEqual(
-            set(payload["format"]["properties"]["files"]["properties"]),
-            set(allowed_paths),
+            schema["required"],
+            [
+                "edits",
+                "commit_message",
+                "engineering_summary",
+            ],
         )
-        self.assertFalse(
-            payload["format"]["properties"]["files"]["additionalProperties"]
+
+        variants = (
+            schema["properties"]["edits"]["items"]["oneOf"]
         )
+
+        self.assertEqual(len(variants), 2)
+
+        for variant in variants:
+            self.assertEqual(
+                variant["properties"]["path"]["enum"],
+                list(allowed_paths),
+            )
+            self.assertFalse(
+                variant["additionalProperties"]
+            )
+
         self.assertNotEqual(payload["format"], "json")
         self.assertEqual(payload["prompt"], "bounded mission")
         self.assertFalse(payload["stream"])
@@ -126,7 +514,7 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
             {"source.py": "baseline\n"},
             {"context.py": "reference\n"},
             {
-                "files": {"source.py": "from source import broken\n"},
+                "edits": [{"operation": "replace", "path": "source.py", "old_text": "baseline\n", "new_text": "from source import broken\n"}],
                 "commit_message": "failed",
                 "engineering_summary": "failed",
             },
@@ -206,7 +594,7 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
                     "content": [
                         {
                             "type": "output_text",
-                            "text": '{"files":{"source.py":"changed\\n"},"commit_message":"test","engineering_summary":"test"}',
+                            "text": '{"edits":[{"operation":"replace","path":"source.py","old_text":"baseline\\n","new_text":"changed\\n"}],"commit_message":"test","engineering_summary":"test"}',
                         }
                     ],
                 }
@@ -306,7 +694,7 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
                 "type": "message",
                 "content": [{
                     "type": "output_text",
-                    "text": '{"files":{"source.py":"broken\\n"},"commit_message":"first","engineering_summary":"first"}',
+                    "text": '{"edits":[{"operation":"replace","path":"source.py","old_text":"baseline\\n","new_text":"broken\\n"}],"commit_message":"first","engineering_summary":"first"}',
                 }],
             }],
         }
@@ -318,7 +706,7 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
                 "type": "message",
                 "content": [{
                     "type": "output_text",
-                    "text": '{"files":{"source.py":"fixed\\n"},"commit_message":"repaired","engineering_summary":"repaired"}',
+                    "text": '{"edits":[{"operation":"replace","path":"source.py","old_text":"baseline\\n","new_text":"fixed\\n"}],"commit_message":"repaired","engineering_summary":"repaired"}',
                 }],
             }],
         }
@@ -408,7 +796,7 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
                 "type": "message",
                 "content": [{
                     "type": "output_text",
-                    "text": '{"files":{"source.py":"broken-1\\n"},"commit_message":"first","engineering_summary":"first"}',
+                    "text": '{"edits":[{"operation":"replace","path":"source.py","old_text":"baseline\\n","new_text":"broken-1\\n"}],"commit_message":"first","engineering_summary":"first"}',
                 }],
             }],
         }
@@ -420,7 +808,7 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
                 "type": "message",
                 "content": [{
                     "type": "output_text",
-                    "text": '{"files":{"source.py":"broken-2\\n"},"commit_message":"repair","engineering_summary":"repair"}',
+                    "text": '{"edits":[{"operation":"replace","path":"source.py","old_text":"baseline\\n","new_text":"broken-2\\n"}],"commit_message":"repair","engineering_summary":"repair"}',
                 }],
             }],
         }
@@ -490,7 +878,7 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
                 "type": "message",
                 "content": [{
                     "type": "output_text",
-                    "text": '{"files":{"source.py":"changed\\n"},"commit_message":"test","engineering_summary":"test"}',
+                    "text": '{"edits":[{"operation":"replace","path":"source.py","old_text":"baseline\\n","new_text":"changed\\n"}],"commit_message":"test","engineering_summary":"test"}',
                 }],
             }],
         }
@@ -534,6 +922,38 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
         self.assertNotIn("repair_started", names)
         self.assertNotIn("repair_proposal_received", names)
 
+    def test_source_loading_distinguishes_existing_empty_from_absent(self):
+        allowed_paths = ("existing_empty.py", "absent.py")
+        source_files = {}
+        existing_paths = set()
+
+        class Environment:
+            def read_text(self, path):
+                if path == "existing_empty.py":
+                    return ""
+                raise FileNotFoundError(path)
+
+        environment = Environment()
+
+        for path in allowed_paths:
+            try:
+                source_files[path] = environment.read_text(path)
+                existing_paths.add(path)
+            except FileNotFoundError:
+                source_files[path] = ""
+
+        self.assertEqual(
+            source_files,
+            {
+                "existing_empty.py": "",
+                "absent.py": "",
+            },
+        )
+        self.assertEqual(
+            existing_paths,
+            {"existing_empty.py"},
+        )
+
     @patch("controller.generic_engineering_worker._provider_call")
     @patch("controller.generic_engineering_worker._prepare_branch")
     @patch("controller.generic_engineering_worker._configure_git_identity")
@@ -576,9 +996,7 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
                             {
                                 "type": "output_text",
                                 "text": (
-                                    '{"files":{"new_file.py":"VALUE = 1\\n"},'
-                                    '"commit_message":"create authorized file",'
-                                    '"engineering_summary":"create authorized file"}'
+                                    '{"edits":[{"operation":"create","path":"new_file.py","content":"VALUE = 1\\n"}],"commit_message":"create authorized file","engineering_summary":"create authorized file"}'
                                 ),
                             }
                         ],
@@ -803,9 +1221,7 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
                                 {
                                     "type": "output_text",
                                     "text": (
-                                        '{"files":{"new_file.py":"VALUE = 1\\n"},'
-                                        '"commit_message":"use runtime context",'
-                                        '"engineering_summary":"bounded context"}'
+                                        '{"edits":[{"operation":"create","path":"new_file.py","content":"VALUE = 1\\n"}],"commit_message":"use runtime context","engineering_summary":"bounded context"}'
                                     ),
                                 }
                             ],
@@ -902,12 +1318,7 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
                                 {
                                     "type": "output_text",
                                     "text": (
-                                        '{"files":{'
-                                        '"source.py":"updated\\n",'
-                                        '"controller/runtime_supervisor.py":"forbidden\\n"'
-                                        '},'
-                                        '"commit_message":"bad scope",'
-                                        '"engineering_summary":"bad scope"}'
+                                        '{"edits":[{"operation":"replace","path":"controller/runtime_supervisor.py","old_text":"STATUS = \'running\'\\n","new_text":"forbidden\\n"}],"commit_message":"bad scope","engineering_summary":"bad scope"}'
                                     ),
                                 }
                             ],
@@ -943,7 +1354,7 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(
                     RuntimeError,
-                    "unauthorized or incomplete file set",
+                    "targets unauthorized path",
                 ):
                     execute_mission(
                         agent_id="DEV-001",
@@ -960,7 +1371,7 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
     @patch("controller.generic_engineering_worker._prepare_branch")
     @patch("controller.generic_engineering_worker._configure_git_identity")
     @patch("controller.generic_engineering_worker.EngineeringMissionRunner")
-    def test_malformed_files_shape_is_reported_without_contents(
+    def test_malformed_edits_shape_is_reported_without_contents(
         self,
         runner_type,
         configure_identity,
@@ -984,9 +1395,7 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
                             {
                                 "type": "output_text",
                                 "text": (
-                                    '{"files":null,'
-                                    '"commit_message":"none",'
-                                    '"engineering_summary":"malformed"}'
+                                    '{"edits":null,"commit_message":"none","engineering_summary":"malformed"}'
                                 ),
                             }
                         ],
@@ -1016,7 +1425,7 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             RuntimeError,
-            r"files_shape:null; files_count:0",
+            r"edits_shape:null; edits_count:0",
         ):
             execute_mission(
                 agent_id="DEV-001",
@@ -1034,7 +1443,7 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
     @patch("controller.generic_engineering_worker._prepare_branch")
     @patch("controller.generic_engineering_worker._configure_git_identity")
     @patch("controller.generic_engineering_worker.EngineeringMissionRunner")
-    def test_missing_authorized_files_receive_one_bounded_proposal_repair(
+    def test_compact_subset_proposal_writes_only_touched_authorized_path(
         self,
         runner_type,
         configure_identity,
@@ -1043,115 +1452,73 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
     ):
         runner = runner_type.return_value
         environment = runner.environment
-        environment.read_text.return_value = "baseline\n"
-        runner.preflight.return_value = ("preflight:ok",)
-        runner.evidence_after_change.return_value = ("diff:ok",)
-        runner.validate.return_value = ("validation:ok",)
+
+        def read_text(path):
+            values = {
+                "source.py": "baseline\n",
+                "untouched.py": "untouched\n",
+            }
+            return values[path]
+
+        environment.read_text.side_effect = read_text
+
+        runner.preflight.return_value = ("repo_clean:true",)
+        runner.evidence_after_change.return_value = (
+            "diff_present:true",
+        )
+        runner.validate.return_value = ()
         runner.commit.return_value = ("commit:created",)
         environment.run.side_effect = [
             Mock(returncode=0, stdout="a" * 40 + "\n", stderr=""),
             Mock(returncode=0, stdout="", stderr=""),
         ]
-        environment.git_status.return_value = Mock(
-            returncode=0,
-            stdout="",
-            stderr="",
-        )
+        environment.git_status.return_value = Mock(returncode=0, stdout="", stderr="")
 
-        provider_call.side_effect = [
-            (
-                {
-                    "id": "response-incomplete",
-                    "status": "completed",
-                    "model": "test-model",
-                    "output": [
-                        {
-                            "type": "message",
-                            "content": [
-                                {
-                                    "type": "output_text",
-                                    "text": (
-                                        '{"files":{},'
-                                        '"commit_message":"first",'
-                                        '"engineering_summary":"incomplete"}'
-                                    ),
-                                }
-                            ],
-                        }
-                    ],
-                },
-                "test-provider",
-            ),
-            (
-                {
-                    "id": "response-repaired",
-                    "status": "completed",
-                    "model": "test-model",
-                    "output": [
-                        {
-                            "type": "message",
-                            "content": [
-                                {
-                                    "type": "output_text",
-                                    "text": (
-                                        '{"files":{"source.py":"updated\\n"},'
-                                        '"commit_message":"fixed",'
-                                        '"engineering_summary":"complete"}'
-                                    ),
-                                }
-                            ],
-                        }
-                    ],
-                },
-                "test-provider",
-            ),
-        ]
+        provider_call.return_value = ({'id': 'response-compact-test', 'status': 'completed', 'model': 'test-model', 'output': [{'type': 'message', 'content': [{'type': 'output_text', 'text': '{"edits":[{"operation":"replace","path":"source.py","old_text":"baseline\\n","new_text":"changed\\n"}],"commit_message":"subset edit","engineering_summary":"touch one authorized path"}'}]}]}, "test-provider")
 
         mission = {
-            "agent_id": "DEV-001",
-            "wp_id": "TEST-INCOMPLETE-REPAIR",
-            "project": "rvsc",
-            "repository": "GitSly1/RAMTech-RVSC-Control-Center",
-            "base_branch": "main",
-            "work_branch": "rvsc/TEST-INCOMPLETE-REPAIR",
-            "objective": "repair one incomplete authorized proposal",
-            "allowed_paths": ["source.py"],
-            "acceptance_criteria": ["return exact authorized file set"],
-            "validation_commands": [
-                {
-                    "name": "TEST",
-                    "argv": ["python", "-c", "print('test')"],
-                }
-            ],
+            "agent_id": 'DEV-001',
+            "wp_id": 'UX-SUBSET',
+            "project": 'rvsc',
+            "repository": 'GitSly1/RAMTech-RVSC-Control-Center',
+            "base_branch": 'main',
+            "work_branch": 'rvsc/UX-SUBSET',
+            "objective": 'prove compact subset writes only touched authorized path',
+            "allowed_paths": ['source.py', 'untouched.py'],
+            "acceptance_criteria": ['only touched authorized path is written'],
+            "validation_commands": [{'name': 'TEST', 'argv': ['python', '-c', "print('test')"]}],
         }
 
-        checkpoints = []
-
-        result = execute_mission(
+        execute_mission(
             agent_id="DEV-001",
             agent_name="Daniel",
             role="Engineering",
             mission=mission,
-            checkpoint=lambda name, evidence: checkpoints.append(
-                (name, evidence)
-            ),
         )
 
-        self.assertTrue(result["success"])
-        self.assertEqual(provider_call.call_count, 2)
+        self.assertEqual(provider_call.call_count, 1)
+
         environment.write_text.assert_called_once_with(
             "source.py",
-            "updated\n",
+            "changed\n",
         )
-        names = [name for name, _ in checkpoints]
-        self.assertIn("proposal_repair_started", names)
-        self.assertIn("proposal_repair_received", names)
+
+        written_paths = [
+            call.args[0]
+            for call in environment.write_text.call_args_list
+        ]
+
+        self.assertNotIn("untouched.py", written_paths)
+
+        runner.restore_baseline.assert_not_called()
+        runner.validate.assert_called_once()
+        runner.commit.assert_called_once()
 
     @patch("controller.generic_engineering_worker._provider_call")
     @patch("controller.generic_engineering_worker._prepare_branch")
     @patch("controller.generic_engineering_worker._configure_git_identity")
     @patch("controller.generic_engineering_worker.EngineeringMissionRunner")
-    def test_second_incomplete_proposal_fails_closed_without_writes(
+    def test_empty_compact_proposal_fails_closed_without_writes_or_retry(
         self,
         runner_type,
         configure_identity,
@@ -1161,57 +1528,27 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
         runner = runner_type.return_value
         environment = runner.environment
         environment.read_text.return_value = "baseline\n"
-        runner.preflight.return_value = ("preflight:ok",)
 
-        incomplete_response = (
-            {
-                "id": "response-incomplete",
-                "status": "completed",
-                "model": "test-model",
-                "output": [
-                    {
-                        "type": "message",
-                        "content": [
-                            {
-                                "type": "output_text",
-                                "text": (
-                                    '{"files":{},'
-                                    '"commit_message":"still incomplete",'
-                                    '"engineering_summary":"incomplete"}'
-                                ),
-                            }
-                        ],
-                    }
-                ],
-            },
-            "test-provider",
-        )
-        provider_call.side_effect = [
-            incomplete_response,
-            incomplete_response,
-        ]
+        runner.preflight.return_value = ("repo_clean:true",)
+
+        provider_call.return_value = ({'id': 'response-compact-test', 'status': 'completed', 'model': 'test-model', 'output': [{'type': 'message', 'content': [{'type': 'output_text', 'text': '{"edits":[],"commit_message":"none","engineering_summary":"empty proposal"}'}]}]}, "test-provider")
 
         mission = {
-            "agent_id": "DEV-001",
-            "wp_id": "TEST-INCOMPLETE-FAIL-CLOSED",
-            "project": "rvsc",
-            "repository": "GitSly1/RAMTech-RVSC-Control-Center",
-            "base_branch": "main",
-            "work_branch": "rvsc/TEST-INCOMPLETE-FAIL-CLOSED",
-            "objective": "prove bounded incomplete repair",
-            "allowed_paths": ["source.py"],
-            "acceptance_criteria": ["return exact authorized file set"],
-            "validation_commands": [
-                {
-                    "name": "TEST",
-                    "argv": ["python", "-c", "print('test')"],
-                }
-            ],
+            "agent_id": 'DEV-001',
+            "wp_id": 'UX-EMPTY',
+            "project": 'rvsc',
+            "repository": 'GitSly1/RAMTech-RVSC-Control-Center',
+            "base_branch": 'main',
+            "work_branch": 'rvsc/UX-EMPTY',
+            "objective": 'prove empty compact proposal fails closed',
+            "allowed_paths": ['source.py'],
+            "acceptance_criteria": ['empty proposal fails without write or retry'],
+            "validation_commands": [{'name': 'TEST', 'argv': ['python', '-c', "print('test')"]}],
         }
 
         with self.assertRaisesRegex(
             RuntimeError,
-            "repair returned unauthorized or incomplete file set",
+            "invalid bounded edit proposal",
         ):
             execute_mission(
                 agent_id="DEV-001",
@@ -1220,9 +1557,11 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
                 mission=mission,
             )
 
-        self.assertEqual(provider_call.call_count, 2)
+        self.assertEqual(provider_call.call_count, 1)
         environment.write_text.assert_not_called()
+        runner.evidence_after_change.assert_not_called()
         runner.validate.assert_not_called()
+        runner.restore_baseline.assert_not_called()
         runner.commit.assert_not_called()
 
     def test_git_identity_failure_stops_execution(self):
