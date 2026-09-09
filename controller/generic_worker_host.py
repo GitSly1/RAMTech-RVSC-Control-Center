@@ -32,6 +32,7 @@ _RUNTIME_STATE: dict[str, Any] = {
     "last_result": None,
     "last_checkpoint": None,
     "checkpoint_evidence": (),
+    "proposal_diagnostics": None,
     "recovery_required": False,
     "recovered_checkpoint": None,
     "lifecycle_state": "idle",
@@ -544,12 +545,18 @@ def _persist_engineering_result(result: dict[str, Any]) -> None:
     _set_runtime_state(engineering_result=result, last_run_id=result.get("run_id"), last_checkpoint="engineering_result_persisted")
 
 
+def _persist_proposal_diagnostics(diagnostics: dict[str, Any]) -> None:
+    if not isinstance(diagnostics, dict):
+        raise ValueError("proposal diagnostics must be an object")
+    _set_runtime_state(proposal_diagnostics=diagnostics)
+
+
 def _run_worker(configured: RegisteredAgent, mission: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
     if configured.qa_eligible:
         return execute_generic_qa(agent_id=configured.agent_id, agent_name=configured.name, role=configured.role, qa_eligible=True, mission=mission, checkpoint=_checkpoint)
     if configured.agent_id == "DEV-001" and is_legacy_daniel_mission(mission):
         return daniel.execute_payload(payload)
-    return execute_generic_engineering(agent_id=configured.agent_id, agent_name=configured.name, role=configured.role, mission=mission, checkpoint=_checkpoint, persist_result=_persist_engineering_result)
+    return execute_generic_engineering(agent_id=configured.agent_id, agent_name=configured.name, role=configured.role, mission=mission, checkpoint=_checkpoint, persist_result=_persist_engineering_result, proposal_diagnostic=_persist_proposal_diagnostics)
 
 
 def _validate_persisted_result_identity(result: dict[str, Any], mission: dict[str, Any]) -> None:
@@ -607,7 +614,7 @@ def execute_payload(payload: dict[str, Any]) -> dict[str, Any]:
                 raise RuntimeError(f"durable recovery required for interrupted mission {state['active_mission']}; refusing duplicate dispatch")
             if state["active_mission"] is not None:
                 raise RuntimeError(f"mission {state['active_mission']} is already executing")
-            _set_runtime_state(active_mission=wp_id, active_run_id=run_id or None, last_result="acknowledged", last_checkpoint="mission_acknowledged", checkpoint_evidence=(), recovery_required=False, recovered_checkpoint=None, lifecycle_state="executing", recovery_context=context, recovery_digest=digest, recovery_attempted=False, engineering_result=None, qa_dispatch_started=False, terminal_recovery=None)
+            _set_runtime_state(active_mission=wp_id, active_run_id=run_id or None, last_result="acknowledged", last_checkpoint="mission_acknowledged", checkpoint_evidence=(), proposal_diagnostics=None, recovery_required=False, recovered_checkpoint=None, lifecycle_state="executing", recovery_context=context, recovery_digest=digest, recovery_attempted=False, engineering_result=None, qa_dispatch_started=False, terminal_recovery=None)
 
         engineering_result = state.get("engineering_result") if recovery else None
         if recovery and engineering_result is not None:

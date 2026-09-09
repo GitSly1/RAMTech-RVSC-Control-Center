@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import urllib.error
@@ -28,6 +29,7 @@ RVSC_ROOT = Path(__file__).resolve().parents[1]
 MAX_CORE_PATH = Path(os.environ.get("RVSC_MAX_CORE_PATH", str(RVSC_ROOT / "golden-core" / "MAX_PLATINUM_ENGINEERING_CORE_V1.md")))
 CheckpointReporter = Callable[[str, tuple[str, ...]], None]
 ResultReporter = Callable[[dict[str, Any]], None]
+ProposalDiagnosticReporter = Callable[[dict[str, Any]], None]
 
 _PROJECT_REPOSITORIES = {
     "rvsc": ("RVSC_RVSC_REPO", RVSC_ROOT),
@@ -666,7 +668,71 @@ def _read_context_files(repo_root: Path, mission: dict[str, Any]) -> dict[str, s
     return context_files
 
 
-def execute_mission(*, agent_id: str, agent_name: str, role: str, mission: dict[str, Any], checkpoint: CheckpointReporter | None = None, persist_result: ResultReporter | None = None) -> dict[str, Any]:
+def _proposal_diagnostics(
+    *,
+    run_id: str,
+    provider_response_id: str,
+    proposal_phase: str,
+    edits: list[Any],
+) -> dict[str, Any]:
+    diagnostic_edits: list[dict[str, Any]] = []
+
+    for index, edit in enumerate(edits, start=1):
+        item: dict[str, Any] = {"index": index}
+
+        if not isinstance(edit, dict):
+            item["operation"] = "invalid"
+            item["value_type"] = type(edit).__name__
+            diagnostic_edits.append(item)
+            continue
+
+        operation = edit.get("operation")
+        edit_path = edit.get("path")
+
+        item["operation"] = (
+            operation if isinstance(operation, str) else "invalid"
+        )
+
+        if isinstance(edit_path, str):
+            item["path"] = edit_path
+
+        if operation == "replace":
+            old_text = edit.get("old_text")
+            new_text = edit.get("new_text")
+
+            if isinstance(old_text, str):
+                item["old_text_length"] = len(old_text)
+                item["old_text_sha256"] = hashlib.sha256(
+                    old_text.encode("utf-8")
+                ).hexdigest()
+
+            if isinstance(new_text, str):
+                item["new_text_length"] = len(new_text)
+                item["new_text_sha256"] = hashlib.sha256(
+                    new_text.encode("utf-8")
+                ).hexdigest()
+
+        elif operation == "create":
+            content = edit.get("content")
+
+            if isinstance(content, str):
+                item["content_length"] = len(content)
+                item["content_sha256"] = hashlib.sha256(
+                    content.encode("utf-8")
+                ).hexdigest()
+
+        diagnostic_edits.append(item)
+
+    return {
+        "run_id": run_id,
+        "provider_response_id": provider_response_id,
+        "proposal_phase": proposal_phase,
+        "edit_count": len(edits),
+        "edits": diagnostic_edits,
+    }
+
+
+def execute_mission(*, agent_id: str, agent_name: str, role: str, mission: dict[str, Any], checkpoint: CheckpointReporter | None = None, persist_result: ResultReporter | None = None, proposal_diagnostic: ProposalDiagnosticReporter | None = None) -> dict[str, Any]:
     worker_request = _worker_request(mission)
     if worker_request.agent_id != agent_id:
         raise ValueError(f"mission agent mismatch: expected {agent_id}, got {worker_request.agent_id}")
@@ -742,6 +808,16 @@ def execute_mission(*, agent_id: str, agent_name: str, role: str, mission: dict[
             "worker returned invalid bounded edit proposal: "
             f"edits_shape:{edits_shape}; "
             f"edits_count:{len(edits) if isinstance(edits, list) else 0}"
+        )
+
+    if proposal_diagnostic:
+        proposal_diagnostic(
+            _proposal_diagnostics(
+                run_id=run_id,
+                provider_response_id=provider_response_id,
+                proposal_phase="initial",
+                edits=edits,
+            )
         )
 
     files = _apply_bounded_edits(
@@ -849,6 +925,12 @@ def execute_mission(*, agent_id: str, agent_name: str, role: str, mission: dict[
                     "unknown",
                 )
             )
+            repair_response_id = str(
+                repair_response.get(
+                    "id",
+                    provider_response_id,
+                )
+            )
 
             if repair_status != "completed":
                 raise RuntimeError(
@@ -886,6 +968,16 @@ def execute_mission(*, agent_id: str, agent_name: str, role: str, mission: dict[
             # restore_baseline() has already restored the
             # original mission state. Apply the corrective
             # proposal against that same original baseline.
+            if proposal_diagnostic:
+                proposal_diagnostic(
+                    _proposal_diagnostics(
+                        run_id=run_id,
+                        provider_response_id=repair_response_id,
+                        proposal_phase="repair",
+                        edits=repair_edits,
+                    )
+                )
+
             files = _apply_bounded_edits(
                 source_files,
                 repair_edits,

@@ -9,7 +9,7 @@ from unittest.mock import Mock, call, patch
 
 from controller.engineering_environment import EngineeringEnvironmentError
 from controller.engineering_runner import EngineeringValidationError
-from controller.generic_engineering_worker import _apply_bounded_edits, _budget_context_files, _bounded_context_text, _configure_git_identity, _git_identity, _ollama_call, _ollama_proposal_schema, _engineering_repair_prompt, _read_context_files, _repo_root, _validations, _worker_request, execute_mission
+from controller.generic_engineering_worker import _proposal_diagnostics, _apply_bounded_edits, _budget_context_files, _bounded_context_text, _configure_git_identity, _git_identity, _ollama_call, _ollama_proposal_schema, _engineering_repair_prompt, _read_context_files, _repo_root, _validations, _worker_request, execute_mission
 
 
 class GenericEngineeringWorkerTests(unittest.TestCase):
@@ -1569,6 +1569,54 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
         environment.run.return_value = Mock(returncode=1, stdout="", stderr="failed")
         with self.assertRaises(EngineeringEnvironmentError):
             _configure_git_identity(environment, "DEV-001", "Daniel")
+
+    def test_proposal_diagnostics_are_source_free_and_fingerprint_noop(self):
+        diagnostic = _proposal_diagnostics(
+            run_id="RUN-DIAGNOSTIC",
+            provider_response_id="RESP-DIAGNOSTIC",
+            proposal_phase="initial",
+            edits=[
+                {
+                    "operation": "replace",
+                    "path": "controller/example.py",
+                    "old_text": "same",
+                    "new_text": "same",
+                },
+                {
+                    "operation": "create",
+                    "path": "tests/example.py",
+                    "content": "print('ok')\n",
+                },
+            ],
+        )
+
+        self.assertEqual(diagnostic["run_id"], "RUN-DIAGNOSTIC")
+        self.assertEqual(
+            diagnostic["provider_response_id"],
+            "RESP-DIAGNOSTIC",
+        )
+        self.assertEqual(diagnostic["proposal_phase"], "initial")
+        self.assertEqual(diagnostic["edit_count"], 2)
+
+        replace = diagnostic["edits"][0]
+        create = diagnostic["edits"][1]
+
+        self.assertEqual(replace["operation"], "replace")
+        self.assertEqual(create["operation"], "create")
+        self.assertEqual(
+            replace["old_text_sha256"],
+            replace["new_text_sha256"],
+        )
+        self.assertEqual(
+            replace["old_text_length"],
+            replace["new_text_length"],
+        )
+
+        serialized = repr(diagnostic)
+        self.assertNotIn("'old_text'", serialized)
+        self.assertNotIn("'new_text'", serialized)
+        self.assertNotIn("'content'", serialized)
+
 
 
 if __name__ == "__main__":

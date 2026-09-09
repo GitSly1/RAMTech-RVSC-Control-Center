@@ -41,7 +41,7 @@ class GenericWorkerHostTests(unittest.TestCase):
         self.mission = {"agent_id": "OPS-001", "project": "rvsc", "repository": "GitSly1/RAMTech-RVSC-Control-Center", "wp_id": "RVSC-027C", "run_id": "RUN-027C", "base_branch": "rvsc/base", "work_branch": "rvsc/RVSC-027C", "allowed_paths": ["controller/generic_worker_host.py"], "validation_commands": [{"name": "tests", "argv": ["python", "-m", "unittest"]}]}
         self.engineering = {"success": True, "run_id": "RUN-027C", "project": "rvsc", "repository": "GitSly1/RAMTech-RVSC-Control-Center", "commit_sha": "a" * 40, "work_branch": "rvsc/RVSC-027C", "pushed": True}
         with host._STATE_LOCK:
-            host._RUNTIME_STATE.update({"active_mission": None, "active_run_id": None, "last_run_id": None, "last_activity": None, "last_result": None, "last_checkpoint": None, "checkpoint_evidence": (), "recovery_required": False, "recovered_checkpoint": None, "lifecycle_state": "idle", "recovery_context": None, "recovery_digest": None, "recovery_attempted": False, "engineering_result": None, "qa_dispatch_started": False, "terminal_recovery": None})
+            host._RUNTIME_STATE.update({"active_mission": None, "active_run_id": None, "last_run_id": None, "last_activity": None, "last_result": None, "last_checkpoint": None, "checkpoint_evidence": (), "proposal_diagnostics": None, "recovery_required": False, "recovered_checkpoint": None, "lifecycle_state": "idle", "recovery_context": None, "recovery_digest": None, "recovery_attempted": False, "engineering_result": None, "qa_dispatch_started": False, "terminal_recovery": None})
 
     def test_terminal_recovery_failure_can_be_acknowledged_without_deleting_evidence(self):
         terminal = {
@@ -240,7 +240,7 @@ class GenericWorkerHostTests(unittest.TestCase):
         }
         observed = {}
 
-        def execute_engineering(*, agent_id, agent_name, role, mission, checkpoint, persist_result):
+        def execute_engineering(*, agent_id, agent_name, role, mission, checkpoint, persist_result, proposal_diagnostic=None):
             observed["mission"] = dict(mission)
             observed["state"] = host._snapshot_state()
             return {
@@ -826,6 +826,286 @@ class GenericWorkerHostTests(unittest.TestCase):
         self.assertEqual(state["engineering_result"]["run_id"], engineering["run_id"])
         self.assertEqual(state["engineering_result"]["commit_sha"], engineering["commit_sha"])
         self.assertFalse(state["qa_dispatch_started"])
+
+    def test_proposal_diagnostics_replace_stale_state_and_survive_execution_failure(self):
+        stale = {
+            "run_id": "STALE-RUN",
+            "proposal_phase": "initial",
+            "edit_count": 1,
+            "edits": [{"operation": "replace", "path": "stale.py"}],
+        }
+        current = {
+            "run_id": self.mission["run_id"],
+            "provider_response_id": "RESP-CURRENT",
+            "proposal_phase": "initial",
+            "edit_count": 1,
+            "edits": [
+                {
+                    "index": 1,
+                    "operation": "replace",
+                    "path": "controller/generic_worker_host.py",
+                    "old_text_length": 4,
+                    "old_text_sha256": "a" * 64,
+                    "new_text_length": 5,
+                    "new_text_sha256": "b" * 64,
+                }
+            ],
+        }
+        observed = {}
+
+        with host._STATE_LOCK:
+            host._RUNTIME_STATE["proposal_diagnostics"] = stale
+
+        def execute_engineering(
+            *,
+            agent_id,
+            agent_name,
+            role,
+            mission,
+            checkpoint,
+            persist_result,
+            proposal_diagnostic=None,
+        ):
+            observed["before_callback"] = host._snapshot_state()[
+                "proposal_diagnostics"
+            ]
+            self.assertIsNotNone(proposal_diagnostic)
+            proposal_diagnostic(current)
+            observed["after_callback"] = host._snapshot_state()[
+                "proposal_diagnostics"
+            ]
+            raise RuntimeError("synthetic engineering failure")
+
+        with patch(
+            "controller.generic_worker_host.configured_agent",
+            return_value=self.noah,
+        ), patch(
+            "controller.generic_worker_host.validate_worker",
+        ), patch(
+            "controller.generic_worker_host._persist_runtime_state",
+        ):
+            with patch(
+                "controller.generic_worker_host.execute_generic_engineering",
+                side_effect=execute_engineering,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "synthetic engineering failure",
+                ):
+                    execute_payload(
+                        {
+                            "protocol": "rvsc.worker.v1",
+                            "mission": self.mission,
+                        }
+                    )
+
+        self.assertIsNone(observed["before_callback"])
+        self.assertEqual(observed["after_callback"], current)
+
+        with host._STATE_LOCK:
+            state = dict(host._RUNTIME_STATE)
+
+        self.assertEqual(state["proposal_diagnostics"], current)
+        self.assertEqual(state["last_checkpoint"], "execution_failed")
+        self.assertEqual(state["last_result"], "failed")
+        self.assertIsNone(state["active_mission"])
+        self.assertIsNone(state["active_run_id"])
+
+    def test_proposal_diagnostics_restore_from_durable_runtime_state(self):
+        diagnostic = {
+            "run_id": self.mission["run_id"],
+            "provider_response_id": "RESP-RESTORE",
+            "proposal_phase": "initial",
+            "edit_count": 1,
+            "edits": [
+                {
+                    "index": 1,
+                    "operation": "replace",
+                    "path": "controller/generic_worker_host.py",
+                    "old_text_length": 3,
+                    "old_text_sha256": "c" * 64,
+                    "new_text_length": 4,
+                    "new_text_sha256": "d" * 64,
+                }
+            ],
+        }
+
+        context = host._mission_context(self.mission)
+
+        saved = {
+            **host._RUNTIME_STATE,
+            "active_mission": self.mission["wp_id"],
+            "active_run_id": self.mission["run_id"],
+            "recovery_context": context,
+            "recovery_digest": host._context_digest(context),
+            "last_checkpoint": "proposal_received",
+            "proposal_diagnostics": diagnostic,
+            "recovery_attempted": False,
+            "qa_dispatch_started": False,
+            "lifecycle_state": "executing",
+        }
+
+        with tempfile.TemporaryDirectory() as temp:
+            store = DurableRuntimeStateStore(temp)
+            store.save("OPS-001", saved)
+
+            with host._STATE_LOCK:
+                host._RUNTIME_STATE.update(
+                    {
+                        "active_mission": None,
+                        "active_run_id": None,
+                        "proposal_diagnostics": None,
+                        "recovery_required": False,
+                        "lifecycle_state": "idle",
+                    }
+                )
+
+            with patch(
+                "controller.generic_worker_host.configured_agent",
+                return_value=self.noah,
+            ), patch(
+                "controller.generic_worker_host._state_store",
+                return_value=store,
+            ):
+                restored = host._restore_runtime_state()
+
+        self.assertTrue(restored)
+        self.assertEqual(
+            host._RUNTIME_STATE["proposal_diagnostics"],
+            diagnostic,
+        )
+        self.assertTrue(host._RUNTIME_STATE["recovery_required"])
+        self.assertEqual(
+            host._RUNTIME_STATE["recovered_checkpoint"],
+            "proposal_received",
+        )
+
+    def test_health_payload_does_not_expose_proposal_diagnostics(self):
+        diagnostic = {
+            "run_id": "RUN-PRIVATE-DIAGNOSTIC",
+            "provider_response_id": "RESP-PRIVATE",
+            "proposal_phase": "initial",
+            "edit_count": 0,
+            "edits": [],
+        }
+
+        with host._STATE_LOCK:
+            host._RUNTIME_STATE["proposal_diagnostics"] = diagnostic
+
+        with patch(
+            "controller.generic_worker_host.configured_agent",
+            return_value=self.noah,
+        ):
+            payload = host.health_payload()
+
+        self.assertNotIn("proposal_diagnostics", payload)
+
+    def test_recovery_entry_preserves_existing_proposal_diagnostics(self):
+        diagnostic = {
+            "run_id": self.mission["run_id"],
+            "provider_response_id": "RESP-RECOVERY",
+            "proposal_phase": "initial",
+            "edit_count": 1,
+            "edits": [
+                {
+                    "index": 1,
+                    "operation": "replace",
+                    "path": "controller/generic_worker_host.py",
+                    "old_text_length": 7,
+                    "old_text_sha256": "e" * 64,
+                    "new_text_length": 8,
+                    "new_text_sha256": "f" * 64,
+                }
+            ],
+        }
+
+        context = host._mission_context(self.mission)
+
+        with host._STATE_LOCK:
+            host._RUNTIME_STATE.update(
+                {
+                    "active_mission": self.mission["wp_id"],
+                    "active_run_id": self.mission["run_id"],
+                    "last_run_id": self.mission["run_id"],
+                    "last_result": "failed",
+                    "last_checkpoint": "proposal_received",
+                    "checkpoint_evidence": (),
+                    "proposal_diagnostics": diagnostic,
+                    "recovery_required": True,
+                    "recovered_checkpoint": "proposal_received",
+                    "lifecycle_state": "recovery_required",
+                    "recovery_context": context,
+                    "recovery_digest": host._context_digest(context),
+                    "recovery_attempted": False,
+                    "engineering_result": None,
+                    "qa_dispatch_started": False,
+                    "terminal_recovery": None,
+                }
+            )
+
+        observed = {}
+
+        def execute_engineering(
+            *,
+            agent_id,
+            agent_name,
+            role,
+            mission,
+            checkpoint,
+            persist_result,
+            proposal_diagnostic=None,
+        ):
+            observed["diagnostic_at_worker_entry"] = (
+                host._snapshot_state()["proposal_diagnostics"]
+            )
+            return {
+                "success": False,
+                "run_id": mission["run_id"],
+                "project": mission["project"],
+                "repository": mission["repository"],
+                "work_branch": mission["work_branch"],
+            }
+
+        with patch(
+            "controller.generic_worker_host.configured_agent",
+            return_value=self.noah,
+        ), patch(
+            "controller.generic_worker_host.validate_worker",
+        ), patch(
+            "controller.generic_worker_host._persist_runtime_state",
+        ), patch(
+            "controller.generic_worker_host.execute_generic_engineering",
+            side_effect=execute_engineering,
+        ):
+            result = execute_payload(
+                {
+                    "protocol": "rvsc.worker.v1",
+                    "recovery": True,
+                    "mission": self.mission,
+                }
+            )
+
+        self.assertFalse(result["success"])
+
+        self.assertEqual(
+            observed["diagnostic_at_worker_entry"],
+            diagnostic,
+        )
+
+        with host._STATE_LOCK:
+            state = dict(host._RUNTIME_STATE)
+
+        self.assertEqual(
+            state["proposal_diagnostics"],
+            diagnostic,
+        )
+        self.assertTrue(state["recovery_required"])
+        self.assertEqual(
+            state["lifecycle_state"],
+            "recovery_failed",
+        )
+
+
 
 
 if __name__ == "__main__":
