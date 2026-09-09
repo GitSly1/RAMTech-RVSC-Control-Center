@@ -398,11 +398,28 @@ def _restore_runtime_state() -> bool:
     return True
 
 
+def _execution_credential_ready(agent: Agent) -> bool:
+    """Return whether the selected execution path has its required credential."""
+
+    if agent.qa_eligible:
+        return True
+
+    provider = os.environ.get("RVSC_AI_PROVIDER", "ollama").strip().lower()
+
+    if provider == "ollama":
+        return True
+
+    if provider == "openai":
+        return bool(os.environ.get("OPENAI_API_KEY", "").strip())
+
+    return False
+
+
 def health_payload() -> dict[str, Any]:
     agent = configured_agent()
     with _STATE_LOCK:
         state = dict(_RUNTIME_STATE)
-    credential_ready = bool(os.environ.get("OPENAI_API_KEY", "").strip())
+    credential_ready = _execution_credential_ready(agent)
     execution_path = "independent_qa" if agent.qa_eligible else "generic_engineering"
     return {
         "protocol": "rvsc.worker.health.v1",
