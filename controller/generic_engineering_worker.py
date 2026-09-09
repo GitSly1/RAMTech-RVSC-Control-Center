@@ -643,6 +643,8 @@ def _engineering_repair_prompt(
         + "\nBefore producing the corrected proposal, diagnose the validation failure from the supplied error and previous failed proposal."
         + "\nIdentify the concrete defective generated code or configuration that caused the validation failure."
         + "\nRe-evaluate the proposed bounded edits against the supplied BASELINE FILES and READ-ONLY CONTEXT FILES."
+        + "\nFor every repair operation=replace, derive old_text only from the supplied BASELINE FILES as they exist in this repair prompt. Do not derive or copy old_text from new_text or other generated content in the PREVIOUS FAILED PROPOSAL."
+        + "\nBefore returning each repair replace edit, verify that its complete old_text occurs exactly once in that target BASELINE FILE. If no such exact baseline anchor exists, choose a different exact baseline anchor; never invent, approximate, or reconstruct one from the failed generated implementation."
         + "\nThe corrected proposal must address the observed validation failure; do not merely repeat or cosmetically rewrite the failed construction."
         + "\nPreserve unrelated behavior and remain strictly within the original mission and allowed_paths authorization."
         + "\nReturn one corrected proposal using the exact same JSON contract."

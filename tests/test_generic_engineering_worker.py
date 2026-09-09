@@ -526,6 +526,10 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
         self.assertIn("BASELINE FILES", prompt)
         self.assertIn("READ-ONLY CONTEXT FILES", prompt)
         self.assertIn("do not merely repeat", prompt)
+        self.assertIn("derive old_text only from the supplied BASELINE FILES", prompt)
+        self.assertIn("Do not derive or copy old_text from new_text", prompt)
+        self.assertIn("complete old_text occurs exactly once", prompt)
+        self.assertIn("never invent, approximate, or reconstruct", prompt)
         self.assertIn("ImportError: circular import in source.py", prompt)
         self.assertIn("from source import broken", prompt)
     def test_validations_reject_more_than_two_commands(self):
@@ -844,6 +848,126 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
         self.assertEqual(runner.validate.call_count, 2)
         self.assertEqual(runner.restore_baseline.call_count, 2)
         runner.commit.assert_not_called()
+
+    @patch("controller.generic_engineering_worker._provider_call")
+    @patch("controller.generic_engineering_worker._prepare_branch")
+    @patch("controller.generic_engineering_worker._configure_git_identity")
+    @patch("controller.generic_engineering_worker.EngineeringMissionRunner")
+    def test_invalid_repair_anchor_fails_closed_after_baseline_restore(
+        self,
+        runner_type,
+        configure_identity,
+        prepare_branch,
+        provider_call,
+    ):
+        environment = Mock()
+        environment.read_text.return_value = "baseline\n"
+        environment.run.return_value = Mock(
+            returncode=0,
+            stdout="a" * 40 + "\n",
+            stderr="",
+        )
+        environment.git_status.return_value = Mock(
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+
+        runner = Mock()
+        runner.environment = environment
+        runner.preflight.return_value = ("repo_clean:true",)
+        runner.evidence_after_change.return_value = ("diff_present:true",)
+        runner.validate.side_effect = EngineeringValidationError(
+            "validation failed [TEST]: broken"
+        )
+        runner.restore_baseline.return_value = (
+            "rollback_baseline:abc123",
+            "rollback:success",
+            "repo_clean:true",
+        )
+        runner_type.return_value = runner
+
+        first = {
+            "id": "proposal-1",
+            "status": "completed",
+            "model": "test-model",
+            "output": [{
+                "type": "message",
+                "content": [{
+                    "type": "output_text",
+                    "text": (
+                        '{"edits":[{"operation":"replace",'
+                        '"path":"source.py","old_text":"baseline\\n",'
+                        '"new_text":"broken-generated\\n"}],'
+                        '"commit_message":"first",'
+                        '"engineering_summary":"first"}'
+                    ),
+                }],
+            }],
+        }
+
+        repaired = {
+            "id": "proposal-2",
+            "status": "completed",
+            "model": "test-model",
+            "output": [{
+                "type": "message",
+                "content": [{
+                    "type": "output_text",
+                    "text": (
+                        '{"edits":[{"operation":"replace",'
+                        '"path":"source.py",'
+                        '"old_text":"broken-generated\\n",'
+                        '"new_text":"fixed\\n"}],'
+                        '"commit_message":"repair",'
+                        '"engineering_summary":"repair"}'
+                    ),
+                }],
+            }],
+        }
+
+        provider_call.side_effect = [
+            (first, "ollama"),
+            (repaired, "ollama"),
+        ]
+
+        mission = {
+            "agent_id": "DEV-001",
+            "wp_id": "TEST-INVALID-REPAIR-ANCHOR",
+            "project": "rvsc",
+            "repository": "GitSly1/RAMTech-RVSC-Control-Center",
+            "base_branch": "main",
+            "work_branch": "rvsc/TEST-INVALID-REPAIR-ANCHOR",
+            "objective": "prove invalid repair anchors fail closed",
+            "allowed_paths": ["source.py"],
+            "acceptance_criteria": ["validation passes"],
+            "validation_commands": [
+                {
+                    "name": "TEST",
+                    "argv": ["python", "-c", "print('test')"],
+                }
+            ],
+        }
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"bounded edit 1 anchor occurrence count for source\.py: 0",
+        ):
+            execute_mission(
+                agent_id="DEV-001",
+                agent_name="Daniel",
+                role="Engineering",
+                mission=mission,
+            )
+
+        self.assertEqual(provider_call.call_count, 2)
+        runner.restore_baseline.assert_called_once_with()
+        runner.commit.assert_not_called()
+
+        self.assertEqual(
+            environment.write_text.call_args_list,
+            [call("source.py", "broken-generated\n")],
+        )
 
     @patch("controller.generic_engineering_worker._provider_call")
     @patch("controller.generic_engineering_worker._prepare_branch")
