@@ -980,11 +980,26 @@ def execute_mission(*, agent_id: str, agent_name: str, role: str, mission: dict[
                     )
                 )
 
-            files = _apply_bounded_edits(
-                source_files,
-                repair_edits,
-                existing_paths=existing_paths,
-            )
+            try:
+                files = _apply_bounded_edits(
+                    source_files,
+                    repair_edits,
+                    existing_paths=existing_paths,
+                )
+            except Exception as repair_proposal_exc:
+                if checkpoint:
+                    checkpoint(
+                        "repair_proposal_rejected",
+                        (
+                            f"run_id:{run_id}",
+                            "repair_attempt:1",
+                            "failure:"
+                            f"{type(repair_proposal_exc).__name__}",
+                            "reason:"
+                            f"{repair_proposal_exc}",
+                        ),
+                    )
+                raise
 
             touched_paths = tuple(
                 dict.fromkeys(

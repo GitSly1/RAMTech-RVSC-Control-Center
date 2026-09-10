@@ -949,6 +949,8 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
             ],
         }
 
+        checkpoints = []
+
         with self.assertRaisesRegex(
             RuntimeError,
             r"bounded edit 1 anchor occurrence count for source\.py: 0",
@@ -958,6 +960,9 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
                 agent_name="Daniel",
                 role="Engineering",
                 mission=mission,
+                checkpoint=lambda name, evidence: checkpoints.append(
+                    (name, evidence)
+                ),
             )
 
         self.assertEqual(provider_call.call_count, 2)
@@ -967,6 +972,47 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
         self.assertEqual(
             environment.write_text.call_args_list,
             [call("source.py", "broken-generated\n")],
+        )
+
+        checkpoint_names = [
+            name for name, _ in checkpoints
+        ]
+
+        self.assertIn(
+            "repair_started",
+            checkpoint_names,
+        )
+        self.assertIn(
+            "repair_proposal_rejected",
+            checkpoint_names,
+        )
+        self.assertNotIn(
+            "repair_proposal_received",
+            checkpoint_names,
+        )
+
+        rejection_evidence = next(
+            evidence
+            for name, evidence in checkpoints
+            if name == "repair_proposal_rejected"
+        )
+
+        self.assertIn(
+            "repair_attempt:1",
+            rejection_evidence,
+        )
+        self.assertIn(
+            "failure:RuntimeError",
+            rejection_evidence,
+        )
+        self.assertTrue(
+            any(
+                item.startswith(
+                    "reason:bounded edit 1 anchor "
+                    "occurrence count for source.py: 0"
+                )
+                for item in rejection_evidence
+            )
         )
 
     @patch("controller.generic_engineering_worker._provider_call")
