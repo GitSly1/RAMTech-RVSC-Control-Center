@@ -258,7 +258,7 @@ def execute_mission(*, agent_id: str, agent_name: str, role: str, qa_eligible: b
                     _record(checkpoint, "qa_validation_observed", (f"run_id:{run_id}", f"validation:{name}", f"exit:{completed.returncode}"))
                     if completed.returncode != 0:
                         return _reject(run_id=run_id, agent_id=agent_id, branch=branch, commit_sha=commit_sha, summary=f"validation failed: {name}", evidence=evidence, validations=validations)
-            evidence.extend(("source_execution:isolated_copy", "verdict:QA_ACCEPTED"))
+            evidence.extend(("source_execution:isolated_copy", "verdict:QA_ACCEPTED", "evidence:reviewed_branch", "evidence:reviewed_commit_sha"))
             _record(checkpoint, "qa_accepted", (f"run_id:{run_id}", f"branch:{branch}", f"commit:{commit_sha}"))
             return {"success": True, "run_id": run_id, "agent_id": agent_id, "verdict": "QA_ACCEPTED", "reviewed_branch": branch, "reviewed_commit_sha": commit_sha, "summary": f"independent QA accepted {branch} at {commit_sha}", "evidence": evidence, "validations": validations, "retryable": False}
     except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as exc:
