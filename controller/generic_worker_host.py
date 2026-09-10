@@ -16,6 +16,7 @@ from . import daniel_multi_mission_host as daniel
 from .generic_engineering_worker import execute_mission as execute_generic_engineering
 from .generic_engineering_worker import recover_controlled_workspace, resume_persisted_engineering_result
 from .generic_qa_worker import execute_mission as execute_generic_qa
+from .orchestrator import MissionState, MissionStore, OrchestrationError
 from .runtime_state_store import DurableRuntimeStateStore, sanitize_for_persistence
 from .work_package_controller import QA_ACCEPTED, QA_REJECTED, QAHandoffError, build_qa_mission, engineering_commit_sha, validate_qa_result
 
@@ -230,6 +231,121 @@ def is_legacy_daniel_mission(mission: dict[str, Any]) -> bool:
 def _state_store() -> DurableRuntimeStateStore:
     default = RVSC_ROOT / ".rvsc" / "runtime"
     return DurableRuntimeStateStore(Path(os.environ.get("RVSC_RUNTIME_STATE_DIR", str(default))))
+
+
+def _automatic_recovery_authorization() -> str:
+    """Reconcile worker-local recovery state with authoritative mission lifecycle.
+
+    Worker durable state proves how an interrupted operation can be resumed.
+    The mission store independently decides whether that operation remains
+    authorized to execute.
+    """
+    with _STATE_LOCK:
+        state = dict(_RUNTIME_STATE)
+
+    if not state.get("recovery_required"):
+        return "not_required"
+
+    active_mission = str(state.get("active_mission") or "").strip()
+    active_run_id = str(
+        state.get("active_run_id") or state.get("last_run_id") or ""
+    ).strip()
+
+    def fail_closed(reason: str) -> str:
+        evidence = [
+            "recovery_authorization:failed",
+            f"reason:{reason}",
+        ]
+        if active_mission:
+            evidence.append(f"wp_id:{active_mission}")
+        if active_run_id:
+            evidence.append(f"run_id:{active_run_id}")
+
+        terminal = {
+            "wp_id": active_mission or None,
+            "run_id": active_run_id or None,
+            "result": "recovery_failed",
+            "completed_at": _utc_now(),
+        }
+
+        _set_runtime_state(
+            last_result="failed",
+            lifecycle_state="recovery_failed",
+            recovery_required=True,
+            recovery_attempted=True,
+            last_checkpoint="recovery_authorization_failed",
+            checkpoint_evidence=tuple(evidence),
+            terminal_recovery=terminal,
+        )
+        return "failed"
+
+    if not active_mission:
+        return fail_closed("active mission identity missing")
+
+    mission_store_path = os.environ.get(
+        "RVSC_MISSION_STORE_PATH",
+        "",
+    ).strip()
+
+    if not mission_store_path:
+        return fail_closed("authoritative mission store path is not configured")
+
+    try:
+        store = MissionStore.load(Path(mission_store_path))
+        mission = store.get(active_mission)
+    except (OSError, ValueError, OrchestrationError) as exc:
+        return fail_closed(
+            f"authoritative mission state unavailable: {exc}"
+        )
+
+    authoritative_state = mission.state
+    if isinstance(authoritative_state, MissionState):
+        authoritative_state_text = authoritative_state.value
+    else:
+        authoritative_state_text = str(authoritative_state).strip().lower()
+
+    if authoritative_state != MissionState.RUNNING:
+        evidence = (
+            "recovery_authorization:withheld",
+            f"authoritative_mission_state:{authoritative_state_text}",
+            f"wp_id:{active_mission}",
+            "recovery_action:worker_state_reconciled",
+        )
+
+        _set_runtime_state(
+            active_mission=None,
+            active_run_id=None,
+            last_result="not_recovered",
+            last_checkpoint="recovery_not_authorized",
+            checkpoint_evidence=evidence,
+            recovery_required=False,
+            recovered_checkpoint=None,
+            lifecycle_state="idle",
+            recovery_context=None,
+            recovery_digest=None,
+            recovery_attempted=False,
+            engineering_result=None,
+            qa_dispatch_started=False,
+            terminal_recovery=None,
+        )
+        return "reconciled"
+
+    assigned_worker = str(
+        getattr(mission, "assigned_worker", None) or ""
+    ).strip()
+    configured_worker = configured_agent().agent_id.strip()
+
+    if not assigned_worker:
+        return fail_closed(
+            "authoritative running mission has no assigned worker"
+        )
+
+    if assigned_worker.upper() != configured_worker.upper():
+        return fail_closed(
+            "authoritative running mission worker does not match recovering worker"
+        )
+
+    return "authorized"
 
 
 def _snapshot_state() -> dict[str, Any]:
@@ -853,16 +969,38 @@ def main() -> None:
     with _STATE_LOCK:
         recovery_required = bool(_RUNTIME_STATE["recovery_required"])
         active_mission = _RUNTIME_STATE["active_mission"]
+
+    recovery_decision = "not_required"
+    if recovery_required:
+        recovery_decision = _automatic_recovery_authorization()
+
+    with _STATE_LOCK:
+        recovery_required = bool(_RUNTIME_STATE["recovery_required"])
+        active_mission = _RUNTIME_STATE["active_mission"]
+
     if not restored:
         _checkpoint("worker_started")
-    elif not recovery_required:
+    elif not recovery_required and recovery_decision == "not_required":
         _checkpoint("worker_restarted", ("durable_state:restored",))
+
     server = ThreadingHTTPServer((host, port), GenericWorkerHandler)
     print(f"{agent.agent_id} {agent.name} generic worker host listening on http://{host}:{port}/execute")
     print(f"{agent.agent_id} {agent.name} health available on http://{host}:{port}/health")
-    if recovery_required:
+
+    if recovery_decision == "authorized":
         print(f"{agent.agent_id} automatically recovering interrupted mission {active_mission}")
         _start_automatic_recovery()
+    elif recovery_decision == "reconciled":
+        print(
+            f"{agent.agent_id} suppressed stale automatic recovery because "
+            "the authoritative mission is no longer running"
+        )
+    elif recovery_decision == "failed":
+        print(
+            f"{agent.agent_id} refused automatic recovery because "
+            "authoritative recovery authorization could not be proven"
+        )
+
     server.serve_forever()
 
 

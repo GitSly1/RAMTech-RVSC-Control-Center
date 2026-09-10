@@ -219,6 +219,11 @@ class RuntimeSupervisor:
         env = os.environ.copy()
         env.update(self.repository_mappings)
         env.update({"RVSC_AGENT_ID": config.agent_id, "RVSC_WORKER_AGENT_ID": config.agent_id, "RVSC_AGENT_NAME": config.name, "RVSC_AGENT_ROLE": config.role, "RVSC_WORKER_PORT": str(config.port), "RVSC_PORT": str(config.port)})
+
+        mission_store_path = getattr(self.mission_store, "path", None)
+        if mission_store_path is not None:
+            env["RVSC_MISSION_STORE_PATH"] = str(mission_store_path)
+
         if config.role == "engineering":
             env.update({key: self.qa_endpoint for key in QA_ROUTING_ENV_KEYS})
         else:
