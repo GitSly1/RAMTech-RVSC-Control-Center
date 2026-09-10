@@ -143,6 +143,107 @@ def validate_mission_contract(contract: Mapping[str, Any], supported_projects: I
     for name in ("objective", "repository", "work_branch", "base_branch", "agent_id"):
         data[name] = _required_string(data, name)
     data["acceptance_criteria"] = _required_string_list(data, "acceptance_criteria")
+
+    strict_semantic = data.get("requires_semantic_acceptance", False)
+    if not isinstance(strict_semantic, bool):
+        raise OrchestrationError(
+            "mission requires_semantic_acceptance must be a boolean"
+        )
+    data["requires_semantic_acceptance"] = strict_semantic
+
+    if strict_semantic:
+        checks = data.get("acceptance_checks")
+        if not isinstance(checks, list) or not checks:
+            raise OrchestrationError(
+                "strict semantic mission requires acceptance_checks"
+            )
+
+        normalized_checks = []
+        covered_criteria = set()
+
+        for position, check in enumerate(checks, start=1):
+            if not isinstance(check, Mapping):
+                raise OrchestrationError(
+                    "acceptance check %s must be an object" % position
+                )
+
+            normalized_check = copy.deepcopy(dict(check))
+
+            try:
+                criterion_index = int(normalized_check.get("criterion_index"))
+            except (TypeError, ValueError):
+                raise OrchestrationError(
+                    "acceptance check %s requires integer criterion_index"
+                    % position
+                )
+
+            if criterion_index < 1 or criterion_index > len(data["acceptance_criteria"]):
+                raise OrchestrationError(
+                    "acceptance check %s criterion_index is outside acceptance_criteria"
+                    % position
+                )
+
+            check_type = str(normalized_check.get("type", "")).strip()
+            if check_type not in {
+                "validation_passed",
+                "path_changed",
+                "text_contains",
+                "text_not_contains",
+            }:
+                raise OrchestrationError(
+                    "acceptance check %s has unsupported type: %s"
+                    % (position, check_type or "<missing>")
+                )
+
+            normalized_check["criterion_index"] = criterion_index
+            normalized_check["type"] = check_type
+
+            if check_type == "validation_passed":
+                name = str(normalized_check.get("name", "")).strip()
+                if not name:
+                    raise OrchestrationError(
+                        "validation_passed acceptance check requires name"
+                    )
+                normalized_check["name"] = name
+
+            elif check_type == "path_changed":
+                path = str(normalized_check.get("path", "")).strip()
+                if not path:
+                    raise OrchestrationError(
+                        "path_changed acceptance check requires path"
+                    )
+                normalized_check["path"] = path
+
+            else:
+                path = str(normalized_check.get("path", "")).strip()
+                text = normalized_check.get("text")
+                if not path or not isinstance(text, str) or not text:
+                    raise OrchestrationError(
+                        "%s acceptance check requires path and non-empty text"
+                        % check_type
+                    )
+                normalized_check["path"] = path
+
+            covered_criteria.add(criterion_index)
+            normalized_checks.append(normalized_check)
+
+        expected_coverage = set(
+            range(1, len(data["acceptance_criteria"]) + 1)
+        )
+        missing = sorted(expected_coverage - covered_criteria)
+
+        if missing:
+            raise OrchestrationError(
+                "strict semantic mission acceptance criteria lack "
+                "machine-verifiable checks: %s"
+                % ", ".join(str(value) for value in missing)
+            )
+
+        data["acceptance_checks"] = normalized_checks
+    elif "acceptance_checks" in data:
+        raise OrchestrationError(
+            "acceptance_checks require requires_semantic_acceptance=true"
+        )
     data["allowed_paths"] = _required_string_list(data, "allowed_paths")
     if "context_paths" in data:
         context_paths = data["context_paths"]
@@ -176,6 +277,39 @@ def validate_mission_contract(contract: Mapping[str, Any], supported_projects: I
         normalized_command["argv"] = [argument.strip() for argument in command["argv"]]
         normalized_commands.append(normalized_command)
     data["validation_commands"] = normalized_commands
+
+    if data.get("requires_semantic_acceptance"):
+        validation_names = {
+            str(command.get("name", "")).strip()
+            for command in data["validation_commands"]
+            if str(command.get("name", "")).strip()
+        }
+        allowed_paths = set(data["allowed_paths"])
+
+        for position, check in enumerate(
+            data["acceptance_checks"],
+            start=1,
+        ):
+            check_type = check["type"]
+
+            if check_type == "validation_passed":
+                if check["name"] not in validation_names:
+                    raise OrchestrationError(
+                        "acceptance check %s references unknown "
+                        "validation command: %s"
+                        % (position, check["name"])
+                    )
+
+            elif check_type in {
+                "path_changed",
+                "text_contains",
+                "text_not_contains",
+            }:
+                if check["path"] not in allowed_paths:
+                    raise OrchestrationError(
+                        "acceptance check %s references unauthorized path: %s"
+                        % (position, check["path"])
+                    )
     dependencies = data.get("dependencies", [])
     if not isinstance(dependencies, list) or any(not isinstance(value, str) or not value.strip() for value in dependencies):
         raise OrchestrationError("mission dependencies must be a list of non-empty strings")
@@ -298,6 +432,11 @@ class MissionStore:
         return mission
 
     def add_contract(self, contract: Mapping[str, Any], *, supported_projects: Iterable[str]) -> Mission:
+        if contract.get("requires_semantic_acceptance") is not True:
+            raise OrchestrationError(
+                "new engineering mission admission requires "
+                "requires_semantic_acceptance=true"
+            )
         data = validate_mission_contract(contract, supported_projects)
         mission = Mission(data["wp_id"], data["project"], dependencies=tuple(data.get("dependencies", ())), dependency_policy=str(data.get("dependency_policy", "accepted")), priority=data.get("priority", 999), implementer=data["agent_id"], metadata={"contract": data, "requires_independent_qa": True, "ingestion": "validated_cli"})
         return self.add(mission)

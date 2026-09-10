@@ -30,6 +30,32 @@ class RuntimeSupervisorTests(unittest.TestCase):
             "validation_commands": [{"name": "tests", "argv": ["python", "-m", "unittest"]}],
         }
         value.update(changes)
+
+        if "requires_semantic_acceptance" not in changes:
+            value["requires_semantic_acceptance"] = True
+
+        if (
+            value.get("requires_semantic_acceptance") is True
+            and "acceptance_checks" not in changes
+        ):
+            commands = value.get("validation_commands", [])
+            if commands:
+                validation_name = str(
+                    commands[0].get("name", "")
+                ).strip()
+
+                value["acceptance_checks"] = [
+                    {
+                        "criterion_index": index,
+                        "type": "validation_passed",
+                        "name": validation_name,
+                    }
+                    for index, _ in enumerate(
+                        value.get("acceptance_criteria", []),
+                        start=1,
+                    )
+                ]
+
         return value
 
     def make_supervisor(self, store=None, execute_requester=None, payload=None, **kwargs):

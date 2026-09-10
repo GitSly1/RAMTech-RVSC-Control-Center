@@ -15,6 +15,29 @@ class MissionStoreTests(unittest.TestCase):
             "validation_commands": [{"name": "tests", "argv": ["python", "-m", "unittest"]}],
         }
         value.update(changes)
+
+        if "requires_semantic_acceptance" not in changes:
+            value["requires_semantic_acceptance"] = True
+
+        if (
+            value.get("requires_semantic_acceptance") is True
+            and "acceptance_checks" not in changes
+        ):
+            commands = value.get("validation_commands", [])
+            if commands:
+                validation_name = str(commands[0].get("name", "")).strip()
+                value["acceptance_checks"] = [
+                    {
+                        "criterion_index": index,
+                        "type": "validation_passed",
+                        "name": validation_name,
+                    }
+                    for index, _ in enumerate(
+                        value.get("acceptance_criteria", []),
+                        start=1,
+                    )
+                ]
+
         return value
 
     def completed(self, store, mission_id, implementer="DEV-001"):
@@ -161,6 +184,190 @@ class MissionStoreTests(unittest.TestCase):
             validate_mission_contract(self.contract(validation_commands=[]), ("rvsc",))
         with self.assertRaises(OrchestrationError):
             validate_mission_contract(self.contract(mission_id="OTHER"), ("rvsc",))
+
+    def test_strict_semantic_contract_requires_checks(self):
+        contract = self.contract()
+        contract["requires_semantic_acceptance"] = True
+        contract.pop("acceptance_checks", None)
+
+        with self.assertRaisesRegex(
+            OrchestrationError,
+            "strict semantic mission requires acceptance_checks",
+        ):
+            validate_mission_contract(contract, ("rvsc",))
+
+    def test_strict_semantic_contract_requires_full_criterion_coverage(self):
+        contract = self.contract()
+        contract["requires_semantic_acceptance"] = True
+        contract["acceptance_criteria"] = [
+            "targeted validation passes",
+            "behavior materially changes",
+        ]
+        contract["acceptance_checks"] = [
+            {
+                "criterion_index": 1,
+                "type": "validation_passed",
+                "name": contract["validation_commands"][0]["name"],
+            }
+        ]
+
+        with self.assertRaisesRegex(
+            OrchestrationError,
+            "lack machine-verifiable checks: 2",
+        ):
+            validate_mission_contract(contract, ("rvsc",))
+
+    def test_strict_semantic_contract_is_preserved_at_admission(self):
+        contract = self.contract()
+        contract["requires_semantic_acceptance"] = True
+        contract["acceptance_checks"] = [
+            {
+                "criterion_index": index,
+                "type": "validation_passed",
+                "name": contract["validation_commands"][0]["name"],
+            }
+            for index, _ in enumerate(
+                contract["acceptance_criteria"],
+                start=1,
+            )
+        ]
+
+        validated = validate_mission_contract(contract, ("rvsc",))
+
+        self.assertIs(validated["requires_semantic_acceptance"], True)
+        self.assertEqual(
+            len(validated["acceptance_checks"]),
+            len(validated["acceptance_criteria"]),
+        )
+
+    def test_acceptance_checks_cannot_silently_bypass_strict_mode(self):
+        contract = self.contract(
+            requires_semantic_acceptance=False,
+        )
+        contract["acceptance_checks"] = [
+            {
+                "criterion_index": 1,
+                "type": "validation_passed",
+                "name": contract["validation_commands"][0]["name"],
+            }
+        ]
+
+        with self.assertRaisesRegex(
+            OrchestrationError,
+            "acceptance_checks require requires_semantic_acceptance=true",
+        ):
+            validate_mission_contract(contract, ("rvsc",))
+
+    def test_strict_semantic_contract_rejects_unknown_validation_reference(self):
+        contract = self.contract()
+        contract["requires_semantic_acceptance"] = True
+        contract["acceptance_checks"] = [
+            {
+                "criterion_index": index,
+                "type": "validation_passed",
+                "name": "NOT_DECLARED",
+            }
+            for index, _ in enumerate(
+                contract["acceptance_criteria"],
+                start=1,
+            )
+        ]
+
+        with self.assertRaisesRegex(
+            OrchestrationError,
+            "references unknown validation command",
+        ):
+            validate_mission_contract(contract, ("rvsc",))
+
+    def test_strict_semantic_contract_rejects_unauthorized_path_reference(self):
+        contract = self.contract()
+        contract["requires_semantic_acceptance"] = True
+        contract["acceptance_checks"] = [
+            {
+                "criterion_index": index,
+                "type": "path_changed",
+                "path": "controller/not-authorized.py",
+            }
+            for index, _ in enumerate(
+                contract["acceptance_criteria"],
+                start=1,
+            )
+        ]
+
+        with self.assertRaisesRegex(
+            OrchestrationError,
+            "references unauthorized path",
+        ):
+            validate_mission_contract(contract, ("rvsc",))
+
+    def test_new_contract_admission_requires_strict_semantic_acceptance(self):
+        store = MissionStore()
+        contract = self.contract(
+            requires_semantic_acceptance=False,
+        )
+        contract.pop("acceptance_checks", None)
+
+        with self.assertRaisesRegex(
+            OrchestrationError,
+            "new engineering mission admission requires "
+            "requires_semantic_acceptance=true",
+        ):
+            store.add_contract(
+                contract,
+                supported_projects=("rvsc",),
+            )
+
+    def test_new_strict_contract_is_admitted_with_machine_checks(self):
+        store = MissionStore()
+        contract = self.contract()
+        contract["requires_semantic_acceptance"] = True
+        contract["acceptance_checks"] = [
+            {
+                "criterion_index": index,
+                "type": "validation_passed",
+                "name": contract["validation_commands"][0]["name"],
+            }
+            for index, _ in enumerate(
+                contract["acceptance_criteria"],
+                start=1,
+            )
+        ]
+
+        mission = store.add_contract(
+            contract,
+            supported_projects=("rvsc",),
+        )
+
+        stored = mission.metadata["contract"]
+
+        self.assertIs(
+            stored["requires_semantic_acceptance"],
+            True,
+        )
+        self.assertEqual(
+            len(stored["acceptance_checks"]),
+            len(stored["acceptance_criteria"]),
+        )
+
+    def test_legacy_stored_contract_validation_remains_readable(self):
+        contract = self.contract(
+            requires_semantic_acceptance=False,
+        )
+        contract.pop("acceptance_checks", None)
+
+        validated = validate_mission_contract(
+            contract,
+            ("rvsc",),
+        )
+
+        self.assertIs(
+            validated["requires_semantic_acceptance"],
+            False,
+        )
+        self.assertNotIn(
+            "acceptance_checks",
+            validated,
+        )
 
 
 if __name__ == "__main__":
