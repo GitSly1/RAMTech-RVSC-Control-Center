@@ -298,6 +298,11 @@ def _automatic_recovery_authorization() -> str:
             f"authoritative mission state unavailable: {exc}"
         )
 
+    if mission is None:
+        return fail_closed(
+            f"active mission {active_mission} is absent from authoritative mission store"
+        )
+
     authoritative_state = mission.state
     if isinstance(authoritative_state, MissionState):
         authoritative_state_text = authoritative_state.value
@@ -962,6 +967,31 @@ class GenericWorkerHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    expected_controller_root = os.environ.get("RVSC_RVSC_REPO", "").strip()
+    if not expected_controller_root:
+        raise RuntimeError(
+            "RVSC_RVSC_REPO is required for qualified worker execution"
+        )
+
+    expected_controller_root = Path(expected_controller_root).expanduser().resolve()
+    actual_controller_root = Path(__file__).resolve().parent.parent
+    if actual_controller_root != expected_controller_root:
+        raise RuntimeError(
+            "worker controller provenance mismatch: "
+            f"expected {expected_controller_root}, loaded {actual_controller_root}"
+        )
+    expected_controller_sha = os.environ.get("RVSC_CONTROLLER_SHA", "").strip().lower()
+    verified_controller_sha = os.environ.get("RVSC_VERIFIED_CONTROLLER_SHA", "").strip().lower()
+    if not expected_controller_sha or not verified_controller_sha:
+        raise RuntimeError(
+            "qualified controller revision authority is missing"
+        )
+    if verified_controller_sha != expected_controller_sha:
+        raise RuntimeError(
+            "worker controller revision authority mismatch: "
+            f"expected {expected_controller_sha}, verified {verified_controller_sha}"
+        )
+
     agent = configured_agent()
     host = os.environ.get("RVSC_WORKER_HOST", "127.0.0.1")
     port = int(os.environ.get("RVSC_WORKER_PORT", "8770"))

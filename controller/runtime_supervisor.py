@@ -1053,6 +1053,58 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     store_path = Path(args.mission_store).expanduser() if args.mission_store else production_mission_store_path()
     try:
         if args.action == "run":
+            expected_controller_root = os.environ.get("RVSC_RVSC_REPO", "").strip()
+            if not expected_controller_root:
+                raise RuntimeSupervisorError(
+                    "RVSC_RVSC_REPO is required for qualified runtime execution"
+                )
+
+            expected_controller_root = Path(expected_controller_root).expanduser().resolve()
+            actual_controller_root = Path(__file__).resolve().parent.parent
+            if actual_controller_root != expected_controller_root:
+                raise RuntimeSupervisorError(
+                    "controller runtime provenance mismatch: "
+                    f"expected {expected_controller_root}, loaded {actual_controller_root}"
+                )
+            expected_controller_sha = os.environ.get("RVSC_CONTROLLER_SHA", "").strip().lower()
+            if not expected_controller_sha:
+                raise RuntimeSupervisorError(
+                    "RVSC_CONTROLLER_SHA is required for qualified runtime execution"
+                )
+
+            revision = subprocess.run(
+                ["git", "-C", str(actual_controller_root), "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            actual_controller_sha = revision.stdout.strip().lower()
+            if revision.returncode != 0 or not actual_controller_sha:
+                raise RuntimeSupervisorError(
+                    "unable to establish controller runtime revision"
+                )
+            if actual_controller_sha != expected_controller_sha:
+                raise RuntimeSupervisorError(
+                    "controller runtime revision mismatch: "
+                    f"expected {expected_controller_sha}, loaded {actual_controller_sha}"
+                )
+
+            worktree = subprocess.run(
+                ["git", "-C", str(actual_controller_root), "status", "--porcelain"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if worktree.returncode != 0:
+                raise RuntimeSupervisorError(
+                    "unable to establish controller worktree state"
+                )
+            if worktree.stdout.strip():
+                raise RuntimeSupervisorError(
+                    "controller runtime worktree is not clean"
+                )
+
+            os.environ["RVSC_VERIFIED_CONTROLLER_SHA"] = actual_controller_sha
             repository_mappings = {
                 key: os.environ[key]
                 for key in REPOSITORY_ENV_KEYS
