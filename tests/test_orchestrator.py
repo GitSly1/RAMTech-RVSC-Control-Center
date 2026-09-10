@@ -64,6 +64,206 @@ class MissionStoreTests(unittest.TestCase):
         store.process_qa_outcome("origin", "QA_ACCEPTED", qa_worker="QA-001", evidence={"commit": "abc"})
         self.assertTrue(store.readiness("dependent")[0])
 
+    def test_blocked_mission_can_be_superseded_with_provenance(self):
+        store = MissionStore()
+        mission = store.add_contract(
+            self.contract(wp_id="SUPERSEDE-1"),
+            supported_projects=("rvsc",),
+        )
+        store.transition(
+            mission.mission_id,
+            MissionState.ASSIGNED,
+            worker_id="DEV-001",
+        )
+        store.transition(
+            mission.mission_id,
+            MissionState.RUNNING,
+            worker_id="DEV-001",
+        )
+        store.transition(
+            mission.mission_id,
+            MissionState.BLOCKED,
+            worker_id="DEV-001",
+            reason="historical execution failure",
+        )
+
+        store.transition(
+            mission.mission_id,
+            MissionState.SUPERSEDED,
+            evidence={
+                "reason": "objective independently satisfied",
+                "superseded_by_revision": "abc123",
+                "superseded_by_evidence": {
+                    "qualification": "PASS",
+                    "controller_revision": "abc123",
+                },
+            },
+        )
+
+        durable = store.get(mission.mission_id)
+
+        self.assertEqual(
+            durable.state,
+            MissionState.SUPERSEDED,
+        )
+        self.assertEqual(
+            durable.block_reason,
+            "historical execution failure",
+        )
+        self.assertEqual(
+            durable.metadata["supersession"]["superseded_by_revision"],
+            "abc123",
+        )
+        self.assertEqual(
+            durable.metadata["supersession"]["reason"],
+            "objective independently satisfied",
+        )
+
+    def test_superseded_transition_fails_closed_without_provenance(self):
+        invalid_evidence = (
+            {},
+            {"reason": "resolved"},
+            {
+                "reason": "resolved",
+                "superseded_by_revision": "abc123",
+            },
+            {
+                "reason": "resolved",
+                "superseded_by_revision": "abc123",
+                "superseded_by_evidence": {},
+            },
+        )
+
+        for index, evidence in enumerate(invalid_evidence):
+            with self.subTest(index=index):
+                store = MissionStore()
+                mission = store.add_contract(
+                    self.contract(
+                        wp_id="SUPERSEDE-BAD-%d" % index
+                    ),
+                    supported_projects=("rvsc",),
+                )
+                store.transition(
+                    mission.mission_id,
+                    MissionState.ASSIGNED,
+                    worker_id="DEV-001",
+                )
+                store.transition(
+                    mission.mission_id,
+                    MissionState.RUNNING,
+                    worker_id="DEV-001",
+                )
+                store.transition(
+                    mission.mission_id,
+                    MissionState.BLOCKED,
+                    worker_id="DEV-001",
+                    reason="historical failure",
+                )
+
+                with self.assertRaises(OrchestrationError):
+                    store.transition(
+                        mission.mission_id,
+                        MissionState.SUPERSEDED,
+                        evidence=evidence,
+                    )
+
+                self.assertEqual(
+                    store.get(mission.mission_id).state,
+                    MissionState.BLOCKED,
+                )
+
+    def test_superseded_is_terminal_and_does_not_satisfy_dependency(self):
+        store = MissionStore()
+
+        origin = store.add_contract(
+            self.contract(wp_id="SUPERSEDE-ORIGIN"),
+            supported_projects=("rvsc",),
+        )
+
+        store.add_contract(
+            self.contract(
+                wp_id="SUPERSEDE-DEPENDENT",
+                dependencies=["SUPERSEDE-ORIGIN"],
+            ),
+            supported_projects=("rvsc",),
+        )
+
+        store.transition(
+            origin.mission_id,
+            MissionState.ASSIGNED,
+            worker_id="DEV-001",
+        )
+        store.transition(
+            origin.mission_id,
+            MissionState.RUNNING,
+            worker_id="DEV-001",
+        )
+        store.transition(
+            origin.mission_id,
+            MissionState.BLOCKED,
+            worker_id="DEV-001",
+            reason="historical failure",
+        )
+        store.transition(
+            origin.mission_id,
+            MissionState.SUPERSEDED,
+            evidence={
+                "reason": "objective independently satisfied",
+                "superseded_by_revision": "abc123",
+                "superseded_by_evidence": {
+                    "qualification": "PASS"
+                },
+            },
+        )
+
+        ready, blocker = store.readiness(
+            "SUPERSEDE-DEPENDENT"
+        )
+
+        self.assertFalse(ready)
+        self.assertIn(
+            "SUPERSEDE-ORIGIN:superseded",
+            blocker,
+        )
+
+        for target in (
+            MissionState.QUEUED,
+            MissionState.BLOCKED,
+            MissionState.ACCEPTED,
+        ):
+            with self.subTest(target=target):
+                with self.assertRaises(OrchestrationError):
+                    store.transition(
+                        origin.mission_id,
+                        target,
+                    )
+
+    def test_non_blocked_mission_cannot_be_superseded(self):
+        store = MissionStore()
+
+        mission = store.add_contract(
+            self.contract(wp_id="SUPERSEDE-QUEUED"),
+            supported_projects=("rvsc",),
+        )
+
+        with self.assertRaises(OrchestrationError):
+            store.transition(
+                mission.mission_id,
+                MissionState.SUPERSEDED,
+                evidence={
+                    "reason": "invalid shortcut",
+                    "superseded_by_revision": "abc123",
+                    "superseded_by_evidence": {
+                        "qualification": "PASS"
+                    },
+                },
+            )
+
+        self.assertEqual(
+            store.get(mission.mission_id).state,
+            MissionState.QUEUED,
+        )
+
     def test_dispatch_is_deterministic_and_honors_contract_agent(self):
         store = MissionStore()
         store.add_contract(self.contract(wp_id="later", priority=2), supported_projects=("rvsc",))

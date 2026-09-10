@@ -85,17 +85,19 @@ class MissionState(str, Enum):
     QA_PENDING = "qa_pending"
     ACCEPTED = "accepted"
     REJECTED = "rejected"
+    SUPERSEDED = "superseded"
 
 
 _TRANSITIONS = {
     MissionState.QUEUED: {MissionState.BLOCKED, MissionState.ASSIGNED},
-    MissionState.BLOCKED: {MissionState.QUEUED},
+    MissionState.BLOCKED: {MissionState.QUEUED, MissionState.SUPERSEDED},
     MissionState.ASSIGNED: {MissionState.QUEUED, MissionState.BLOCKED, MissionState.RUNNING},
     MissionState.RUNNING: {MissionState.BLOCKED, MissionState.COMPLETED},
     MissionState.COMPLETED: {MissionState.QA_PENDING},
     MissionState.QA_PENDING: {MissionState.ACCEPTED, MissionState.REJECTED},
     MissionState.ACCEPTED: set(),
     MissionState.REJECTED: {MissionState.ACCEPTED, MissionState.BLOCKED},
+    MissionState.SUPERSEDED: set(),
 }
 
 
@@ -554,6 +556,35 @@ class MissionStore:
             if not reason or not str(reason).strip():
                 raise OrchestrationError("blocked transition requires a reason")
             mission.block_reason = str(reason).strip()
+        elif target == MissionState.SUPERSEDED:
+            supersession = dict(evidence or {})
+            supersession_reason = str(
+                supersession.get("reason") or ""
+            ).strip()
+            superseded_by_revision = str(
+                supersession.get("superseded_by_revision") or ""
+            ).strip()
+            superseded_by_evidence = supersession.get(
+                "superseded_by_evidence"
+            )
+
+            if (
+                not supersession_reason
+                or not superseded_by_revision
+                or not isinstance(superseded_by_evidence, Mapping)
+                or not superseded_by_evidence
+            ):
+                raise OrchestrationError(
+                    "superseded transition requires reason, "
+                    "superseded_by_revision, and non-empty "
+                    "superseded_by_evidence"
+                )
+
+            mission.metadata["supersession"] = {
+                "reason": supersession_reason,
+                "superseded_by_revision": superseded_by_revision,
+                "superseded_by_evidence": dict(superseded_by_evidence),
+            }
         elif target == MissionState.QUEUED:
             mission.assigned_worker = None
             mission.qa_worker = None
