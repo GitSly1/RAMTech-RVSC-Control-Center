@@ -44,6 +44,15 @@ def _repository_key(value: str) -> str:
     return normalized.lower()
 
 
+def _is_absolute_local_repository_context(value: str) -> bool:
+    normalized = value.strip().replace("\\", "/")
+    if not normalized:
+        return False
+    if normalized.startswith("//"):
+        return True
+    return len(normalized) >= 3 and normalized[0].isalpha() and normalized[1] == ":" and normalized[2] == "/"
+
+
 def _repo_root(mission: dict[str, Any]) -> Path:
     project = _mission_text(mission, "engineering_project") or _mission_text(mission, "project")
     project = project.lower()
@@ -51,9 +60,15 @@ def _repo_root(mission: dict[str, Any]) -> Path:
     if mapping is None:
         raise ValueError(f"no controlled repository mapping for QA project {project or '<missing>'}")
     env_name, default, accepted_repositories = mapping
+
     repository = _mission_text(mission, "engineering_repository") or _mission_text(mission, "repository")
-    if repository and _repository_key(repository) not in accepted_repositories:
+    if (
+        repository
+        and not _is_absolute_local_repository_context(repository)
+        and _repository_key(repository) not in accepted_repositories
+    ):
         raise ValueError(f"repository {repository} does not match QA project {project}")
+
     return Path(os.environ.get(env_name, str(default))).resolve()
 
 

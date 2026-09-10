@@ -62,6 +62,30 @@ class GenericQAWorkerTests(unittest.TestCase):
         with patch.dict(os.environ, {"RVSC_SEMANTIQ_REPO": str(self.semantiq)}, clear=False):
             self.assertEqual(_repo_root(self.mission()), self.semantiq.resolve())
 
+    def test_local_logical_repository_context_cannot_redirect_controlled_workspace(self):
+        mission = self.mission()
+        mission["repository"] = r"D:\RAMTech\RAMTech_RVSC_Daniel_Work"
+        mission["engineering_repository"] = r"D:\RAMTech\RAMTech_RVSC_Daniel_Work"
+
+        with patch.dict(os.environ, {"RVSC_SEMANTIQ_REPO": str(self.semantiq)}, clear=False):
+            self.assertEqual(_repo_root(mission), self.semantiq.resolve())
+
+    def test_arbitrary_repository_context_cannot_redirect_controlled_workspace(self):
+        mission = self.mission()
+        mission["repository"] = r"X:\untrusted\redirect"
+        mission["engineering_repository"] = r"X:\untrusted\redirect"
+
+        with patch.dict(os.environ, {"RVSC_SEMANTIQ_REPO": str(self.semantiq)}, clear=False):
+            self.assertEqual(_repo_root(mission), self.semantiq.resolve())
+
+    def test_unsupported_project_still_fails_closed(self):
+        mission = self.mission()
+        mission["project"] = "unsupported"
+        mission["engineering_project"] = "unsupported"
+
+        with self.assertRaisesRegex(ValueError, "no controlled repository mapping"):
+            _repo_root(mission)
+
     def test_acquires_exact_pushed_semantiq_branch_and_commit(self):
         result = self.execute()
         self.assertTrue(result["success"])
