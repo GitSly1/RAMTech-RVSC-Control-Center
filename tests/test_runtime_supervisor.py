@@ -341,6 +341,47 @@ class RuntimeSupervisorTests(unittest.TestCase):
         self.assertEqual(store.get(corrective_id).implementer, "DEV-001")
         self.assertEqual(store.get(corrective_id).qa_worker, "QA-001")
 
+    def test_qa_handoff_response_agent_id_is_independently_attributed(self):
+        store = MissionStore()
+        store.add_contract(self.contract(), supported_projects=("rvsc",))
+        supervisor = self.make_supervisor(
+            store,
+            execute_requester=lambda _config, _payload: {
+                "qa_handoff": {
+                    "dispatch_started": True,
+                    "response": {
+                        "agent_id": "QA-001",
+                        "verdict": "QA_ACCEPTED",
+                    },
+                },
+            },
+        )
+
+        result = supervisor.work_control_once()
+
+        self.assertEqual(result["state"], "ACCEPTED")
+        self.assertEqual(result["evidence"]["qa_worker_id"], "QA-001")
+        self.assertEqual(store.get("WP-1").qa_worker, "QA-001")
+
+    def test_arbitrary_nested_agent_id_is_not_qa_attribution(self):
+        store = MissionStore()
+        store.add_contract(self.contract(), supported_projects=("rvsc",))
+        supervisor = self.make_supervisor(
+            store,
+            execute_requester=lambda _config, _payload: {
+                "agent_id": "DEV-001",
+                "nested": {
+                    "agent_id": "QA-001",
+                    "verdict": "QA_ACCEPTED",
+                },
+            },
+        )
+
+        result = supervisor.work_control_once()
+
+        self.assertEqual(result["state"], "BLOCKED")
+        self.assertIsNone(result["evidence"]["qa_worker_id"])
+
     def test_non_quinn_and_self_qa_are_blocked(self):
         for qa_id in ("DEV-001", "QA-OTHER"):
             with self.subTest(qa_id=qa_id):

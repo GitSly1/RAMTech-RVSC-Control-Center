@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import os
+
 import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from controller import runtime_supervisor
 from types import SimpleNamespace
 from unittest import mock
 
@@ -266,11 +269,28 @@ class RuntimeStartupPreflightTests(unittest.TestCase):
                 "sys.stderr",
                 new_callable=io.StringIO,
             ) as stderr:
-                rc = main([
-                    "run",
-                    "--mission-store",
-                    str(Path(tmp) / "store.json"),
-                ])
+                controller_root = str(
+                    Path(runtime_supervisor.__file__).resolve().parent.parent
+                )
+                with mock.patch.dict(
+                    os.environ,
+                    {
+                        "RVSC_RVSC_REPO": controller_root,
+                        "RVSC_CONTROLLER_SHA": "TEST-CONTROLLER-SHA",
+                    },
+                    clear=False,
+                ), mock.patch(
+                    "controller.runtime_supervisor.subprocess.run"
+                ) as git_run:
+                    git_run.side_effect = (
+                        mock.Mock(returncode=0, stdout="TEST-CONTROLLER-SHA\n", stderr=""),
+                        mock.Mock(returncode=0, stdout="", stderr=""),
+                    )
+                    rc = main([
+                        "run",
+                        "--mission-store",
+                        str(Path(tmp) / "store.json"),
+                    ])
 
         self.assertEqual(rc, 2)
         self.assertIn("profile not ready", stderr.getvalue())

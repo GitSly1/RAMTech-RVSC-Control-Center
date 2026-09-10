@@ -232,7 +232,17 @@ class StartupRecoveryAuthorizationTests(unittest.TestCase):
         ), patch(
             "controller.generic_worker_host._start_automatic_recovery"
         ) as start_recovery:
-            host.main()
+            controller_root = str(Path(host.__file__).resolve().parent.parent)
+            with patch.dict(
+                os.environ,
+                {
+                    "RVSC_RVSC_REPO": controller_root,
+                    "RVSC_CONTROLLER_SHA": "TEST-CONTROLLER-SHA",
+                    "RVSC_VERIFIED_CONTROLLER_SHA": "TEST-CONTROLLER-SHA",
+                },
+                clear=False,
+            ):
+                host.main()
 
         start_recovery.assert_not_called()
         server.serve_forever.assert_called_once_with()
@@ -258,7 +268,17 @@ class StartupRecoveryAuthorizationTests(unittest.TestCase):
         ), patch(
             "controller.generic_worker_host._start_automatic_recovery"
         ) as start_recovery:
-            host.main()
+            controller_root = str(Path(host.__file__).resolve().parent.parent)
+            with patch.dict(
+                os.environ,
+                {
+                    "RVSC_RVSC_REPO": controller_root,
+                    "RVSC_CONTROLLER_SHA": "TEST-CONTROLLER-SHA",
+                    "RVSC_VERIFIED_CONTROLLER_SHA": "TEST-CONTROLLER-SHA",
+                },
+                clear=False,
+            ):
+                host.main()
 
         start_recovery.assert_called_once_with()
         server.serve_forever.assert_called_once_with()

@@ -949,6 +949,12 @@ class RuntimeSupervisor:
             result = self._execute_requester(config, dispatch_contract)
             tokens = self._result_tokens(result)
             qa_id = self._qa_identity(result)
+            if not qa_id and isinstance(result, Mapping):
+                qa_handoff = result.get("qa_handoff")
+                if isinstance(qa_handoff, Mapping):
+                    qa_handoff_response = qa_handoff.get("response")
+                    if isinstance(qa_handoff_response, Mapping) and qa_handoff_response.get("agent_id"):
+                        qa_id = str(qa_handoff_response["agent_id"])
             evidence = {"event": "worker_result", "worker_id": worker_id, "qa_worker_id": qa_id, "result": _plain(result)}
             if ("QA_ACCEPTED" in tokens or "QA_REJECTED" in tokens or "REJECTED" in tokens) and not self._is_quinn(qa_id, worker_id):
                 evidence["reason"] = "QA outcome was not independently attributed to Quinn"
