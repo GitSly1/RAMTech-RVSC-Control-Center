@@ -55,6 +55,338 @@ def _openai_call(api_key: str, prompt: str) -> dict[str, Any]:
         raise RuntimeError(f"OpenAI transport error: {exc.reason}") from exc
 
 
+def _source_locator_catalog(
+    source_files: dict[str, str],
+) -> tuple[
+    dict[str, list[dict[str, Any]]],
+    dict[str, tuple[str, int, int, str]],
+]:
+    """Build controller-owned unique source-span locators from baseline files."""
+    catalog: dict[str, list[dict[str, Any]]] = {}
+    resolver: dict[str, tuple[str, int, int, str]] = {}
+
+    for path in sorted(source_files):
+        content = source_files[path]
+        lines = content.splitlines(keepends=True)
+        if not lines:
+            catalog[path] = []
+            continue
+
+        offsets = [0]
+        for line in lines:
+            offsets.append(offsets[-1] + len(line))
+
+        selected: dict[tuple[int, int], dict[str, Any]] = {}
+        unresolved = set(range(len(lines)))
+        max_window = min(12, len(lines))
+
+        for width in range(1, max_window + 1):
+            if not unresolved:
+                break
+
+            counts: dict[tuple[str, ...], int] = {}
+            for start_line in range(0, len(lines) - width + 1):
+                key = tuple(lines[start_line : start_line + width])
+                counts[key] = counts.get(key, 0) + 1
+
+            resolved_now: set[int] = set()
+            for target_line in sorted(unresolved):
+                candidates: list[tuple[int, int, int]] = []
+                first_start = max(0, target_line - width + 1)
+                last_start = min(target_line, len(lines) - width)
+
+                for start_line in range(first_start, last_start + 1):
+                    end_line = start_line + width
+                    key = tuple(lines[start_line:end_line])
+                    if counts.get(key) != 1:
+                        continue
+                    start = offsets[start_line]
+                    end = offsets[end_line]
+                    candidates.append((end - start, start_line, end_line))
+
+                if not candidates:
+                    continue
+
+                _, start_line, end_line = min(candidates)
+                selected.setdefault(
+                    (start_line, end_line),
+                    {
+                        "line_start": start_line + 1,
+                        "line_end": end_line,
+                    },
+                )
+                resolved_now.add(target_line)
+
+            unresolved -= resolved_now
+
+        # A whole-file span is always an exact unique replacement anchor.
+        # It is the deterministic fallback for repeated regions that cannot
+        # be distinguished by a smaller line-aligned span.
+        if unresolved:
+            selected.setdefault(
+                (0, len(lines)),
+                {
+                    "line_start": 1,
+                    "line_end": len(lines),
+                },
+            )
+
+        entries: list[dict[str, Any]] = []
+        for (start_line, end_line), metadata in sorted(selected.items()):
+            start = offsets[start_line]
+            end = offsets[end_line]
+            text = content[start:end]
+            if not text:
+                continue
+
+            content_hash = hashlib.sha256(
+                text.encode("utf-8")
+            ).hexdigest()
+            identity = f"{path}\0{start}\0{end}\0{content_hash}"
+            anchor_id = hashlib.sha256(
+                identity.encode("utf-8")
+            ).hexdigest()
+
+            existing = resolver.get(anchor_id)
+            locator = (path, start, end, content_hash)
+            if existing is not None and existing != locator:
+                raise RuntimeError("controller source locator collision")
+
+            resolver[anchor_id] = locator
+            entries.append(
+                {
+                    "anchor_id": anchor_id,
+                    "line_start": metadata["line_start"],
+                    "line_end": metadata["line_end"],
+                }
+            )
+
+        catalog[path] = entries
+
+    return catalog, resolver
+
+
+
+def _apply_locator_edits(
+    source_files: dict[str, str],
+    edits: list[dict[str, Any]],
+    *,
+    existing_paths: set[str],
+) -> dict[str, str]:
+    """Compile controller locators to exact edits and apply them sequentially."""
+    if not isinstance(edits, list) or not edits:
+        raise RuntimeError(
+            "bounded edit proposal requires at least one edit"
+        )
+
+    progressive = dict(source_files)
+    present = set(existing_paths)
+    _, baseline_resolver = _source_locator_catalog(source_files)
+    generated_outputs: dict[int, tuple[str, str]] = {}
+
+    for index, edit in enumerate(edits, start=1):
+        if not isinstance(edit, dict):
+            raise RuntimeError(
+                f"bounded edit {index} is not an object"
+            )
+
+        operation = edit.get("operation")
+
+        if operation == "create":
+            if set(edit) != {
+                "operation",
+                "path",
+                "new_text",
+            }:
+                raise RuntimeError(
+                    f"bounded locator edit {index} create must "
+                    "contain exactly operation, path, new_text"
+                )
+
+            path = edit["path"]
+            new_text = edit["new_text"]
+            if not isinstance(path, str):
+                raise RuntimeError(
+                    f"bounded locator edit {index} create path "
+                    "must be a string"
+                )
+            if not isinstance(new_text, str):
+                raise RuntimeError(
+                    f"bounded locator edit {index} create "
+                    "new_text must be a string"
+                )
+
+            progressive = _apply_bounded_edits(
+                progressive,
+                [{"operation": "create", "path": path, "content": new_text}],
+                existing_paths=present,
+            )
+            present.add(path)
+            generated_outputs[index] = (path, new_text)
+            continue
+
+        if operation != "replace":
+            raise RuntimeError(
+                f"bounded edit {index} has unsupported "
+                f"operation: {operation!r}"
+            )
+
+        source_keys = {
+            "operation", "path", "anchor_id", "new_text"
+        }
+        generated_keys = {
+            "operation", "path", "prior_edit", "generated_line", "new_text"
+        }
+        keys = set(edit)
+
+        if keys == source_keys:
+            path = edit["path"]
+            anchor_id = edit["anchor_id"]
+            new_text = edit["new_text"]
+
+            if not isinstance(path, str):
+                raise RuntimeError(
+                    f"bounded locator edit {index} path must be a string"
+                )
+            if path not in source_files:
+                raise RuntimeError(
+                    f"bounded locator edit {index} targets "
+                    f"unauthorized path: {path!r}"
+                )
+            if path not in present:
+                raise RuntimeError(
+                    f"bounded locator edit {index} targets "
+                    f"absent path: {path!r}"
+                )
+            if not isinstance(new_text, str):
+                raise RuntimeError(
+                    f"bounded locator edit {index} new_text "
+                    "must be a string"
+                )
+            if not isinstance(anchor_id, str) or len(anchor_id) != 64:
+                raise RuntimeError(
+                    f"bounded locator edit {index} requires "
+                    "a 64-character anchor_id"
+                )
+
+            locator = baseline_resolver.get(anchor_id)
+            if locator is None:
+                raise RuntimeError(
+                    f"bounded locator edit {index} anchor_id "
+                    "is not valid for the authoritative baseline"
+                )
+
+            locator_path, start, end, expected_hash = locator
+            if locator_path != path:
+                raise RuntimeError(
+                    f"bounded locator edit {index} anchor "
+                    "belongs to a different path"
+                )
+
+            old_text = source_files[path][start:end]
+            actual_hash = hashlib.sha256(
+                old_text.encode("utf-8")
+            ).hexdigest()
+            if actual_hash != expected_hash:
+                raise RuntimeError(
+                    f"bounded locator edit {index} baseline "
+                    "fingerprint mismatch"
+                )
+
+        elif keys == generated_keys:
+            path = edit["path"]
+            prior_edit = edit["prior_edit"]
+            generated_line = edit["generated_line"]
+            new_text = edit["new_text"]
+
+            if not isinstance(path, str):
+                raise RuntimeError(
+                    f"bounded locator edit {index} path must be a string"
+                )
+            if path not in source_files:
+                raise RuntimeError(
+                    f"bounded locator edit {index} targets "
+                    f"unauthorized path: {path!r}"
+                )
+            if path not in present:
+                raise RuntimeError(
+                    f"bounded locator edit {index} targets "
+                    f"absent path: {path!r}"
+                )
+            if not isinstance(new_text, str):
+                raise RuntimeError(
+                    f"bounded locator edit {index} new_text "
+                    "must be a string"
+                )
+            if (
+                not isinstance(prior_edit, int)
+                or isinstance(prior_edit, bool)
+                or prior_edit < 1
+                or prior_edit >= index
+            ):
+                raise RuntimeError(
+                    f"bounded locator edit {index} prior_edit "
+                    "must reference an earlier edit"
+                )
+            if (
+                not isinstance(generated_line, int)
+                or isinstance(generated_line, bool)
+                or generated_line < 1
+            ):
+                raise RuntimeError(
+                    f"bounded locator edit {index} generated_line "
+                    "must be a positive integer"
+                )
+
+            generated = generated_outputs.get(prior_edit)
+            if generated is None:
+                raise RuntimeError(
+                    f"bounded locator edit {index} prior_edit "
+                    "does not expose generated text"
+                )
+            generated_path, generated_text = generated
+            if generated_path != path:
+                raise RuntimeError(
+                    f"bounded locator edit {index} generated "
+                    "reference belongs to a different path"
+                )
+
+            generated_lines = generated_text.splitlines(keepends=True)
+            if generated_line > len(generated_lines):
+                raise RuntimeError(
+                    f"bounded locator edit {index} generated_line "
+                    "is outside prior edit output"
+                )
+            old_text = generated_lines[generated_line - 1]
+            if not old_text:
+                raise RuntimeError(
+                    f"bounded locator edit {index} generated "
+                    "reference is empty"
+                )
+
+        else:
+            raise RuntimeError(
+                f"bounded locator edit {index} replace must contain "
+                "either operation, path, anchor_id, new_text or "
+                "operation, path, prior_edit, generated_line, new_text"
+            )
+
+        progressive = _apply_bounded_edits(
+            progressive,
+            [{
+                "operation": "replace",
+                "path": path,
+                "old_text": old_text,
+                "new_text": new_text,
+            }],
+            existing_paths=present,
+        )
+        generated_outputs[index] = (path, new_text)
+
+    return progressive
+
+
+
 def _apply_bounded_edits(
     source_files: dict[str, str],
     edits: list[dict[str, Any]],
@@ -213,32 +545,35 @@ def _ollama_proposal_schema(allowed_paths: tuple[str, ...]) -> dict[str, Any]:
     if len(set(authorized)) != len(authorized):
         raise ValueError("Ollama proposal schema requires unique allowed paths")
 
-    path_schema = {
-        "type": "string",
-        "enum": list(authorized),
-    }
+    path_schema = {"type": "string", "enum": list(authorized)}
 
-    replace_edit = {
+    source_replace = {
         "type": "object",
         "properties": {
-            "operation": {
-                "type": "string",
-                "enum": ["replace"],
-            },
+            "operation": {"type": "string", "enum": ["replace"]},
             "path": path_schema,
-            "old_text": {
+            "anchor_id": {
                 "type": "string",
-                "minLength": 1,
+                "minLength": 64,
+                "maxLength": 64,
             },
-            "new_text": {
-                "type": "string",
-            },
+            "new_text": {"type": "string"},
+        },
+        "required": ["operation", "path", "anchor_id", "new_text"],
+        "additionalProperties": False,
+    }
+
+    generated_replace = {
+        "type": "object",
+        "properties": {
+            "operation": {"type": "string", "enum": ["replace"]},
+            "path": path_schema,
+            "prior_edit": {"type": "integer", "minimum": 1},
+            "generated_line": {"type": "integer", "minimum": 1},
+            "new_text": {"type": "string"},
         },
         "required": [
-            "operation",
-            "path",
-            "old_text",
-            "new_text",
+            "operation", "path", "prior_edit", "generated_line", "new_text"
         ],
         "additionalProperties": False,
     }
@@ -246,20 +581,11 @@ def _ollama_proposal_schema(allowed_paths: tuple[str, ...]) -> dict[str, Any]:
     create_edit = {
         "type": "object",
         "properties": {
-            "operation": {
-                "type": "string",
-                "enum": ["create"],
-            },
+            "operation": {"type": "string", "enum": ["create"]},
             "path": path_schema,
-            "content": {
-                "type": "string",
-            },
+            "new_text": {"type": "string"},
         },
-        "required": [
-            "operation",
-            "path",
-            "content",
-        ],
+        "required": ["operation", "path", "new_text"],
         "additionalProperties": False,
     }
 
@@ -271,25 +597,19 @@ def _ollama_proposal_schema(allowed_paths: tuple[str, ...]) -> dict[str, Any]:
                 "minItems": 1,
                 "items": {
                     "oneOf": [
-                        replace_edit,
+                        source_replace,
+                        generated_replace,
                         create_edit,
                     ],
                 },
             },
-            "commit_message": {
-                "type": "string",
-            },
-            "engineering_summary": {
-                "type": "string",
-            },
+            "commit_message": {"type": "string"},
+            "engineering_summary": {"type": "string"},
         },
-        "required": [
-            "edits",
-            "commit_message",
-            "engineering_summary",
-        ],
+        "required": ["edits", "commit_message", "engineering_summary"],
         "additionalProperties": False,
     }
+
 
 
 def _ollama_call(prompt: str, allowed_paths: tuple[str, ...]) -> dict[str, Any]:
@@ -537,7 +857,46 @@ def _engineering_prompt(
 ) -> str:
     max_core = _load_text(MAX_CORE_PATH, "Max Platinum Engineering Core")
     readonly_context = context_files or {}
-    return (f"You are {agent_id} {agent_name}, serving as {role} inside RVSC. Operate only within the supplied mission contract. The Max Platinum Engineering Core defines the engineering methodology you must apply; do not quote or summarize it. Mission scope, repository authorization, allowed paths, and safety restrictions override all broader capability language. Never expose credentials or secrets.\n\nMAX PLATINUM ENGINEERING CORE:\n{max_core}\n\nPerform the bounded engineering mission. Independently inspect the supplied baseline files and read-only context files, implement the smallest general solution that satisfies the acceptance criteria, and preserve unrelated behavior. READ-ONLY CONTEXT FILES are evidence only and are never authorized outputs unless the same path is independently present in allowed_paths. Do not claim filesystem actions, tests, commits, pushes, or QA; the controlled runtime performs and records those actions. Return ONLY valid JSON with exactly these top-level keys: edits, commit_message, engineering_summary. edits must be a non-empty ordered list containing only the smallest necessary authorized operations. Use operation=replace for an existing file and provide path, a non-empty old_text anchor that occurs exactly once in the supplied baseline, and new_text. Use operation=create only for an authorized path that is absent from the baseline and provide path and complete content for that new file. Do not return unchanged authorized files. Edits are applied sequentially, so later edits observe earlier edits. Never target READ-ONLY CONTEXT FILES unless that path is independently authorized. No markdown fences.\n\nMISSION:\n{json.dumps(mission, indent=2)}\n\nBASELINE FILES:\n{json.dumps(source_files, indent=2)}\n\nREAD-ONLY CONTEXT FILES:\n{json.dumps(readonly_context, indent=2)}")
+    anchor_catalog, _ = _source_locator_catalog(source_files)
+    return (
+        f"You are {agent_id} {agent_name}, serving as {role} inside RVSC. "
+        "Operate only within the supplied mission contract. The Max Platinum "
+        "Engineering Core defines the engineering methodology you must apply; "
+        "do not quote or summarize it. Mission scope, repository authorization, "
+        "allowed paths, and safety restrictions override all broader capability "
+        "language. Never expose credentials or secrets.\n\n"
+        f"MAX PLATINUM ENGINEERING CORE:\n{max_core}\n\n"
+        "Perform the bounded engineering mission. Independently inspect the "
+        "supplied baseline files and read-only context files, implement the "
+        "smallest general solution that satisfies the acceptance criteria, and "
+        "preserve unrelated behavior. READ-ONLY CONTEXT FILES are evidence only "
+        "and are never authorized outputs unless the same path is independently "
+        "present in allowed_paths. Do not claim filesystem actions, tests, "
+        "commits, pushes, or QA; the controlled runtime performs and records "
+        "those actions. Return ONLY valid JSON with exactly these top-level "
+        "keys: edits, commit_message, engineering_summary. edits must be a "
+        "non-empty ordered list containing only the smallest necessary "
+        "authorized operations. For existing baseline source, use "
+        "operation=replace with path, anchor_id, and new_text. Select anchor_id "
+        "exactly from CONTROLLER SOURCE ANCHORS for that path. Each anchor "
+        "identifies a complete unique baseline span; new_text replaces that "
+        "complete span. Never invent, reconstruct, transform, or approximate an "
+        "anchor_id. For text produced by an earlier edit in the same proposal, "
+        "use operation=replace with path, prior_edit, generated_line, and "
+        "new_text; prior_edit is the one-based earlier edit number and "
+        "generated_line is the one-based whole line in that edit's new_text. "
+        "Do not use a baseline anchor to target generated text. Use "
+        "operation=create only for an authorized path absent from the baseline "
+        "and provide path and complete new_text. Do not return unchanged "
+        "authorized files. Edits are applied sequentially, so later edits "
+        "observe earlier edits. Never target READ-ONLY CONTEXT FILES unless "
+        "that path is independently authorized. No markdown fences.\n\n"
+        f"MISSION:\n{json.dumps(mission, indent=2)}\n\n"
+        f"BASELINE FILES:\n{json.dumps(source_files, indent=2)}\n\n"
+        f"CONTROLLER SOURCE ANCHORS:\n{json.dumps(anchor_catalog, indent=2)}\n\n"
+        f"READ-ONLY CONTEXT FILES:\n{json.dumps(readonly_context, indent=2)}"
+    )
+
 
 
 def _command_value(environment: ControlledEngineeringEnvironment, argv: tuple[str, ...], error_message: str) -> str:
@@ -633,22 +992,37 @@ def _engineering_repair_prompt(
     validation_error: str,
 ) -> str:
     return (
-        _engineering_prompt(agent_id, agent_name, role, mission, source_files, context_files)
+        _engineering_prompt(
+            agent_id, agent_name, role, mission, source_files, context_files
+        )
         + "\n\nREPAIR ATTEMPT: This is the single permitted corrective pass."
         + "\nThe previous proposal failed controlled validation."
         + "\nVALIDATION ERROR:\n"
         + validation_error
         + "\nPREVIOUS FAILED PROPOSAL:\n"
         + json.dumps(failed_proposal, sort_keys=True)
-        + "\nBefore producing the corrected proposal, diagnose the validation failure from the supplied error and previous failed proposal."
-        + "\nIdentify the concrete defective generated code or configuration that caused the validation failure."
-        + "\nRe-evaluate the proposed bounded edits against the supplied BASELINE FILES and READ-ONLY CONTEXT FILES."
-        + "\nFor every repair operation=replace, derive old_text only from the supplied BASELINE FILES as they exist in this repair prompt. Do not derive or copy old_text from new_text or other generated content in the PREVIOUS FAILED PROPOSAL."
-        + "\nBefore returning each repair replace edit, verify that its complete old_text occurs exactly once in that target BASELINE FILE. If no such exact baseline anchor exists, choose a different exact baseline anchor; never invent, approximate, or reconstruct one from the failed generated implementation."
-        + "\nThe corrected proposal must address the observed validation failure; do not merely repeat or cosmetically rewrite the failed construction."
-        + "\nPreserve unrelated behavior and remain strictly within the original mission and allowed_paths authorization."
+        + "\nBefore producing the corrected proposal, diagnose the validation "
+          "failure from the supplied error and previous failed proposal."
+        + "\nIdentify the concrete defective generated code or configuration "
+          "that caused the validation failure."
+        + "\nRe-evaluate the corrected edits against the authoritative "
+          "BASELINE FILES, CONTROLLER SOURCE ANCHORS, and READ-ONLY CONTEXT FILES."
+        + "\nFor baseline source, select anchor_id exactly from CONTROLLER "
+          "SOURCE ANCHORS for the target path; never derive a source locator "
+          "from generated failed output."
+        + "\nFor text created by an earlier edit in the corrected proposal, "
+          "use prior_edit plus generated_line; never copy generated text into a "
+          "baseline locator."
+        + "\nThe controller owns deterministic source location and rejects "
+          "unknown, cross-path, stale, ambiguous, or malformed references."
+        + "\nThe corrected proposal must address the observed validation "
+          "failure; do not merely repeat or cosmetically rewrite the failed "
+          "construction."
+        + "\nPreserve unrelated behavior and remain strictly within the "
+          "original mission and allowed_paths authorization."
         + "\nReturn one corrected proposal using the exact same JSON contract."
     )
+
 
 
 def _read_context_files(repo_root: Path, mission: dict[str, Any]) -> dict[str, str]:
@@ -690,38 +1064,30 @@ def _proposal_diagnostics(
 
         operation = edit.get("operation")
         edit_path = edit.get("path")
-
         item["operation"] = (
             operation if isinstance(operation, str) else "invalid"
         )
-
         if isinstance(edit_path, str):
             item["path"] = edit_path
 
-        if operation == "replace":
-            old_text = edit.get("old_text")
-            new_text = edit.get("new_text")
+        anchor_id = edit.get("anchor_id")
+        if isinstance(anchor_id, str):
+            item["anchor_id"] = anchor_id
 
-            if isinstance(old_text, str):
-                item["old_text_length"] = len(old_text)
-                item["old_text_sha256"] = hashlib.sha256(
-                    old_text.encode("utf-8")
-                ).hexdigest()
+        prior_edit = edit.get("prior_edit")
+        if isinstance(prior_edit, int) and not isinstance(prior_edit, bool):
+            item["prior_edit"] = prior_edit
 
-            if isinstance(new_text, str):
-                item["new_text_length"] = len(new_text)
-                item["new_text_sha256"] = hashlib.sha256(
-                    new_text.encode("utf-8")
-                ).hexdigest()
+        generated_line = edit.get("generated_line")
+        if isinstance(generated_line, int) and not isinstance(generated_line, bool):
+            item["generated_line"] = generated_line
 
-        elif operation == "create":
-            content = edit.get("content")
-
-            if isinstance(content, str):
-                item["content_length"] = len(content)
-                item["content_sha256"] = hashlib.sha256(
-                    content.encode("utf-8")
-                ).hexdigest()
+        new_text = edit.get("new_text")
+        if isinstance(new_text, str):
+            item["new_text_length"] = len(new_text)
+            item["new_text_sha256"] = hashlib.sha256(
+                new_text.encode("utf-8")
+            ).hexdigest()
 
         diagnostic_edits.append(item)
 
@@ -732,6 +1098,7 @@ def _proposal_diagnostics(
         "edit_count": len(edits),
         "edits": diagnostic_edits,
     }
+
 
 
 def execute_mission(*, agent_id: str, agent_name: str, role: str, mission: dict[str, Any], checkpoint: CheckpointReporter | None = None, persist_result: ResultReporter | None = None, proposal_diagnostic: ProposalDiagnosticReporter | None = None) -> dict[str, Any]:
@@ -822,7 +1189,7 @@ def execute_mission(*, agent_id: str, agent_name: str, role: str, mission: dict[
             )
         )
 
-    files = _apply_bounded_edits(
+    files = _apply_locator_edits(
         source_files,
         edits,
         existing_paths=existing_paths,
@@ -981,7 +1348,7 @@ def execute_mission(*, agent_id: str, agent_name: str, role: str, mission: dict[
                 )
 
             try:
-                files = _apply_bounded_edits(
+                files = _apply_locator_edits(
                     source_files,
                     repair_edits,
                     existing_paths=existing_paths,

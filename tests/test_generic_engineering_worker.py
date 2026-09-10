@@ -9,7 +9,7 @@ from unittest.mock import Mock, call, patch
 
 from controller.engineering_environment import EngineeringEnvironmentError
 from controller.engineering_runner import EngineeringValidationError
-from controller.generic_engineering_worker import _proposal_diagnostics, _apply_bounded_edits, _budget_context_files, _bounded_context_text, _configure_git_identity, _git_identity, _ollama_call, _ollama_proposal_schema, _engineering_repair_prompt, _read_context_files, _repo_root, _validations, _worker_request, execute_mission
+from controller.generic_engineering_worker import _proposal_diagnostics, _apply_bounded_edits, _apply_locator_edits, _source_locator_catalog, _budget_context_files, _bounded_context_text, _configure_git_identity, _git_identity, _ollama_call, _ollama_proposal_schema, _engineering_repair_prompt, _read_context_files, _repo_root, _validations, _worker_request, execute_mission
 
 
 class GenericEngineeringWorkerTests(unittest.TestCase):
@@ -336,6 +336,104 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
                 existing_paths={"source.py", "outside.py"},
             )
 
+    def test_source_locator_catalog_uses_unique_span_fallback_for_repeated_lines(self):
+        source = {"source.py": "VALUE\nVALUE\n"}
+        catalog, resolver = _source_locator_catalog(source)
+
+        self.assertEqual(len(catalog["source.py"]), 1)
+        anchor = catalog["source.py"][0]
+        self.assertEqual(anchor["line_start"], 1)
+        self.assertEqual(anchor["line_end"], 2)
+        self.assertIn(anchor["anchor_id"], resolver)
+
+        result = _apply_locator_edits(
+            source,
+            [{
+                "operation": "replace",
+                "path": "source.py",
+                "anchor_id": anchor["anchor_id"],
+                "new_text": "VALUE\nOTHER\n",
+            }],
+            existing_paths={"source.py"},
+        )
+        self.assertEqual(result["source.py"], "VALUE\nOTHER\n")
+
+    def test_locator_edits_preserve_independent_baseline_anchor_after_prior_edit(self):
+        source = {"source.py": "A = 1\nB = 1\n"}
+        catalog, _ = _source_locator_catalog(source)
+        anchors = {
+            (item["line_start"], item["line_end"]): item["anchor_id"]
+            for item in catalog["source.py"]
+        }
+
+        result = _apply_locator_edits(
+            source,
+            [
+                {
+                    "operation": "replace",
+                    "path": "source.py",
+                    "anchor_id": anchors[(1, 1)],
+                    "new_text": "A = 2\n",
+                },
+                {
+                    "operation": "replace",
+                    "path": "source.py",
+                    "anchor_id": anchors[(2, 2)],
+                    "new_text": "B = 2\n",
+                },
+            ],
+            existing_paths={"source.py"},
+        )
+        self.assertEqual(result["source.py"], "A = 2\nB = 2\n")
+
+    def test_locator_edits_support_generated_line_reference(self):
+        source = {"source.py": "VALUE = 1\n"}
+        catalog, _ = _source_locator_catalog(source)
+        anchor_id = catalog["source.py"][0]["anchor_id"]
+
+        result = _apply_locator_edits(
+            source,
+            [
+                {
+                    "operation": "replace",
+                    "path": "source.py",
+                    "anchor_id": anchor_id,
+                    "new_text": "VALUE = 2\n",
+                },
+                {
+                    "operation": "replace",
+                    "path": "source.py",
+                    "prior_edit": 1,
+                    "generated_line": 1,
+                    "new_text": "VALUE = 3\n",
+                },
+            ],
+            existing_paths={"source.py"},
+        )
+        self.assertEqual(result["source.py"], "VALUE = 3\n")
+
+    def test_locator_create_then_generated_line_replace(self):
+        source = {"new.py": ""}
+        result = _apply_locator_edits(
+            source,
+            [
+                {
+                    "operation": "create",
+                    "path": "new.py",
+                    "new_text": "VALUE = 1\n",
+                },
+                {
+                    "operation": "replace",
+                    "path": "new.py",
+                    "prior_edit": 1,
+                    "generated_line": 1,
+                    "new_text": "VALUE = 2\n",
+                },
+            ],
+            existing_paths=set(),
+        )
+        self.assertEqual(result["new.py"], "VALUE = 2\n")
+
     def test_ollama_proposal_schema_requires_exact_engineering_contract(self):
         allowed_paths = ("controller/a.py", "tests/test_a.py")
         schema = _ollama_proposal_schema(allowed_paths)
@@ -364,12 +462,16 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
         self.assertEqual(edits_schema["minItems"], 1)
 
         variants = edits_schema["items"]["oneOf"]
-        self.assertEqual(len(variants), 2)
+        self.assertEqual(len(variants), 3)
 
-        replace_schema, create_schema = variants
+        source_replace, generated_replace, create_schema = variants
 
         self.assertEqual(
-            replace_schema["properties"]["operation"]["enum"],
+            source_replace["properties"]["operation"]["enum"],
+            ["replace"],
+        )
+        self.assertEqual(
+            generated_replace["properties"]["operation"]["enum"],
             ["replace"],
         )
         self.assertEqual(
@@ -387,26 +489,40 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
             )
 
         self.assertEqual(
-            replace_schema["required"],
+            source_replace["required"],
+            ["operation", "path", "anchor_id", "new_text"],
+        )
+        self.assertEqual(
+            source_replace["properties"]["anchor_id"]["minLength"],
+            64,
+        )
+        self.assertEqual(
+            source_replace["properties"]["anchor_id"]["maxLength"],
+            64,
+        )
+
+        self.assertEqual(
+            generated_replace["required"],
             [
                 "operation",
                 "path",
-                "old_text",
+                "prior_edit",
+                "generated_line",
                 "new_text",
             ],
         )
         self.assertEqual(
-            replace_schema["properties"]["old_text"]["minLength"],
+            generated_replace["properties"]["prior_edit"]["minimum"],
+            1,
+        )
+        self.assertEqual(
+            generated_replace["properties"]["generated_line"]["minimum"],
             1,
         )
 
         self.assertEqual(
             create_schema["required"],
-            [
-                "operation",
-                "path",
-                "content",
-            ],
+            ["operation", "path", "new_text"],
         )
 
         self.assertEqual(
@@ -460,7 +576,7 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
             schema["properties"]["edits"]["items"]["oneOf"]
         )
 
-        self.assertEqual(len(variants), 2)
+        self.assertEqual(len(variants), 3)
 
         for variant in variants:
             self.assertEqual(
@@ -514,7 +630,7 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
             {"source.py": "baseline\n"},
             {"context.py": "reference\n"},
             {
-                "edits": [{"operation": "replace", "path": "source.py", "old_text": "baseline\n", "new_text": "from source import broken\n"}],
+                "edits": [{"operation": "replace", "path": "source.py", "anchor_id": "9deff090fb655aae84b58d73ea7179b3fa9b6628099ec3d53edc2f1acf3882c1", "new_text": "from source import broken\n"}],
                 "commit_message": "failed",
                 "engineering_summary": "failed",
             },
@@ -526,10 +642,10 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
         self.assertIn("BASELINE FILES", prompt)
         self.assertIn("READ-ONLY CONTEXT FILES", prompt)
         self.assertIn("do not merely repeat", prompt)
-        self.assertIn("derive old_text only from the supplied BASELINE FILES", prompt)
-        self.assertIn("Do not derive or copy old_text from new_text", prompt)
-        self.assertIn("complete old_text occurs exactly once", prompt)
-        self.assertIn("never invent, approximate, or reconstruct", prompt)
+        self.assertIn("select anchor_id exactly from CONTROLLER SOURCE ANCHORS", prompt)
+        self.assertIn("never derive a source locator from generated failed output", prompt)
+        self.assertIn("prior_edit plus generated_line", prompt)
+        self.assertIn("controller owns deterministic source location", prompt)
         self.assertIn("ImportError: circular import in source.py", prompt)
         self.assertIn("from source import broken", prompt)
     def test_validations_reject_more_than_two_commands(self):
@@ -598,7 +714,7 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
                     "content": [
                         {
                             "type": "output_text",
-                            "text": '{"edits":[{"operation":"replace","path":"source.py","old_text":"baseline\\n","new_text":"changed\\n"}],"commit_message":"test","engineering_summary":"test"}',
+                            "text": '{"edits":[{"operation":"replace","path":"source.py","anchor_id":"9deff090fb655aae84b58d73ea7179b3fa9b6628099ec3d53edc2f1acf3882c1","new_text":"changed\\n"}],"commit_message":"test","engineering_summary":"test"}',
                         }
                     ],
                 }
@@ -698,7 +814,7 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
                 "type": "message",
                 "content": [{
                     "type": "output_text",
-                    "text": '{"edits":[{"operation":"replace","path":"source.py","old_text":"baseline\\n","new_text":"broken\\n"}],"commit_message":"first","engineering_summary":"first"}',
+                    "text": '{"edits":[{"operation":"replace","path":"source.py","anchor_id":"9deff090fb655aae84b58d73ea7179b3fa9b6628099ec3d53edc2f1acf3882c1","new_text":"broken\\n"}],"commit_message":"first","engineering_summary":"first"}',
                 }],
             }],
         }
@@ -710,7 +826,7 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
                 "type": "message",
                 "content": [{
                     "type": "output_text",
-                    "text": '{"edits":[{"operation":"replace","path":"source.py","old_text":"baseline\\n","new_text":"fixed\\n"}],"commit_message":"repaired","engineering_summary":"repaired"}',
+                    "text": '{"edits":[{"operation":"replace","path":"source.py","anchor_id":"9deff090fb655aae84b58d73ea7179b3fa9b6628099ec3d53edc2f1acf3882c1","new_text":"fixed\\n"}],"commit_message":"repaired","engineering_summary":"repaired"}',
                 }],
             }],
         }
@@ -800,7 +916,7 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
                 "type": "message",
                 "content": [{
                     "type": "output_text",
-                    "text": '{"edits":[{"operation":"replace","path":"source.py","old_text":"baseline\\n","new_text":"broken-1\\n"}],"commit_message":"first","engineering_summary":"first"}',
+                    "text": '{"edits":[{"operation":"replace","path":"source.py","anchor_id":"9deff090fb655aae84b58d73ea7179b3fa9b6628099ec3d53edc2f1acf3882c1","new_text":"broken-1\\n"}],"commit_message":"first","engineering_summary":"first"}',
                 }],
             }],
         }
@@ -812,7 +928,7 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
                 "type": "message",
                 "content": [{
                     "type": "output_text",
-                    "text": '{"edits":[{"operation":"replace","path":"source.py","old_text":"baseline\\n","new_text":"broken-2\\n"}],"commit_message":"repair","engineering_summary":"repair"}',
+                    "text": '{"edits":[{"operation":"replace","path":"source.py","anchor_id":"9deff090fb655aae84b58d73ea7179b3fa9b6628099ec3d53edc2f1acf3882c1","new_text":"broken-2\\n"}],"commit_message":"repair","engineering_summary":"repair"}',
                 }],
             }],
         }
@@ -897,7 +1013,7 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
                     "type": "output_text",
                     "text": (
                         '{"edits":[{"operation":"replace",'
-                        '"path":"source.py","old_text":"baseline\\n",'
+                        '"path":"source.py","anchor_id":"9deff090fb655aae84b58d73ea7179b3fa9b6628099ec3d53edc2f1acf3882c1",'
                         '"new_text":"broken-generated\\n"}],'
                         '"commit_message":"first",'
                         '"engineering_summary":"first"}'
@@ -917,7 +1033,7 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
                     "text": (
                         '{"edits":[{"operation":"replace",'
                         '"path":"source.py",'
-                        '"old_text":"broken-generated\\n",'
+                        '"anchor_id":"0000000000000000000000000000000000000000000000000000000000000000",'
                         '"new_text":"fixed\\n"}],'
                         '"commit_message":"repair",'
                         '"engineering_summary":"repair"}'
@@ -953,7 +1069,7 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             RuntimeError,
-            r"bounded edit 1 anchor occurrence count for source\.py: 0",
+            r"bounded locator edit 1 anchor_id is not valid for the authoritative baseline",
         ):
             execute_mission(
                 agent_id="DEV-001",
@@ -1008,8 +1124,8 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
         self.assertTrue(
             any(
                 item.startswith(
-                    "reason:bounded edit 1 anchor "
-                    "occurrence count for source.py: 0"
+                    "reason:bounded locator edit 1 anchor_id "
+                    "is not valid for the authoritative baseline"
                 )
                 for item in rejection_evidence
             )
@@ -1048,7 +1164,7 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
                 "type": "message",
                 "content": [{
                     "type": "output_text",
-                    "text": '{"edits":[{"operation":"replace","path":"source.py","old_text":"baseline\\n","new_text":"changed\\n"}],"commit_message":"test","engineering_summary":"test"}',
+                    "text": '{"edits":[{"operation":"replace","path":"source.py","anchor_id":"9deff090fb655aae84b58d73ea7179b3fa9b6628099ec3d53edc2f1acf3882c1","new_text":"changed\\n"}],"commit_message":"test","engineering_summary":"test"}',
                 }],
             }],
         }
@@ -1166,7 +1282,7 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
                             {
                                 "type": "output_text",
                                 "text": (
-                                    '{"edits":[{"operation":"create","path":"new_file.py","content":"VALUE = 1\\n"}],"commit_message":"create authorized file","engineering_summary":"create authorized file"}'
+                                    '{"edits":[{"operation":"create","path":"new_file.py","new_text":"VALUE = 1\\n"}],"commit_message":"create authorized file","engineering_summary":"create authorized file"}'
                                 ),
                             }
                         ],
@@ -1391,7 +1507,7 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
                                 {
                                     "type": "output_text",
                                     "text": (
-                                        '{"edits":[{"operation":"create","path":"new_file.py","content":"VALUE = 1\\n"}],"commit_message":"use runtime context","engineering_summary":"bounded context"}'
+                                        '{"edits":[{"operation":"create","path":"new_file.py","new_text":"VALUE = 1\\n"}],"commit_message":"use runtime context","engineering_summary":"bounded context"}'
                                     ),
                                 }
                             ],
@@ -1488,7 +1604,7 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
                                 {
                                     "type": "output_text",
                                     "text": (
-                                        '{"edits":[{"operation":"replace","path":"controller/runtime_supervisor.py","old_text":"STATUS = \'running\'\\n","new_text":"forbidden\\n"}],"commit_message":"bad scope","engineering_summary":"bad scope"}'
+                                        '{"edits":[{"operation":"replace","path":"controller/runtime_supervisor.py","anchor_id":"0000000000000000000000000000000000000000000000000000000000000000","new_text":"forbidden\\n"}],"commit_message":"bad scope","engineering_summary":"bad scope"}'
                                     ),
                                 }
                             ],
@@ -1644,7 +1760,7 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
         ]
         environment.git_status.return_value = Mock(returncode=0, stdout="", stderr="")
 
-        provider_call.return_value = ({'id': 'response-compact-test', 'status': 'completed', 'model': 'test-model', 'output': [{'type': 'message', 'content': [{'type': 'output_text', 'text': '{"edits":[{"operation":"replace","path":"source.py","old_text":"baseline\\n","new_text":"changed\\n"}],"commit_message":"subset edit","engineering_summary":"touch one authorized path"}'}]}]}, "test-provider")
+        provider_call.return_value = ({'id': 'response-compact-test', 'status': 'completed', 'model': 'test-model', 'output': [{'type': 'message', 'content': [{'type': 'output_text', 'text': '{"edits":[{"operation":"replace","path":"source.py","anchor_id":"9deff090fb655aae84b58d73ea7179b3fa9b6628099ec3d53edc2f1acf3882c1","new_text":"changed\\n"}],"commit_message":"subset edit","engineering_summary":"touch one authorized path"}'}]}]}, "test-provider")
 
         mission = {
             "agent_id": 'DEV-001',
@@ -1749,13 +1865,13 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
                 {
                     "operation": "replace",
                     "path": "controller/example.py",
-                    "old_text": "same",
-                    "new_text": "same",
+                    "anchor_id": "a" * 64,
+                    "new_text": "changed",
                 },
                 {
                     "operation": "create",
                     "path": "tests/example.py",
-                    "content": "print('ok')\n",
+                    "new_text": "print('ok')\n",
                 },
             ],
         )
@@ -1773,19 +1889,14 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
 
         self.assertEqual(replace["operation"], "replace")
         self.assertEqual(create["operation"], "create")
-        self.assertEqual(
-            replace["old_text_sha256"],
-            replace["new_text_sha256"],
-        )
-        self.assertEqual(
-            replace["old_text_length"],
-            replace["new_text_length"],
-        )
+        self.assertEqual(replace["anchor_id"], "a" * 64)
+        self.assertEqual(replace["new_text_length"], len("changed"))
+        self.assertIn("new_text_sha256", replace)
+        self.assertEqual(create["new_text_length"], len("print('ok')\n"))
+        self.assertIn("new_text_sha256", create)
 
         serialized = repr(diagnostic)
-        self.assertNotIn("'old_text'", serialized)
-        self.assertNotIn("'new_text'", serialized)
-        self.assertNotIn("'content'", serialized)
+        self.assertNotIn("'new_text':", serialized)
 
 
 
