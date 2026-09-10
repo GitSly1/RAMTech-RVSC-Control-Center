@@ -72,6 +72,31 @@ class MaxPlatinumEngineeringCoreTests(unittest.TestCase):
             self.text,
         )
 
+    def test_reasoning_to_implementation_construction_is_explicit(self) -> None:
+        self.assertIn("Reasoning-to-implementation construction discipline", self.text)
+        self.assertIn(
+            "treat the selected controller anchor as the complete source span that will be removed",
+            self.text,
+        )
+        self.assertIn(
+            "make `new_text` the complete replacement for that span, not an insertion, suffix, prefix, diff fragment, commentary, or concatenation with the removed source",
+            self.text,
+        )
+        self.assertIn(
+            "declared solution → exact replacement text → expected resulting source",
+            self.text,
+        )
+
+    def test_malformed_generated_source_is_classified_as_construction_failure(self) -> None:
+        self.assertIn(
+            "A validation failure caused by malformed generated source is an implementation-construction failure, not evidence that the root cause was wrong.",
+            self.text,
+        )
+        self.assertIn(
+            "correct the first construction divergence before reconsidering the causal model",
+            self.text,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
