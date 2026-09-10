@@ -538,6 +538,196 @@ def _apply_bounded_edits(
 
     return result
 
+
+def _evaluate_acceptance_contract(
+    mission: dict[str, Any],
+    baseline_files: dict[str, str],
+    result_files: dict[str, str],
+) -> tuple[str, ...]:
+    """Evaluate controller-owned machine-verifiable acceptance checks."""
+
+    criteria = mission.get("acceptance_criteria")
+    if not isinstance(criteria, list):
+        criteria = []
+
+    strict = bool(
+        mission.get("requires_semantic_acceptance", False)
+    )
+
+    if not strict:
+        return ("semantic_acceptance:not_required",)
+
+    checks = mission.get("acceptance_checks")
+
+    if not criteria:
+        raise EngineeringValidationError(
+            "semantic acceptance requires acceptance_criteria"
+        )
+
+    if not isinstance(checks, list) or not checks:
+        raise EngineeringValidationError(
+            "semantic acceptance requires acceptance_checks"
+        )
+
+    validation_names: set[str] = set()
+
+    raw_validations = mission.get("validation_commands")
+
+    if isinstance(raw_validations, list):
+        for item in raw_validations:
+            if isinstance(item, dict):
+                name = str(item.get("name", "")).strip()
+
+                if name:
+                    validation_names.add(name)
+
+    covered: set[int] = set()
+    evidence: list[str] = []
+
+    for position, check in enumerate(checks, start=1):
+
+        if not isinstance(check, dict):
+            raise EngineeringValidationError(
+                f"acceptance check {position} must be an object"
+            )
+
+        try:
+            criterion_index = int(
+                check.get("criterion_index")
+            )
+        except (TypeError, ValueError):
+            raise EngineeringValidationError(
+                f"acceptance check {position} requires criterion_index"
+            )
+
+        if (
+            criterion_index < 1
+            or criterion_index > len(criteria)
+        ):
+            raise EngineeringValidationError(
+                f"acceptance check {position} criterion_index is out of range"
+            )
+
+        kind = str(check.get("type", "")).strip()
+
+        if not kind:
+            raise EngineeringValidationError(
+                f"acceptance check {position} requires type"
+            )
+
+        if kind == "validation_passed":
+
+            name = str(check.get("name", "")).strip()
+
+            if not name or name not in validation_names:
+                raise EngineeringValidationError(
+                    f"acceptance check {position} references unknown validation"
+                )
+
+            evidence.append(
+                "semantic_acceptance:"
+                f"criterion:{criterion_index}:validation:{name}"
+            )
+
+        elif kind == "path_changed":
+
+            path = str(check.get("path", "")).strip()
+
+            if (
+                path not in baseline_files
+                or path not in result_files
+            ):
+                raise EngineeringValidationError(
+                    f"acceptance check {position} references unavailable path"
+                )
+
+            if baseline_files[path] == result_files[path]:
+                raise EngineeringValidationError(
+                    "acceptance criterion "
+                    f"{criterion_index} requires changed path {path}"
+                )
+
+            evidence.append(
+                "semantic_acceptance:"
+                f"criterion:{criterion_index}:path_changed:{path}"
+            )
+
+        elif kind == "text_contains":
+
+            path = str(check.get("path", "")).strip()
+            text = check.get("text")
+
+            if (
+                path not in result_files
+                or not isinstance(text, str)
+                or not text
+            ):
+                raise EngineeringValidationError(
+                    f"acceptance check {position} has invalid text_contains contract"
+                )
+
+            if text not in result_files[path]:
+                raise EngineeringValidationError(
+                    "acceptance criterion "
+                    f"{criterion_index} required text is absent from {path}"
+                )
+
+            evidence.append(
+                "semantic_acceptance:"
+                f"criterion:{criterion_index}:text_contains:{path}"
+            )
+
+        elif kind == "text_not_contains":
+
+            path = str(check.get("path", "")).strip()
+            text = check.get("text")
+
+            if (
+                path not in result_files
+                or not isinstance(text, str)
+                or not text
+            ):
+                raise EngineeringValidationError(
+                    f"acceptance check {position} has invalid text_not_contains contract"
+                )
+
+            if text in result_files[path]:
+                raise EngineeringValidationError(
+                    "acceptance criterion "
+                    f"{criterion_index} prohibited text remains in {path}"
+                )
+
+            evidence.append(
+                "semantic_acceptance:"
+                f"criterion:{criterion_index}:text_not_contains:{path}"
+            )
+
+        else:
+            raise EngineeringValidationError(
+                f"acceptance check {position} uses unsupported type {kind}"
+            )
+
+        covered.add(criterion_index)
+
+    required = set(range(1, len(criteria) + 1))
+    missing = sorted(required - covered)
+
+    if missing:
+        raise EngineeringValidationError(
+            "semantic acceptance criteria lack "
+            "machine-verifiable checks: "
+            + ",".join(str(value) for value in missing)
+        )
+
+    evidence.append(
+        f"semantic_acceptance:criteria_verified:{len(criteria)}"
+    )
+    evidence.append("semantic_acceptance:passed")
+
+    return tuple(evidence)
+
+
+
 def _ollama_proposal_schema(allowed_paths: tuple[str, ...]) -> dict[str, Any]:
     authorized = tuple(str(path) for path in allowed_paths)
     if not authorized:
@@ -873,8 +1063,12 @@ def _engineering_prompt(
         "and are never authorized outputs unless the same path is independently "
         "present in allowed_paths. Do not claim filesystem actions, tests, "
         "commits, pushes, or QA; the controlled runtime performs and records "
-        "those actions. Return ONLY valid JSON with exactly these top-level "
-        "keys: edits, commit_message, engineering_summary. edits must be a "
+        "those actions. When requires_semantic_acceptance is true, the "
+        "controller independently evaluates acceptance_checks after command "
+        "validation and before commit; do not claim or fabricate semantic "
+        "acceptance evidence. Return ONLY valid JSON with exactly these "
+        "top-level keys: edits, commit_message, engineering_summary. edits "
+        "must be a "
         "non-empty ordered list containing only the smallest necessary "
         "authorized operations. For existing baseline source, use "
         "operation=replace with path, anchor_id, and new_text. Select anchor_id "
@@ -1232,6 +1426,20 @@ def execute_mission(*, agent_id: str, agent_name: str, role: str, mission: dict[
                     "tests_passed",
                     validations + (f"run_id:{run_id}",),
                 )
+
+            semantic_evidence = _evaluate_acceptance_contract(
+                mission,
+                source_files,
+                files,
+            )
+            evidence.extend(semantic_evidence)
+
+            if checkpoint:
+                checkpoint(
+                    "semantic_acceptance_passed",
+                    semantic_evidence + (f"run_id:{run_id}",),
+                )
+
             break
 
         except Exception as exc:

@@ -9,7 +9,7 @@ from unittest.mock import Mock, call, patch
 
 from controller.engineering_environment import EngineeringEnvironmentError
 from controller.engineering_runner import EngineeringValidationError
-from controller.generic_engineering_worker import _proposal_diagnostics, _apply_bounded_edits, _apply_locator_edits, _source_locator_catalog, _budget_context_files, _bounded_context_text, _configure_git_identity, _git_identity, _ollama_call, _ollama_proposal_schema, _engineering_repair_prompt, _read_context_files, _repo_root, _validations, _worker_request, execute_mission
+from controller.generic_engineering_worker import _evaluate_acceptance_contract, _proposal_diagnostics, _apply_bounded_edits, _apply_locator_edits, _source_locator_catalog, _budget_context_files, _bounded_context_text, _configure_git_identity, _git_identity, _ollama_call, _ollama_proposal_schema, _engineering_repair_prompt, _read_context_files, _repo_root, _validations, _worker_request, execute_mission
 
 
 class GenericEngineeringWorkerTests(unittest.TestCase):
@@ -1898,6 +1898,213 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
         serialized = repr(diagnostic)
         self.assertNotIn("'new_text':", serialized)
 
+
+
+
+class SemanticAcceptanceGateTests(unittest.TestCase):
+
+    def test_semantic_acceptance_requires_checks_in_strict_mode(self):
+        mission = {
+            "requires_semantic_acceptance": True,
+            "acceptance_criteria": [
+                "behavior must change"
+            ],
+            "validation_commands": [
+                {
+                    "name": "TARGETED",
+                    "argv": [
+                        "python",
+                        "-m",
+                        "unittest",
+                    ],
+                }
+            ],
+        }
+
+        with self.assertRaisesRegex(
+            EngineeringValidationError,
+            "requires acceptance_checks",
+        ):
+            _evaluate_acceptance_contract(
+                mission,
+                {"source.py": "OLD = True\n"},
+                {"source.py": "OLD = True\n"},
+            )
+
+    def test_semantic_acceptance_rejects_uncovered_criterion(self):
+        mission = {
+            "requires_semantic_acceptance": True,
+            "acceptance_criteria": [
+                "targeted validation passes",
+                "behavior materially changes",
+            ],
+            "validation_commands": [
+                {
+                    "name": "TARGETED",
+                    "argv": [
+                        "python",
+                        "-m",
+                        "unittest",
+                    ],
+                }
+            ],
+            "acceptance_checks": [
+                {
+                    "criterion_index": 1,
+                    "type": "validation_passed",
+                    "name": "TARGETED",
+                }
+            ],
+        }
+
+        with self.assertRaisesRegex(
+            EngineeringValidationError,
+            "lack machine-verifiable checks: 2",
+        ):
+            _evaluate_acceptance_contract(
+                mission,
+                {"source.py": "OLD = True\n"},
+                {"source.py": "OLD = False\n"},
+            )
+
+    def test_semantic_acceptance_rejects_cosmetic_change(self):
+        mission = {
+            "requires_semantic_acceptance": True,
+            "acceptance_criteria": [
+                "targeted validation passes",
+                "legacy rejection is removed",
+            ],
+            "validation_commands": [
+                {
+                    "name": "TARGETED",
+                    "argv": [
+                        "python",
+                        "-m",
+                        "unittest",
+                    ],
+                }
+            ],
+            "acceptance_checks": [
+                {
+                    "criterion_index": 1,
+                    "type": "validation_passed",
+                    "name": "TARGETED",
+                },
+                {
+                    "criterion_index": 2,
+                    "type": "text_not_contains",
+                    "path": "controller/generic_qa_worker.py",
+                    "text": "repository does not match QA project",
+                },
+            ],
+        }
+
+        baseline = {
+            "controller/generic_qa_worker.py":
+                "raise RuntimeError("
+                "'repository does not match QA project')\n"
+        }
+
+        cosmetic = {
+            "controller/generic_qa_worker.py":
+                "EVIDENCE = 'reviewed_commit_sha'\n"
+                "raise RuntimeError("
+                "'repository does not match QA project')\n"
+        }
+
+        with self.assertRaisesRegex(
+            EngineeringValidationError,
+            "prohibited text remains",
+        ):
+            _evaluate_acceptance_contract(
+                mission,
+                baseline,
+                cosmetic,
+            )
+
+    def test_semantic_acceptance_passes_complete_contract(self):
+        mission = {
+            "requires_semantic_acceptance": True,
+            "acceptance_criteria": [
+                "targeted validation passes",
+                "authorized path changes",
+                "legacy rejection is removed",
+                "controlled mapping remains",
+            ],
+            "validation_commands": [
+                {
+                    "name": "TARGETED",
+                    "argv": [
+                        "python",
+                        "-m",
+                        "unittest",
+                    ],
+                }
+            ],
+            "acceptance_checks": [
+                {
+                    "criterion_index": 1,
+                    "type": "validation_passed",
+                    "name": "TARGETED",
+                },
+                {
+                    "criterion_index": 2,
+                    "type": "path_changed",
+                    "path": "source.py",
+                },
+                {
+                    "criterion_index": 3,
+                    "type": "text_not_contains",
+                    "path": "source.py",
+                    "text": "LEGACY_REJECTION",
+                },
+                {
+                    "criterion_index": 4,
+                    "type": "text_contains",
+                    "path": "source.py",
+                    "text": "CONTROLLED_MAPPING",
+                },
+            ],
+        }
+
+        evidence = _evaluate_acceptance_contract(
+            mission,
+            {
+                "source.py":
+                    "LEGACY_REJECTION = True\n"
+            },
+            {
+                "source.py":
+                    "CONTROLLED_MAPPING = True\n"
+            },
+        )
+
+        self.assertIn(
+            "semantic_acceptance:criteria_verified:4",
+            evidence,
+        )
+
+        self.assertIn(
+            "semantic_acceptance:passed",
+            evidence,
+        )
+
+    def test_semantic_acceptance_is_backward_compatible_when_not_required(self):
+        evidence = _evaluate_acceptance_contract(
+            {
+                "acceptance_criteria": [
+                    "legacy mission"
+                ],
+                "validation_commands": [],
+            },
+            {"source.py": "before\n"},
+            {"source.py": "after\n"},
+        )
+
+        self.assertEqual(
+            evidence,
+            ("semantic_acceptance:not_required",),
+        )
 
 
 if __name__ == "__main__":
