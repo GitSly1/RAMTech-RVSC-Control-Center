@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from controller.generic_qa_worker import _repo_root, execute_mission
+from controller.generic_qa_worker import _quinn_cognitive_prompt, _repo_root, _validated_cognitive_assurance, execute_mission
 
 
 class GenericQAWorkerTests(unittest.TestCase):
@@ -86,7 +86,17 @@ class GenericQAWorkerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no controlled repository mapping"):
             _repo_root(mission)
 
-    def test_acquires_exact_pushed_semantiq_branch_and_commit(self):
+    @patch("controller.generic_qa_worker._cognitive_assurance")
+    def test_acquires_exact_pushed_semantiq_branch_and_commit(
+        self, cognitive
+    ):
+        cognitive.return_value = {
+            "classification": "QA_ACCEPTED",
+            "summary": "objective and acceptance evidence are sufficient",
+            "findings": [
+                "reviewed implementation satisfies supplied objective"
+            ],
+        }
         result = self.execute()
         self.assertTrue(result["success"])
         self.assertEqual(result["reviewed_branch"], "rvsc/SEM-123")
@@ -113,6 +123,199 @@ class GenericQAWorkerTests(unittest.TestCase):
         result = execute_mission(agent_id="DEV-001", agent_name="Daniel", role="Development", qa_eligible=False, mission=self.mission(), repo_root=self.semantiq)
         self.assertEqual(result["verdict"], "QA_REJECTED")
         self.assertIn("authorization:denied", result["evidence"])
+
+
+    @patch("controller.generic_qa_worker._cognitive_assurance")
+    def test_cognitive_rejection_prevents_deterministic_acceptance(
+        self, cognitive
+    ):
+        cognitive.return_value = {
+            "classification": "QA_REJECTED_IMPLEMENTATION",
+            "summary": "implementation does not satisfy objective",
+            "findings": ["tests pass but required behavior is absent"],
+        }
+
+        with patch(
+            "controller.generic_qa_worker._review_repository"
+        ) as review, patch(
+            "controller.generic_qa_worker._file_evidence",
+            return_value="inspected:test.py:sha256:abc",
+        ), patch(
+            "controller.generic_qa_worker._validated_commands",
+            return_value=[("TEST", ["python", "-c", "print('ok')"])],
+        ):
+            review.return_value.__enter__.return_value = (
+                Path("."),
+                "rvsc/test",
+                "a" * 40,
+                ("target_acquisition:test",),
+            )
+
+            result = execute_mission(
+                agent_id="QA-001",
+                agent_name="Quinn",
+                role="QA",
+                qa_eligible=True,
+                mission={
+                    "run_id": "QCOG-TEST-REJECT",
+                    "project": "rvsc",
+                    "work_branch": "rvsc/test",
+                    "allowed_paths": ["test.py"],
+                    "validation_commands": [
+                        {
+                            "name": "TEST",
+                            "argv": ["python", "-c", "print('ok')"],
+                        }
+                    ],
+                },
+                repo_root=Path("."),
+            )
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["verdict"], "QA_REJECTED")
+        self.assertEqual(
+            result["cognitive_classification"],
+            "QA_REJECTED_IMPLEMENTATION",
+        )
+
+    def test_cognitive_result_rejects_unknown_classification(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "unsupported classification",
+        ):
+            _validated_cognitive_assurance(
+                {
+                    "classification": "QA_MAGIC",
+                    "summary": "invalid",
+                    "findings": ["invalid"],
+                }
+            )
+
+    def test_cognitive_result_requires_evidence_findings(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "findings",
+        ):
+            _validated_cognitive_assurance(
+                {
+                    "classification": "QA_ACCEPTED",
+                    "summary": "looks correct",
+                    "findings": None,
+                }
+            )
+
+    def test_quinn_prompt_uses_bounded_contract_context(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            core = root / "golden-core"
+            core.mkdir()
+            (core / "QA_001_QUINN_COGNITION_CONTRACT_V1.md").write_text(
+                "QUINN CONTRACT",
+                encoding="utf-8",
+            )
+            (core / "MAX_PLATINUM_ENGINEERING_CORE_V1.md").write_text(
+                "MAX DISCIPLINE",
+                encoding="utf-8",
+            )
+
+            prompt = _quinn_cognitive_prompt(
+                mission={
+                    "objective": "verify semantic correctness",
+                    "acceptance_criteria": ["behavior matches objective"],
+                    "allowed_paths": ["app.py"],
+                    "engineering_evidence": ["X" * 50000],
+                },
+                review_root=root,
+                branch="rvsc/review",
+                commit_sha="b" * 40,
+            )
+
+        self.assertIn("QUINN CONTRACT", prompt)
+        self.assertIn("MAX DISCIPLINE", prompt)
+        self.assertIn("verify semantic correctness", prompt)
+        self.assertIn("[TRUNCATED]", prompt)
+        self.assertLess(len(prompt), 35000)
+
+    @patch("controller.generic_qa_worker._quinn_provider_call")
+    def test_provider_backed_cognition_returns_structured_assurance(
+        self, provider
+    ):
+        provider.return_value = (
+            {
+                "id": "qa-provider-1",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": (
+                                    '{"classification":"QA_ACCEPTED",'
+                                    '"summary":"objective satisfied",'
+                                    '"findings":["evidence is sufficient"]}'
+                                ),
+                            }
+                        ],
+                    }
+                ],
+            },
+            "ollama",
+        )
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            core = root / "golden-core"
+            core.mkdir()
+            (core / "QA_001_QUINN_COGNITION_CONTRACT_V1.md").write_text(
+                "QUINN CONTRACT",
+                encoding="utf-8",
+            )
+            (core / "MAX_PLATINUM_ENGINEERING_CORE_V1.md").write_text(
+                "MAX DISCIPLINE",
+                encoding="utf-8",
+            )
+
+            from controller.generic_qa_worker import _cognitive_assurance
+
+            result = _cognitive_assurance(
+                mission={
+                    "objective": "review work",
+                    "allowed_paths": ["app.py"],
+                },
+                review_root=root,
+                branch="rvsc/review",
+                commit_sha="c" * 40,
+            )
+
+        self.assertEqual(result["classification"], "QA_ACCEPTED")
+        self.assertEqual(result["provider"], "ollama")
+        self.assertEqual(result["provider_response_id"], "qa-provider-1")
+        self.assertGreater(result["prompt_chars"], 0)
+
+
+    def test_quinn_schema_is_qa_owned_not_engineering_proposal(self):
+        from controller.generic_qa_worker import _quinn_assurance_schema
+
+        schema = _quinn_assurance_schema()
+
+        self.assertEqual(
+            set(schema["required"]),
+            {
+                "classification",
+                "summary",
+                "findings",
+            },
+        )
+
+        properties = schema["properties"]
+
+        self.assertIn("classification", properties)
+        self.assertIn("summary", properties)
+        self.assertIn("findings", properties)
+
+        self.assertNotIn("edits", properties)
+        self.assertNotIn("commit_message", properties)
+        self.assertNotIn("engineering_summary", properties)
 
 
 if __name__ == "__main__":

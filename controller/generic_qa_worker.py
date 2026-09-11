@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import json
+import urllib.error
+import urllib.request
+import uuid
+
 import hashlib
 import os
 import re
@@ -16,6 +21,356 @@ _ALLOWED_EXECUTABLES = {"python", "python3", "py", "pytest", "git"}
 _READ_ONLY_GIT_COMMANDS = {"branch", "diff", "log", "rev-parse", "show", "status"}
 _FULL_COMMIT_SHA = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})\Z")
 Checkpoint = Callable[[str, tuple[str, ...]], None]
+
+_COGNITIVE_CLASSIFICATIONS = {
+    "QA_ACCEPTED",
+    "QA_REJECTED_IMPLEMENTATION",
+    "QA_REJECTED_REQUIREMENT",
+    "QA_BLOCKED_CONTRACT",
+    "QA_BLOCKED_HARNESS",
+    "QA_BLOCKED_ENVIRONMENT",
+    "QA_BLOCKED_BOUNDARY",
+    "QA_BLOCKED_EVIDENCE",
+}
+
+
+QUINN_COGNITION_CONTEXT_CHAR_BUDGET = 12000
+
+
+def _bounded_text(value: Any, limit: int) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n[TRUNCATED]"
+
+
+def _load_cognition_asset(review_root: Path, relative_path: str) -> str:
+    path = review_root / relative_path
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise RuntimeError(
+            f"unable to load Quinn cognition asset {relative_path}: {exc}"
+        ) from exc
+    if not text:
+        raise RuntimeError(f"Quinn cognition asset is empty: {relative_path}")
+    return text
+
+
+def _quinn_cognitive_prompt(
+    *,
+    mission: dict[str, Any],
+    review_root: Path,
+    branch: str,
+    commit_sha: str,
+) -> str:
+    quinn_core = _load_cognition_asset(
+        review_root,
+        "golden-core/QA_001_QUINN_COGNITION_CONTRACT_V1.md",
+    )
+    max_core = _load_cognition_asset(
+        review_root,
+        "golden-core/MAX_PLATINUM_ENGINEERING_CORE_V1.md",
+    )
+
+    contract = {
+        "objective": mission.get("objective"),
+        "acceptance_criteria": mission.get("acceptance_criteria") or [],
+        "allowed_paths": mission.get("allowed_paths") or [],
+        "project": mission.get("project"),
+        "repository": mission.get("repository"),
+        "reviewed_branch": branch,
+        "reviewed_commit_sha": commit_sha,
+        "engineering_run_id": mission.get("engineering_run_id"),
+    }
+
+    # Evidence context is intentionally bounded. Quinn receives the
+    # authoritative contract and reviewed identity, not a repository dump.
+    evidence_context = {
+        "changed_files": mission.get("changed_files") or [],
+        "engineering_evidence": mission.get("engineering_evidence") or [],
+        "acceptance_results": mission.get("acceptance_results") or {},
+        "validation_results": mission.get("validation_results") or {},
+    }
+
+    dynamic = json.dumps(
+        {
+            "contract": contract,
+            "evidence_context": evidence_context,
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    dynamic = _bounded_text(
+        dynamic,
+        QUINN_COGNITION_CONTEXT_CHAR_BUDGET,
+    )
+
+    return (
+        "You are Quinn (QA-001), RAMTech independent Quality Assurance.\n\n"
+        "QUINN COGNITION CONTRACT:\n"
+        + quinn_core
+        + "\n\nAPPLICABLE MAX OPERATIONAL DISCIPLINE:\n"
+        + max_core
+        + "\n\nBOUNDED REVIEW CONTEXT:\n"
+        + dynamic
+        + "\n\n"
+        "Independently judge the objective, acceptance sufficiency, "
+        "implementation evidence, authority boundaries, evidence integrity, "
+        "and material uncertainty. Tests passing is not sufficient by itself. "
+        "Do not modify implementation or rewrite the contract. Fail closed "
+        "when evidence is insufficient.\n\n"
+        "Return ONLY one JSON object with exactly these semantic fields:\n"
+        "{"
+        "\"classification\": one of "
+        "\"QA_ACCEPTED\", "
+        "\"QA_REJECTED_IMPLEMENTATION\", "
+        "\"QA_REJECTED_REQUIREMENT\", "
+        "\"QA_BLOCKED_CONTRACT\", "
+        "\"QA_BLOCKED_HARNESS\", "
+        "\"QA_BLOCKED_ENVIRONMENT\", "
+        "\"QA_BLOCKED_BOUNDARY\", "
+        "\"QA_BLOCKED_EVIDENCE\"; "
+        "\"summary\": non-empty string; "
+        "\"findings\": array of non-empty strings"
+        "}"
+    )
+
+
+
+def _quinn_assurance_schema() -> dict[str, Any]:
+    classifications = sorted(_COGNITIVE_CLASSIFICATIONS)
+    return {
+        "type": "object",
+        "properties": {
+            "classification": {
+                "type": "string",
+                "enum": classifications,
+            },
+            "summary": {
+                "type": "string",
+                "minLength": 1,
+            },
+            "findings": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "minLength": 1,
+                },
+                "minItems": 1,
+            },
+        },
+        "required": [
+            "classification",
+            "summary",
+            "findings",
+        ],
+        "additionalProperties": False,
+    }
+
+
+def _quinn_response_text(response: dict[str, Any]) -> str:
+    for item in response.get("output", []):
+        if item.get("type") != "message":
+            continue
+        for content in item.get("content", []):
+            if (
+                content.get("type") == "output_text"
+                and isinstance(content.get("text"), str)
+                and content["text"].strip()
+            ):
+                return content["text"]
+    raise RuntimeError(
+        "Quinn provider response did not contain output_text"
+    )
+
+
+def _quinn_json_object(text: str) -> dict[str, Any]:
+    candidate = text.strip()
+
+    if candidate.startswith("```"):
+        lines = candidate.splitlines()[1:]
+        if lines and lines[-1].strip() == "```":
+            lines.pop()
+        candidate = "\n".join(lines).strip()
+
+    value = json.loads(candidate)
+
+    if not isinstance(value, dict):
+        raise RuntimeError(
+            "Quinn cognitive response must be a JSON object"
+        )
+
+    return value
+
+
+def _quinn_ollama_call(prompt: str) -> dict[str, Any]:
+    # QA owns its response contract. Never reuse Engineering's
+    # proposal schema here.
+    from controller.generic_engineering_worker import (
+        DEFAULT_OLLAMA_MODEL,
+        OLLAMA_URL,
+    )
+
+    body = json.dumps(
+        {
+            "model": DEFAULT_OLLAMA_MODEL,
+            "prompt": prompt,
+            "stream": False,
+            "format": _quinn_assurance_schema(),
+        }
+    ).encode("utf-8")
+
+    req = urllib.request.Request(
+        OLLAMA_URL,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=600) as response:
+            payload = json.loads(
+                response.read().decode("utf-8")
+            )
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode(
+            "utf-8",
+            errors="replace",
+        )
+        raise RuntimeError(
+            f"Ollama HTTP {exc.code}: {detail}"
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(
+            f"Ollama transport error: {exc.reason}"
+        ) from exc
+
+    text = payload.get("response")
+
+    if not isinstance(text, str) or not text.strip():
+        raise RuntimeError(
+            "Ollama response did not contain response text"
+        )
+
+    return {
+        "id": f"ollama-{uuid.uuid4().hex}",
+        "status": "completed",
+        "model": str(
+            payload.get("model", DEFAULT_OLLAMA_MODEL)
+        ),
+        "output": [
+            {
+                "type": "message",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": text,
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def _quinn_openai_call(
+    api_key: str,
+    prompt: str,
+) -> dict[str, Any]:
+    # Current OpenAI transport is neutral. Keep QA ownership of
+    # dispatch while reusing only that transport implementation.
+    from controller.generic_engineering_worker import _openai_call
+
+    return _openai_call(api_key, prompt)
+
+
+def _quinn_provider_call(
+    prompt: str,
+) -> tuple[dict[str, Any], str]:
+    provider = os.environ.get(
+        "RVSC_AI_PROVIDER",
+        "ollama",
+    ).strip().lower()
+
+    if provider == "ollama":
+        return _quinn_ollama_call(prompt), "ollama"
+
+    if provider == "openai":
+        api_key = os.environ.get(
+            "OPENAI_API_KEY",
+            "",
+        ).strip()
+
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY is not set")
+
+        return _quinn_openai_call(
+            api_key,
+            prompt,
+        ), "openai"
+
+    raise RuntimeError(
+        f"unsupported RVSC_AI_PROVIDER: {provider}"
+    )
+
+
+def _cognitive_assurance(
+    *,
+    mission: dict[str, Any],
+    review_root: Path,
+    branch: str,
+    commit_sha: str,
+) -> dict[str, Any]:
+    prompt = _quinn_cognitive_prompt(
+        mission=mission,
+        review_root=review_root,
+        branch=branch,
+        commit_sha=commit_sha,
+    )
+
+    response, provider = _quinn_provider_call(prompt)
+    text = _quinn_response_text(response)
+    result = _quinn_json_object(text)
+
+    result["provider"] = provider
+    result["provider_response_id"] = str(response.get("id", ""))
+    result["prompt_chars"] = len(prompt)
+    return result
+
+
+def _validated_cognitive_assurance(result: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        raise ValueError("cognitive assurance result must be an object")
+
+    classification = str(result.get("classification", "")).strip()
+    if classification not in _COGNITIVE_CLASSIFICATIONS:
+        raise ValueError(
+            "cognitive assurance returned unsupported classification"
+        )
+
+    summary = str(result.get("summary", "")).strip()
+    if not summary:
+        raise ValueError("cognitive assurance summary is required")
+
+    findings = result.get("findings")
+    if not isinstance(findings, list) or not all(
+        isinstance(item, str) and item.strip() for item in findings
+    ):
+        raise ValueError(
+            "cognitive assurance findings must be a list of non-empty strings"
+        )
+
+    validated = {
+        "classification": classification,
+        "summary": summary,
+        "findings": [item.strip() for item in findings],
+    }
+
+    for key in ("provider", "provider_response_id", "prompt_chars"):
+        if key in result:
+            validated[key] = result[key]
+
+    return validated
 _PROJECT_REPOSITORIES = {
     "rvsc": ("RVSC_RVSC_REPO", RVSC_ROOT, {"gitsly1/ramtech-rvsc-control-center", "ramtech-rvsc-control-center"}),
     "semantiq": ("RVSC_SEMANTIQ_REPO", Path(r"D:\Py_Proj\RAMTech-SEMANTIQ"), {"gitsly1/ramtech-semantiq", "ramtech-semantiq"}),
@@ -257,6 +612,57 @@ def execute_mission(*, agent_id: str, agent_name: str, role: str, qa_eligible: b
 
             commands = _validated_commands(mission)
             _record(checkpoint, "qa_inspection_complete", (f"run_id:{run_id}", f"branch:{branch}", f"commit:{commit_sha}"))
+
+            cognitive = _validated_cognitive_assurance(
+                _cognitive_assurance(
+                    mission=mission,
+                    review_root=review_root,
+                    branch=branch,
+                    commit_sha=commit_sha,
+                )
+            )
+            cognitive_classification = cognitive["classification"]
+            evidence.extend(
+                (
+                    f"cognitive_assurance:{cognitive_classification}",
+                    f"cognitive_summary:{cognitive['summary']}",
+                )
+            )
+            evidence.extend(
+                f"cognitive_finding:{finding}"
+                for finding in cognitive["findings"]
+            )
+            _record(
+                checkpoint,
+                "qa_cognitive_assurance_observed",
+                (
+                    f"run_id:{run_id}",
+                    f"classification:{cognitive_classification}",
+                ),
+            )
+
+            if cognitive_classification != "QA_ACCEPTED":
+                evidence.append("verdict:QA_REJECTED")
+                _record(
+                    checkpoint,
+                    "qa_rejected",
+                    (
+                        f"run_id:{run_id}",
+                        f"cognitive_classification:{cognitive_classification}",
+                    ),
+                )
+                result = _reject(
+                    run_id=run_id,
+                    agent_id=agent_id,
+                    branch=branch,
+                    commit_sha=commit_sha,
+                    summary=cognitive["summary"],
+                    evidence=evidence,
+                    validations=validations,
+                )
+                result["cognitive_classification"] = cognitive_classification
+                result["cognitive_assurance"] = cognitive
+                return result
             timeout = int(mission.get("validation_timeout_seconds", 900))
             if timeout < 1 or timeout > 3600:
                 raise ValueError("validation timeout must be between 1 and 3600 seconds")
@@ -275,7 +681,7 @@ def execute_mission(*, agent_id: str, agent_name: str, role: str, qa_eligible: b
                         return _reject(run_id=run_id, agent_id=agent_id, branch=branch, commit_sha=commit_sha, summary=f"validation failed: {name}", evidence=evidence, validations=validations)
             evidence.extend(("source_execution:isolated_copy", "verdict:QA_ACCEPTED"))
             _record(checkpoint, "qa_accepted", (f"run_id:{run_id}", f"branch:{branch}", f"commit:{commit_sha}"))
-            return {"success": True, "run_id": run_id, "agent_id": agent_id, "verdict": "QA_ACCEPTED", "reviewed_branch": branch, "reviewed_commit_sha": commit_sha, "summary": f"independent QA accepted {branch} at {commit_sha}", "evidence": evidence, "validations": validations, "retryable": False}
+            return {"success": True, "run_id": run_id, "agent_id": agent_id, "verdict": "QA_ACCEPTED", "cognitive_classification": cognitive_classification, "cognitive_assurance": cognitive, "reviewed_branch": branch, "reviewed_commit_sha": commit_sha, "summary": f"independent QA accepted {branch} at {commit_sha}", "evidence": evidence, "validations": validations, "retryable": False}
     except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as exc:
         evidence.extend((f"qa_failure:{exc}", "verdict:QA_REJECTED"))
         _record(checkpoint, "qa_rejected", (f"run_id:{run_id}", f"failure:{exc}"))
