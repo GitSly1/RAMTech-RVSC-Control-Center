@@ -8,7 +8,18 @@ class WorkPackageControllerTests(unittest.TestCase):
         return {"agent_id": "DEV-001", "project": project, "repository": repository, "wp_id": "SEM-123", "work_branch": "rvsc/SEM-123", "allowed_paths": ["source.py"], "validation_commands": [{"name": "tests", "argv": ["python", "-m", "unittest"]}]}
 
     def result(self):
-        return {"success": True, "run_id": "ENG-RUN", "commit_sha": "a" * 40, "work_branch": "rvsc/SEM-123", "pushed": True}
+        return {
+            "success": True,
+            "run_id": "ENG-RUN",
+            "commit_sha": "a" * 40,
+            "work_branch": "rvsc/SEM-123",
+            "pushed": True,
+            "evidence": [
+                "semantic_acceptance:criterion:1:validation:tests",
+                "semantic_acceptance:criteria_verified:1",
+                "semantic_acceptance:passed",
+            ],
+        }
 
     def test_build_qa_mission_propagates_cross_project_target(self):
         projects = (
@@ -25,6 +36,18 @@ class WorkPackageControllerTests(unittest.TestCase):
                 self.assertEqual(qa["repository"], repository)
                 self.assertEqual(qa["engineering_commit_sha"], "a" * 40)
                 self.assertEqual(qa["reviewed_commit_sha"], "a" * 40)
+
+    def test_build_qa_mission_propagates_engineering_evidence(self):
+        qa = build_qa_mission(
+            engineering_mission=self.mission(),
+            engineering_result=self.result(),
+            qa_agent_id="QA-001",
+        )
+
+        self.assertEqual(
+            qa["engineering_evidence"],
+            self.result()["evidence"],
+        )
 
     def test_build_qa_mission_assigns_independent_qa_run_id(self):
         qa = build_qa_mission(engineering_mission=self.mission(), engineering_result=self.result(), qa_agent_id="QA-001")

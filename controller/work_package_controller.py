@@ -140,6 +140,16 @@ def build_qa_mission(*, engineering_mission: dict[str, Any], engineering_result:
         raise QAHandoffError("missing engineering run_id evidence")
 
     qa_run_id = f"RVSC-{qa_agent_id.upper()}-{uuid.uuid4().hex[:12].upper()}"
+    engineering_evidence_value = engineering_result.get("evidence")
+    if isinstance(engineering_evidence_value, (list, tuple)):
+        engineering_evidence = [
+            str(item).strip()
+            for item in engineering_evidence_value
+            if str(item).strip()
+        ]
+    else:
+        engineering_evidence = []
+
     qa_mission = dict(engineering_mission)
     qa_mission.update({
         "run_id": qa_run_id,
@@ -159,6 +169,7 @@ def build_qa_mission(*, engineering_mission: dict[str, Any], engineering_result:
         "authorized_paths": list(engineering_mission.get("authorized_paths") or engineering_mission.get("allowed_paths") or ()),
         "allowed_paths": list(engineering_mission.get("allowed_paths") or engineering_mission.get("authorized_paths") or ()),
         "validation_commands": list(engineering_mission.get("validation_commands") or ()),
+        "engineering_evidence": engineering_evidence,
     })
     return qa_mission
 

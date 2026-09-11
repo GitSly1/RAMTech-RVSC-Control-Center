@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from controller.generic_qa_worker import _authoritative_knowledge_context, _classification_consistency_guard, _quinn_cognitive_prompt, _repo_root, _validated_cognitive_assurance, execute_mission
+from controller.generic_qa_worker import _acceptance_authority_gate, _authoritative_knowledge_context, _classification_consistency_guard, _quinn_cognitive_prompt, _repo_root, _validated_cognitive_assurance, execute_mission
 
 
 class GenericQAWorkerTests(unittest.TestCase):
@@ -118,8 +118,25 @@ class GenericQAWorkerTests(unittest.TestCase):
             "work_branch": "rvsc/SEM-123",
             "engineering_commit_sha": self.commit,
             "reviewed_commit_sha": self.commit,
+            "objective": "Verify the reviewed source update.",
+            "acceptance_criteria": [
+                "The required source behavior is verified."
+            ],
+            "requires_semantic_acceptance": True,
+            "acceptance_checks": [
+                {
+                    "criterion_index": 1,
+                    "type": "validation_passed",
+                    "name": "content",
+                }
+            ],
             "allowed_paths": ["source.py"],
             "validation_commands": [{"name": "content", "argv": [sys.executable, "-c", "from pathlib import Path; assert Path('source.py').read_text() == 'VALUE = 2\\n'"]}],
+            "engineering_evidence": [
+                "semantic_acceptance:criterion:1:validation:content",
+                "semantic_acceptance:criteria_verified:1",
+                "semantic_acceptance:passed",
+            ],
         }
 
     def execute(self, mission: dict | None = None):
@@ -303,6 +320,125 @@ class GenericQAWorkerTests(unittest.TestCase):
             cognitive,
         )
 
+    def test_acceptance_authority_blocks_satisfied_without_semantic_evidence(self):
+        mission = {
+            "objective": "review work",
+            "acceptance_criteria": ["behavior is correct"],
+            "allowed_paths": ["source.py"],
+        }
+
+        authority = _acceptance_authority_gate(mission)
+
+        self.assertFalse(authority["eligible"])
+        self.assertEqual(
+            authority["classification"],
+            "QA_BLOCKED_EVIDENCE",
+        )
+
+    def test_acceptance_authority_requires_every_criterion_evidence(self):
+        mission = {
+            "requires_semantic_acceptance": True,
+            "acceptance_criteria": [
+                "criterion one",
+                "criterion two",
+            ],
+            "acceptance_checks": [
+                {
+                    "criterion_index": 1,
+                    "type": "validation_passed",
+                    "name": "tests",
+                },
+                {
+                    "criterion_index": 2,
+                    "type": "path_changed",
+                    "path": "source.py",
+                },
+            ],
+            "engineering_evidence": [
+                "semantic_acceptance:criterion:1:validation:tests",
+                "semantic_acceptance:criteria_verified:2",
+                "semantic_acceptance:passed",
+            ],
+        }
+
+        authority = _acceptance_authority_gate(mission)
+
+        self.assertFalse(authority["eligible"])
+        self.assertTrue(
+            any(
+                "criterion 2" in reason
+                for reason in authority["reasons"]
+            )
+        )
+
+    def test_acceptance_authority_accepts_controller_semantic_evidence(self):
+        mission = {
+            "requires_semantic_acceptance": True,
+            "acceptance_criteria": [
+                "criterion one",
+                "criterion two",
+            ],
+            "acceptance_checks": [
+                {
+                    "criterion_index": 1,
+                    "type": "validation_passed",
+                    "name": "tests",
+                },
+                {
+                    "criterion_index": 2,
+                    "type": "path_changed",
+                    "path": "source.py",
+                },
+            ],
+            "engineering_evidence": [
+                "semantic_acceptance:criterion:1:validation:tests",
+                "semantic_acceptance:criterion:2:path_changed:source.py",
+                "semantic_acceptance:criteria_verified:2",
+                "semantic_acceptance:passed",
+            ],
+        }
+
+        authority = _acceptance_authority_gate(mission)
+
+        self.assertTrue(authority["eligible"])
+        self.assertEqual(
+            authority["classification"],
+            "QA_ACCEPTED",
+        )
+        self.assertEqual(authority["reasons"], [])
+
+    @patch("controller.generic_qa_worker._cognitive_assurance")
+    def test_satisfied_cognition_cannot_bypass_acceptance_authority(
+        self,
+        cognitive,
+    ):
+        cognitive.return_value = {
+            "causal_state": "SATISFIED",
+            "summary": "tests passed",
+            "findings": ["supplied tests passed"],
+        }
+
+        mission = self.mission()
+        mission["requires_semantic_acceptance"] = False
+        mission.pop("acceptance_checks")
+        mission.pop("engineering_evidence")
+
+        result = self.execute(mission)
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["verdict"], "QA_REJECTED")
+        self.assertEqual(
+            result["cognitive_classification"],
+            "QA_ACCEPTED",
+        )
+        self.assertEqual(
+            result["acceptance_classification"],
+            "QA_BLOCKED_EVIDENCE",
+        )
+        self.assertFalse(
+            result["acceptance_authority"]["eligible"]
+        )
+
     def test_causal_state_maps_to_rvsc_disposition_deterministically(self):
         cases = {
             "SATISFIED": "QA_ACCEPTED",
@@ -368,6 +504,7 @@ class GenericQAWorkerTests(unittest.TestCase):
                 review_root=root,
                 branch="rvsc/review",
                 commit_sha=fixture_sha,
+                authority_root=root,
             )
 
         self.assertIn("QUINN CONTRACT", prompt)
@@ -416,6 +553,7 @@ class GenericQAWorkerTests(unittest.TestCase):
                 review_root=root,
                 branch="rvsc/review",
                 commit_sha=fixture_sha,
+                authority_root=root,
             )
 
         self.assertEqual(result["causal_state"], "SATISFIED")
@@ -491,7 +629,7 @@ class GenericQAWorkerTests(unittest.TestCase):
             "changed_files": ["controller/generic_qa_worker.py"],
         }
 
-        context = _authoritative_knowledge_context(mission, root)
+        context = _authoritative_knowledge_context(mission, root, authority_root=root)
 
         self.assertLessEqual(
             context["used_chars"],
@@ -506,6 +644,129 @@ class GenericQAWorkerTests(unittest.TestCase):
             self.assertRegex(source["sha256"], r"^[0-9a-f]{64}$")
             self.assertIsInstance(source["truncated"], bool)
             self.assertLessEqual(source["excerpt_chars"], 3000)
+
+    def test_authoritative_knowledge_reserves_cross_authority_coverage(self):
+        from controller.generic_qa_worker import _authoritative_knowledge_context
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            core = root / "golden-core"
+            governance = root / "governance"
+            docs = root / "docs"
+            config = root / "config"
+
+            core.mkdir()
+            governance.mkdir()
+            docs.mkdir()
+            config.mkdir()
+
+            (governance / "AUTHORITATIVE_KNOWLEDGE_HIERARCHY.md").write_text(
+                "governance " * 2000,
+                encoding="utf-8",
+            )
+            (governance / "SOURCE_ISOLATION.md").write_text(
+                "isolation " * 1000,
+                encoding="utf-8",
+            )
+            (governance / "WORK_PACKAGE_LIFECYCLE.md").write_text(
+                "lifecycle " * 1000,
+                encoding="utf-8",
+            )
+            (docs / "ORCHESTRATION_ARCHITECTURE.md").write_text(
+                "RVSC controller mission architecture",
+                encoding="utf-8",
+            )
+            (config / "agents.yaml").write_text(
+                "RVSC Quinn agent mission",
+                encoding="utf-8",
+            )
+            (root / "PROJECT_REGISTRY.md").write_text(
+                "RVSC mission operational projection",
+                encoding="utf-8",
+            )
+
+            subprocess.run(
+                ["git", "init", "-b", "main"],
+                cwd=root,
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Fixture"],
+                cwd=root,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.email", "fixture@example.invalid"],
+                cwd=root,
+                check=True,
+            )
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "fixture"],
+                cwd=root,
+                check=True,
+                capture_output=True,
+            )
+
+            result = _authoritative_knowledge_context(
+                {
+                    "project": "RVSC",
+                    "objective": (
+                        "Review controller orchestration architecture and "
+                        "current qualification readiness status"
+                    ),
+                    "acceptance_criteria": [
+                        "Verify control-plane architecture evidence",
+                        "Resolve roadmap and readiness projections",
+                    ],
+                },
+                root,
+                authority_root=root,
+            )
+
+            classes = {
+                source["authority_class"]
+                for source in result["sources"]
+            }
+
+            self.assertIn("A1", classes)
+            self.assertIn("A2", classes)
+            self.assertIn("A5", classes)
+            self.assertLessEqual(result["used_chars"], 6000)
+
+    def test_quinn_prompt_identifies_a3_a4_decision_context(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fixture_sha = self._prepare_quinn_cognition_fixture(root)
+
+            prompt = _quinn_cognitive_prompt(
+                mission={
+                    "project": "RVSC",
+                    "repository": "RAMTech-RVSC-Control-Center",
+                    "objective": "evaluate evidence",
+                    "acceptance_criteria": ["evidence-backed disposition"],
+                    "engineering_evidence": ["tests:pass"],
+                    "validation_results": {"tests": True},
+                },
+                review_root=root,
+                branch="rvsc/review",
+                commit_sha=fixture_sha,
+                authority_root=root,
+            )
+
+            self.assertIn(
+                "CURRENT DECISION AUTHORITY CONTEXT",
+                prompt,
+            )
+            self.assertIn(
+                "A3 = engineering/validation evidence already supplied",
+                prompt,
+            )
+            self.assertIn(
+                "A4 = active mission contract already supplied",
+                prompt,
+            )
 
     def test_authoritative_knowledge_requires_governance_sources(self):
         root = self.base / "missing-governance"
@@ -542,6 +803,7 @@ class GenericQAWorkerTests(unittest.TestCase):
             _authoritative_knowledge_context(
                 {"project": "RVSC", "objective": "QA"},
                 root,
+                authority_root=root,
             )
 
     def test_quinn_prompt_contains_authority_provenance_not_repository_dump(self):
@@ -610,6 +872,7 @@ class GenericQAWorkerTests(unittest.TestCase):
             review_root=root,
             branch="rvsc/test",
             commit_sha=sha,
+            authority_root=root,
         )
 
         self.assertIn("AUTHORITATIVE INSTITUTIONAL KNOWLEDGE", prompt)
@@ -619,6 +882,199 @@ class GenericQAWorkerTests(unittest.TestCase):
         self.assertIn('"sha256":', prompt)
         self.assertIn('"truncated":', prompt)
         self.assertIn("COMMAND_DASHBOARD.md", prompt)
+
+
+    def test_target_repository_cannot_override_trusted_quinn_authority(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            authority = base / "authority"
+            target = base / "target"
+            authority.mkdir()
+            target.mkdir()
+
+            for repo in (authority, target):
+                subprocess.run(
+                    ["git", "init", "-b", "main"],
+                    cwd=repo,
+                    check=True,
+                    capture_output=True,
+                )
+                subprocess.run(
+                    ["git", "config", "user.name", "Fixture"],
+                    cwd=repo,
+                    check=True,
+                )
+                subprocess.run(
+                    ["git", "config", "user.email", "fixture@example.invalid"],
+                    cwd=repo,
+                    check=True,
+                )
+
+            trusted = {
+                "golden-core/QA_001_QUINN_COGNITION_CONTRACT_V1.md":
+                    "TRUSTED_QUINN_AUTHORITY",
+                "golden-core/MAX_PLATINUM_ENGINEERING_CORE_V1.md":
+                    "TRUSTED_MAX_AUTHORITY",
+                "governance/AUTHORITATIVE_KNOWLEDGE_HIERARCHY.md":
+                    "TRUSTED_A1_HIERARCHY",
+                "governance/SOURCE_ISOLATION.md":
+                    "TRUSTED_SOURCE_ISOLATION",
+                "governance/WORK_PACKAGE_LIFECYCLE.md":
+                    "TRUSTED_WORK_PACKAGE_LIFECYCLE",
+            }
+
+            hostile = {
+                "golden-core/QA_001_QUINN_COGNITION_CONTRACT_V1.md":
+                    "HOSTILE_TARGET_QUINN",
+                "golden-core/MAX_PLATINUM_ENGINEERING_CORE_V1.md":
+                    "HOSTILE_TARGET_MAX",
+                "governance/AUTHORITATIVE_KNOWLEDGE_HIERARCHY.md":
+                    "HOSTILE_TARGET_GOVERNANCE",
+                "source.py":
+                    "VALUE = 1\n",
+            }
+
+            for relative, content in trusted.items():
+                path = authority / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+
+            for relative, content in hostile.items():
+                path = target / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+
+            for repo in (authority, target):
+                subprocess.run(["git", "add", "."], cwd=repo, check=True)
+                subprocess.run(
+                    ["git", "commit", "-m", "fixture"],
+                    cwd=repo,
+                    check=True,
+                    capture_output=True,
+                )
+
+            target_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=target,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+            prompt = _quinn_cognitive_prompt(
+                mission={
+                    "project": "SemantiQ",
+                    "repository": "RAMTech-SEMANTIQ",
+                    "objective": "verify target evidence",
+                    "acceptance_criteria": ["authority remains independent"],
+                    "allowed_paths": ["source.py"],
+                    "engineering_evidence": ["TARGET_EVIDENCE_PRESENT"],
+                },
+                review_root=target,
+                branch="rvsc/review",
+                commit_sha=target_sha,
+                authority_root=authority,
+            )
+
+            self.assertIn("TRUSTED_QUINN_AUTHORITY", prompt)
+            self.assertIn("TRUSTED_MAX_AUTHORITY", prompt)
+            self.assertIn("TARGET_EVIDENCE_PRESENT", prompt)
+
+            self.assertNotIn("HOSTILE_TARGET_QUINN", prompt)
+            self.assertNotIn("HOSTILE_TARGET_MAX", prompt)
+            self.assertNotIn("HOSTILE_TARGET_GOVERNANCE", prompt)
+
+    def test_authority_provenance_uses_authority_repository_revision(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            authority = base / "authority"
+            target = base / "target"
+            authority.mkdir()
+            target.mkdir()
+
+            for repo in (authority, target):
+                subprocess.run(
+                    ["git", "init", "-b", "main"],
+                    cwd=repo,
+                    check=True,
+                    capture_output=True,
+                )
+                subprocess.run(
+                    ["git", "config", "user.name", "Fixture"],
+                    cwd=repo,
+                    check=True,
+                )
+                subprocess.run(
+                    ["git", "config", "user.email", "fixture@example.invalid"],
+                    cwd=repo,
+                    check=True,
+                )
+
+            required = {
+                "governance/AUTHORITATIVE_KNOWLEDGE_HIERARCHY.md":
+                    "authority hierarchy",
+                "governance/SOURCE_ISOLATION.md":
+                    "source isolation",
+                "governance/WORK_PACKAGE_LIFECYCLE.md":
+                    "independent QA lifecycle",
+            }
+
+            for relative, content in required.items():
+                path = authority / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+
+            (target / "source.py").write_text(
+                "TARGET = True\n",
+                encoding="utf-8",
+            )
+
+            for repo in (authority, target):
+                subprocess.run(["git", "add", "."], cwd=repo, check=True)
+                subprocess.run(
+                    ["git", "commit", "-m", "fixture"],
+                    cwd=repo,
+                    check=True,
+                    capture_output=True,
+                )
+
+            authority_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=authority,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+            target_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=target,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+            self.assertNotEqual(authority_sha, target_sha)
+
+            context = _authoritative_knowledge_context(
+                {
+                    "project": "SemantiQ",
+                    "objective": "verify QA authority provenance",
+                },
+                target,
+                authority_root=authority,
+            )
+
+            self.assertTrue(context["sources"])
+
+            for source in context["sources"]:
+                self.assertEqual(source["revision"], authority_sha)
+                self.assertEqual(
+                    Path(source["authority_root"]).resolve(),
+                    authority.resolve(),
+                )
+                self.assertNotEqual(source["revision"], target_sha)
+
 
     def test_quinn_schema_is_qa_owned_not_engineering_proposal(self):
         from controller.generic_qa_worker import _quinn_assurance_schema

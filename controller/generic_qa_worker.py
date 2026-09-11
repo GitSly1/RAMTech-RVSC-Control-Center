@@ -35,7 +35,7 @@ _COGNITIVE_CLASSIFICATIONS = {
 
 
 QUINN_COGNITION_CONTEXT_CHAR_BUDGET = 12000
-QUINN_KNOWLEDGE_CONTEXT_CHAR_BUDGET = 9000
+QUINN_KNOWLEDGE_CONTEXT_CHAR_BUDGET = 6000
 
 _QUINN_KNOWLEDGE_SOURCES = (
     ("A1", "governance/AUTHORITATIVE_KNOWLEDGE_HIERARCHY.md"),
@@ -68,10 +68,68 @@ def _knowledge_terms(mission: dict[str, Any]) -> frozenset[str]:
     return frozenset(terms)
 
 
-def _knowledge_revision(review_root: Path, relative_path: str) -> str:
+_QUINN_KNOWLEDGE_CLASS_TERMS = {
+    "A2": frozenset({
+        "architecture",
+        "orchestration",
+        "controller",
+        "control-plane",
+        "control_plane",
+        "routing",
+        "dispatch",
+        "worker",
+        "configuration",
+    }),
+    "A5": frozenset({
+        "status",
+        "roadmap",
+        "readiness",
+        "progress",
+        "milestone",
+        "planned",
+        "planning",
+        "schedule",
+        "dashboard",
+        "projection",
+    }),
+}
+
+
+def _knowledge_intent_terms(
+    mission: dict[str, Any],
+) -> frozenset[str]:
+    values = [
+        mission.get("objective"),
+        *(mission.get("acceptance_criteria") or []),
+    ]
+    terms: set[str] = set()
+    for value in values:
+        for token in re.findall(
+            r"[A-Za-z0-9_.-]{3,}",
+            str(value or "").lower(),
+        ):
+            terms.add(token)
+    return frozenset(terms)
+
+
+def _knowledge_class_relevant(
+    authority_class: str,
+    terms: frozenset[str],
+) -> bool:
+    if authority_class == "A1":
+        return True
+
+    required = _QUINN_KNOWLEDGE_CLASS_TERMS.get(authority_class)
+    if not required:
+        return False
+
+    return bool(required.intersection(terms))
+
+
+def _knowledge_revision(authority_root: Path, relative_path: str) -> str:
     completed = subprocess.run(
         ["git", "rev-parse", "HEAD"],
-        cwd=review_root,
+        cwd=authority_root,
         text=True,
         capture_output=True,
         check=False,
@@ -87,14 +145,18 @@ def _knowledge_revision(review_root: Path, relative_path: str) -> str:
 def _authoritative_knowledge_context(
     mission: dict[str, Any],
     review_root: Path,
+    *,
+    authority_root: Path,
 ) -> dict[str, Any]:
+    authority_root = authority_root.resolve()
     terms = _knowledge_terms(mission)
+    intent_terms = _knowledge_intent_terms(mission)
     selected: list[dict[str, Any]] = []
 
     for authority_class, relative_path in _QUINN_KNOWLEDGE_SOURCES:
-        path = (review_root / relative_path).resolve()
+        path = (authority_root / relative_path).resolve()
         try:
-            path.relative_to(review_root.resolve())
+            path.relative_to(authority_root)
         except ValueError as exc:
             raise RuntimeError(
                 f"knowledge source escaped controlled repository: {relative_path}"
@@ -115,15 +177,22 @@ def _authoritative_knowledge_context(
         score = 100 if authority_class == "A1" else sum(
             1 for term in terms if term in lowered or term in relative_path.lower()
         )
-        if authority_class != "A1" and score == 0:
-            continue
+        if authority_class != "A1":
+            if score == 0:
+                continue
+            if not _knowledge_class_relevant(
+                authority_class,
+                intent_terms,
+            ):
+                continue
 
         digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
         selected.append(
             {
                 "authority_class": authority_class,
                 "path": relative_path,
-                "revision": _knowledge_revision(review_root, relative_path),
+                "revision": _knowledge_revision(authority_root, relative_path),
+                "authority_root": str(authority_root),
                 "sha256": digest,
                 "score": score,
                 "raw": raw.strip(),
@@ -138,16 +207,25 @@ def _authoritative_knowledge_context(
         )
     )
 
-    remaining = QUINN_KNOWLEDGE_CONTEXT_CHAR_BUDGET
+    # Preserve mandatory governance while reserving meaningful capacity for
+    # mission-relevant architecture/configuration and operational evidence.
+    class_budgets = {
+        "A1": 3000,
+        "A2": 2000,
+        "A5": 1000,
+    }
+    class_used = {authority: 0 for authority in class_budgets}
     sources: list[dict[str, Any]] = []
 
     for item in selected:
-        if remaining <= 0:
-            break
+        authority_class = str(item["authority_class"])
+        class_budget = class_budgets.get(authority_class, 0)
+        available = class_budget - class_used.get(authority_class, 0)
+        if available <= 0:
+            continue
 
         raw = str(item.pop("raw"))
-        # Reserve room for useful coverage across multiple relevant sources.
-        per_source_limit = min(3000, remaining)
+        per_source_limit = min(1500, available)
         excerpt = raw[:per_source_limit]
         truncated = len(raw) > len(excerpt)
 
@@ -160,7 +238,9 @@ def _authoritative_knowledge_context(
                 "excerpt_chars": len(excerpt),
             }
         )
-        remaining -= len(excerpt)
+        class_used[authority_class] = (
+            class_used.get(authority_class, 0) + len(excerpt)
+        )
 
     return {
         "budget_chars": QUINN_KNOWLEDGE_CONTEXT_CHAR_BUDGET,
@@ -177,8 +257,8 @@ def _bounded_text(value: Any, limit: int) -> str:
     return text[:limit] + "\n[TRUNCATED]"
 
 
-def _load_cognition_asset(review_root: Path, relative_path: str) -> str:
-    path = review_root / relative_path
+def _load_cognition_asset(authority_root: Path, relative_path: str) -> str:
+    path = authority_root / relative_path
     try:
         text = path.read_text(encoding="utf-8").strip()
     except OSError as exc:
@@ -196,18 +276,21 @@ def _quinn_cognitive_prompt(
     review_root: Path,
     branch: str,
     commit_sha: str,
+    authority_root: Path,
 ) -> str:
+    authority_root = authority_root.resolve()
     quinn_core = _load_cognition_asset(
-        review_root,
+        authority_root,
         "golden-core/QA_001_QUINN_COGNITION_CONTRACT_V1.md",
     )
     max_core = _load_cognition_asset(
-        review_root,
+        authority_root,
         "golden-core/MAX_PLATINUM_ENGINEERING_CORE_V1.md",
     )
     authoritative_knowledge = _authoritative_knowledge_context(
         mission,
         review_root,
+        authority_root=authority_root,
     )
 
     contract = {
@@ -251,6 +334,14 @@ def _quinn_cognitive_prompt(
         + max_core
         + "\n\nBOUNDED REVIEW CONTEXT:\n"
         + dynamic
+        + "\n\nCURRENT DECISION AUTHORITY CONTEXT:\n"
+        + (
+            "A3 = engineering/validation evidence already supplied in the "
+            "BOUNDED REVIEW CONTEXT above; evaluate its sufficiency and provenance.\n"
+            "A4 = active mission contract already supplied in the bounded contract "
+            "context above; it defines the immediate objective and delegated scope.\n"
+            "Do not duplicate A3/A4 payloads here."
+        )
         + "\n\nAUTHORITATIVE INSTITUTIONAL KNOWLEDGE:\n"
         + json.dumps(
             authoritative_knowledge,
@@ -258,6 +349,11 @@ def _quinn_cognitive_prompt(
             ensure_ascii=False,
         )
         + "\n\n"
+        "Treat A3 evidence and the A4 mission as the immediate decision context. "
+        "Institutional knowledge constrains interpretation of the active mission; "
+        "it must not replace, broaden, or invent a different QA objective. "
+        "Evaluate the evidence actually supplied for the active objective before "
+        "drawing conclusions from broader institutional context. "
         "Treat institutional knowledge according to its authority_class and "
         "source provenance. Surface material conflicts; do not silently let "
         "operational projections override stronger governance or accepted "
@@ -494,12 +590,14 @@ def _cognitive_assurance(
     review_root: Path,
     branch: str,
     commit_sha: str,
+    authority_root: Path,
 ) -> dict[str, Any]:
     prompt = _quinn_cognitive_prompt(
         mission=mission,
         review_root=review_root,
         branch=branch,
         commit_sha=commit_sha,
+        authority_root=authority_root,
     )
 
     response, provider = _quinn_provider_call(prompt)
@@ -510,6 +608,100 @@ def _cognitive_assurance(
     result["provider_response_id"] = str(response.get("id", ""))
     result["prompt_chars"] = len(prompt)
     return result
+
+
+def _acceptance_authority_gate(
+    mission: dict[str, Any],
+) -> dict[str, Any]:
+    """Establish whether deterministic evidence permits QA acceptance.
+
+    Quinn's probabilistic SATISFIED judgment is never authoritative by itself.
+    Final acceptance requires controller-generated semantic acceptance evidence
+    proving coverage of every active acceptance criterion.
+    """
+    reasons: list[str] = []
+
+    if mission.get("requires_semantic_acceptance") is not True:
+        reasons.append(
+            "mission does not require controller-owned semantic acceptance"
+        )
+
+    criteria = mission.get("acceptance_criteria")
+    if (
+        not isinstance(criteria, list)
+        or not criteria
+        or not all(
+            isinstance(item, str) and item.strip()
+            for item in criteria
+        )
+    ):
+        reasons.append(
+            "acceptance_criteria are missing or invalid"
+        )
+        criteria = []
+
+    checks = mission.get("acceptance_checks")
+    if not isinstance(checks, list) or not checks:
+        reasons.append(
+            "acceptance_checks are missing"
+        )
+
+    raw_evidence = mission.get("engineering_evidence")
+    if not isinstance(raw_evidence, (list, tuple)):
+        reasons.append(
+            "controller engineering evidence bundle is missing"
+        )
+        evidence: tuple[str, ...] = ()
+    else:
+        evidence = tuple(
+            str(item).strip()
+            for item in raw_evidence
+            if str(item).strip()
+        )
+        if not evidence:
+            reasons.append(
+                "controller engineering evidence bundle is empty"
+            )
+
+    if criteria and evidence:
+        expected_count = len(criteria)
+
+        if (
+            f"semantic_acceptance:criteria_verified:{expected_count}"
+            not in evidence
+        ):
+            reasons.append(
+                "semantic acceptance criterion count is unverified"
+            )
+
+        if "semantic_acceptance:passed" not in evidence:
+            reasons.append(
+                "semantic acceptance completion evidence is missing"
+            )
+
+        for criterion_index in range(1, expected_count + 1):
+            prefix = (
+                "semantic_acceptance:"
+                f"criterion:{criterion_index}:"
+            )
+            if not any(
+                item.startswith(prefix)
+                for item in evidence
+            ):
+                reasons.append(
+                    "semantic acceptance evidence missing for criterion "
+                    f"{criterion_index}"
+                )
+
+    return {
+        "eligible": not reasons,
+        "classification": (
+            "QA_ACCEPTED"
+            if not reasons
+            else "QA_BLOCKED_EVIDENCE"
+        ),
+        "reasons": reasons,
+    }
 
 
 def _classification_consistency_guard(
@@ -829,6 +1021,7 @@ def execute_mission(*, agent_id: str, agent_name: str, role: str, qa_eligible: b
                     review_root=review_root,
                     branch=branch,
                     commit_sha=commit_sha,
+                    authority_root=RVSC_ROOT,
                 )
             )
             cognitive = _classification_consistency_guard(
@@ -877,6 +1070,72 @@ def execute_mission(*, agent_id: str, agent_name: str, role: str, qa_eligible: b
                 result["cognitive_classification"] = cognitive_classification
                 result["cognitive_assurance"] = cognitive
                 return result
+
+            acceptance_authority = _acceptance_authority_gate(mission)
+
+            evidence.append(
+                "acceptance_authority:"
+                + (
+                    "eligible"
+                    if acceptance_authority["eligible"]
+                    else "blocked"
+                )
+            )
+            evidence.extend(
+                "acceptance_authority_reason:" + reason
+                for reason in acceptance_authority["reasons"]
+            )
+
+            _record(
+                checkpoint,
+                "qa_acceptance_authority_observed",
+                (
+                    f"run_id:{run_id}",
+                    "eligible:"
+                    + str(
+                        acceptance_authority["eligible"]
+                    ).lower(),
+                ),
+            )
+
+            if not acceptance_authority["eligible"]:
+                evidence.append("verdict:QA_REJECTED")
+
+                _record(
+                    checkpoint,
+                    "qa_rejected",
+                    (
+                        f"run_id:{run_id}",
+                        "acceptance_authority:blocked",
+                    ),
+                )
+
+                result = _reject(
+                    run_id=run_id,
+                    agent_id=agent_id,
+                    branch=branch,
+                    commit_sha=commit_sha,
+                    summary=(
+                        "acceptance authority blocked: "
+                        + "; ".join(
+                            acceptance_authority["reasons"]
+                        )
+                    ),
+                    evidence=evidence,
+                    validations=validations,
+                )
+                result["cognitive_classification"] = (
+                    cognitive_classification
+                )
+                result["cognitive_assurance"] = cognitive
+                result["acceptance_classification"] = (
+                    "QA_BLOCKED_EVIDENCE"
+                )
+                result["acceptance_authority"] = (
+                    acceptance_authority
+                )
+                return result
+
             timeout = int(mission.get("validation_timeout_seconds", 900))
             if timeout < 1 or timeout > 3600:
                 raise ValueError("validation timeout must be between 1 and 3600 seconds")
@@ -895,7 +1154,7 @@ def execute_mission(*, agent_id: str, agent_name: str, role: str, qa_eligible: b
                         return _reject(run_id=run_id, agent_id=agent_id, branch=branch, commit_sha=commit_sha, summary=f"validation failed: {name}", evidence=evidence, validations=validations)
             evidence.extend(("source_execution:isolated_copy", "verdict:QA_ACCEPTED"))
             _record(checkpoint, "qa_accepted", (f"run_id:{run_id}", f"branch:{branch}", f"commit:{commit_sha}"))
-            return {"success": True, "run_id": run_id, "agent_id": agent_id, "verdict": "QA_ACCEPTED", "cognitive_classification": cognitive_classification, "cognitive_assurance": cognitive, "reviewed_branch": branch, "reviewed_commit_sha": commit_sha, "summary": f"independent QA accepted {branch} at {commit_sha}", "evidence": evidence, "validations": validations, "retryable": False}
+            return {"success": True, "run_id": run_id, "agent_id": agent_id, "verdict": "QA_ACCEPTED", "cognitive_classification": cognitive_classification, "cognitive_assurance": cognitive, "acceptance_classification": "QA_ACCEPTED", "acceptance_authority": acceptance_authority, "reviewed_branch": branch, "reviewed_commit_sha": commit_sha, "summary": f"independent QA accepted {branch} at {commit_sha}", "evidence": evidence, "validations": validations, "retryable": False}
     except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as exc:
         evidence.extend((f"qa_failure:{exc}", "verdict:QA_REJECTED"))
         _record(checkpoint, "qa_rejected", (f"run_id:{run_id}", f"failure:{exc}"))
