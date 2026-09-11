@@ -12,6 +12,109 @@ from controller.generic_qa_worker import _acceptance_authority_gate, _authoritat
 
 
 class GenericQAWorkerTests(unittest.TestCase):
+    def test_contract_blocker_requires_contract_classification(self):
+        mission = {
+            "validation_results": {
+                "environment_ready": True,
+                "harness_integrity": True,
+            },
+            "contract_assessment": {
+                "complete": False,
+                "declared": True,
+                "blockers": [
+                    {
+                        "type": "MISSING_REQUIRED_CONTRACT_INPUT",
+                        "authority_class": "A4",
+                        "name": "approved_value",
+                    }
+                ],
+            },
+        }
+
+        cognitive = {
+            "causal_state": "REQUIREMENT_DEFECT",
+            "classification": "QA_REJECTED_REQUIREMENT",
+            "summary": "missing contract value",
+            "findings": [
+                "approved value absent"
+            ],
+        }
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "explicit contract blocker",
+        ):
+            _classification_consistency_guard(
+                mission,
+                cognitive,
+            )
+
+    def test_contract_blocker_accepts_contract_classification(self):
+        mission = {
+            "validation_results": {
+                "environment_ready": True,
+                "harness_integrity": True,
+            },
+            "contract_assessment": {
+                "complete": False,
+                "declared": True,
+                "blockers": [
+                    {
+                        "type": "MISSING_REQUIRED_CONTRACT_INPUT",
+                        "authority_class": "A4",
+                        "name": "approved_value",
+                    }
+                ],
+            },
+        }
+
+        cognitive = {
+            "causal_state": "CONTRACT_BLOCKER",
+            "classification": "QA_BLOCKED_CONTRACT",
+            "summary": "active contract is incomplete",
+            "findings": [
+                "approved value absent"
+            ],
+        }
+
+        self.assertEqual(
+            _classification_consistency_guard(
+                mission,
+                cognitive,
+            ),
+            cognitive,
+        )
+
+    def test_no_declared_contract_blocker_does_not_override_cognition(self):
+        mission = {
+            "validation_results": {
+                "environment_ready": True,
+                "harness_integrity": True,
+            },
+            "contract_assessment": {
+                "complete": True,
+                "declared": False,
+                "blockers": [],
+            },
+        }
+
+        cognitive = {
+            "causal_state": "IMPLEMENTATION_DEFECT",
+            "classification": "QA_REJECTED_IMPLEMENTATION",
+            "summary": "implementation violated requirement",
+            "findings": [
+                "observable implementation defect"
+            ],
+        }
+
+        self.assertEqual(
+            _classification_consistency_guard(
+                mission,
+                cognitive,
+            ),
+            cognitive,
+        )
+
     def _prepare_quinn_cognition_fixture(self, root: Path) -> str:
         """Create the minimum complete repository contract Quinn cognition requires."""
         core = root / "golden-core"

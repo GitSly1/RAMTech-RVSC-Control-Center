@@ -311,6 +311,7 @@ def _quinn_cognitive_prompt(
         "engineering_evidence": mission.get("engineering_evidence") or [],
         "acceptance_results": mission.get("acceptance_results") or {},
         "validation_results": mission.get("validation_results") or {},
+        "contract_assessment": mission.get("contract_assessment") or {},
     }
 
     dynamic = json.dumps(
@@ -732,6 +733,54 @@ def _classification_consistency_guard(
     ):
         raise ValueError(
             "cognitive causal state conflicts with explicit environment blocker"
+        )
+
+    contract_assessment = mission.get(
+        "contract_assessment"
+    )
+    contract_blocked = False
+
+    if isinstance(
+        contract_assessment,
+        dict,
+    ):
+        blockers = contract_assessment.get(
+            "blockers"
+        )
+
+        contract_blocked = (
+            contract_assessment.get(
+                "complete"
+            )
+            is False
+            and isinstance(
+                blockers,
+                list,
+            )
+            and bool(blockers)
+            and all(
+                isinstance(
+                    item,
+                    dict,
+                )
+                and item.get(
+                    "type"
+                )
+                == "MISSING_REQUIRED_CONTRACT_INPUT"
+                and item.get(
+                    "authority_class"
+                )
+                == "A4"
+                for item in blockers
+            )
+        )
+
+    if contract_blocked and (
+        causal_state != "CONTRACT_BLOCKER"
+        or classification != "QA_BLOCKED_CONTRACT"
+    ):
+        raise ValueError(
+            "cognitive causal state conflicts with explicit contract blocker"
         )
 
     return cognitive

@@ -3,7 +3,77 @@ import unittest
 from controller.work_package_controller import QA_ACCEPTED, QA_REJECTED, QAHandoffError, build_qa_mission, validate_qa_result, validate_scope
 
 
+from controller.work_package_controller import _assess_required_contract_inputs
 class WorkPackageControllerTests(unittest.TestCase):
+    def test_required_contract_inputs_absent_preserves_legacy_compatibility(self):
+        result = _assess_required_contract_inputs({})
+        self.assertTrue(result["complete"])
+        self.assertFalse(result["declared"])
+        self.assertEqual(result["blockers"], [])
+
+    def test_required_a4_contract_input_with_value_is_complete(self):
+        result = _assess_required_contract_inputs({
+            "required_contract_inputs": [
+                {
+                    "name": "approved_value",
+                    "authority_class": "A4",
+                    "required": True,
+                    "value": 30,
+                }
+            ]
+        })
+        self.assertTrue(result["complete"])
+        self.assertTrue(result["declared"])
+        self.assertEqual(result["blockers"], [])
+
+    def test_missing_required_a4_contract_input_is_structured_blocker(self):
+        result = _assess_required_contract_inputs({
+            "required_contract_inputs": [
+                {
+                    "name": "approved_value",
+                    "authority_class": "A4",
+                    "required": True,
+                }
+            ]
+        })
+        self.assertFalse(result["complete"])
+        self.assertEqual(
+            result["blockers"],
+            [
+                {
+                    "type": "MISSING_REQUIRED_CONTRACT_INPUT",
+                    "authority_class": "A4",
+                    "name": "approved_value",
+                }
+            ],
+        )
+
+    def test_non_authoritative_values_cannot_substitute_for_missing_a4_value(self):
+        mission = {
+            "required_contract_inputs": [
+                {
+                    "name": "approved_value",
+                    "authority_class": "A4",
+                    "required": True,
+                }
+            ],
+            "implementation_value": 30,
+            "default_value": 30,
+            "historical_value": 30,
+        }
+
+        result = _assess_required_contract_inputs(
+            mission
+        )
+
+        self.assertFalse(
+            result["complete"]
+        )
+        self.assertEqual(
+            result["blockers"][0]["type"],
+            "MISSING_REQUIRED_CONTRACT_INPUT",
+        )
+
     def mission(self, project="semantiq", repository="GitSly1/RAMTech-SEMANTIQ"):
         return {"agent_id": "DEV-001", "project": project, "repository": repository, "wp_id": "SEM-123", "work_branch": "rvsc/SEM-123", "allowed_paths": ["source.py"], "validation_commands": [{"name": "tests", "argv": ["python", "-m", "unittest"]}]}
 

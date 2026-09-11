@@ -106,6 +106,118 @@ def engineering_push_succeeded(result: dict[str, Any]) -> bool:
     return isinstance(evidence, (list, tuple)) and any(str(item).strip().lower() in {"push:success", "push:succeeded", "pushed:true"} for item in evidence)
 
 
+def _assess_required_contract_inputs(
+    mission: dict[str, Any],
+) -> dict[str, Any]:
+    """Assess explicitly declared authoritative contract dependencies.
+
+    This is structural controller authority. It does not interpret requirement
+    prose, evaluate implementation outcomes, or infer missing values.
+    """
+    raw_inputs = mission.get("required_contract_inputs")
+
+    if raw_inputs is None:
+        return {
+            "complete": True,
+            "declared": False,
+            "blockers": [],
+        }
+
+    if not isinstance(raw_inputs, list):
+        return {
+            "complete": False,
+            "declared": True,
+            "blockers": [
+                {
+                    "type": "MALFORMED_REQUIRED_CONTRACT_INPUTS",
+                    "authority_class": None,
+                    "name": "required_contract_inputs",
+                }
+            ],
+        }
+
+    blockers: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    for position, item in enumerate(
+        raw_inputs,
+        start=1,
+    ):
+        if not isinstance(item, dict):
+            blockers.append({
+                "type": "MALFORMED_REQUIRED_CONTRACT_INPUT",
+                "authority_class": None,
+                "name": f"item_{position}",
+            })
+            continue
+
+        name = str(
+            item.get("name", "")
+        ).strip()
+
+        authority_class = str(
+            item.get(
+                "authority_class",
+                "",
+            )
+        ).strip().upper()
+
+        required = item.get(
+            "required"
+        )
+
+        if not name:
+            blockers.append({
+                "type": "MALFORMED_REQUIRED_CONTRACT_INPUT",
+                "authority_class": authority_class or None,
+                "name": f"item_{position}",
+            })
+            continue
+
+        if name in seen:
+            blockers.append({
+                "type": "DUPLICATE_REQUIRED_CONTRACT_INPUT",
+                "authority_class": authority_class or None,
+                "name": name,
+            })
+            continue
+
+        seen.add(name)
+
+        if (
+            authority_class != "A4"
+            or not isinstance(
+                required,
+                bool,
+            )
+        ):
+            blockers.append({
+                "type": "MALFORMED_REQUIRED_CONTRACT_INPUT",
+                "authority_class": authority_class or None,
+                "name": name,
+            })
+            continue
+
+        if required is not True:
+            continue
+
+        if (
+            "value" not in item
+            or item.get("value") is None
+        ):
+            blockers.append({
+                "type": "MISSING_REQUIRED_CONTRACT_INPUT",
+                "authority_class": "A4",
+                "name": name,
+            })
+
+    return {
+        "complete": not blockers,
+        "declared": True,
+        "blockers": blockers,
+    }
+
+
 def build_qa_mission(*, engineering_mission: dict[str, Any], engineering_result: dict[str, Any], qa_agent_id: str) -> dict[str, Any]:
     implementer_id = str(engineering_mission.get("agent_id", "")).strip()
     qa_agent_id = qa_agent_id.strip()
@@ -170,6 +282,9 @@ def build_qa_mission(*, engineering_mission: dict[str, Any], engineering_result:
         "allowed_paths": list(engineering_mission.get("allowed_paths") or engineering_mission.get("authorized_paths") or ()),
         "validation_commands": list(engineering_mission.get("validation_commands") or ()),
         "engineering_evidence": engineering_evidence,
+        "contract_assessment": _assess_required_contract_inputs(
+            engineering_mission
+        ),
     })
     return qa_mission
 
