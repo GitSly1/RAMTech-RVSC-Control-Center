@@ -96,6 +96,17 @@ Use the following semantic boundaries when selecting a classification.
 
 Classification precedence must follow root cause rather than surface symptom.
 
+### Root-cause classification precedence
+
+Classify the condition that prevents a defensible QA disposition, not merely the acceptance criterion that remains unmet because of that condition.
+
+- Use `QA_BLOCKED_CONTRACT` only when the contract itself is the blocker: contradictory, materially ambiguous, mutually exclusive, or contractually incomplete.
+- Do not use `QA_BLOCKED_CONTRACT` merely because a valid acceptance criterion could not be completed.
+- If an otherwise valid and sufficiently clear contract cannot be evaluated because an external runtime, provider, dependency, infrastructure, service, or execution environment is unavailable or unhealthy, use `QA_BLOCKED_ENVIRONMENT`.
+- If an otherwise valid and sufficiently clear contract cannot be evaluated because the prescribed validation or qualification mechanism is defective, use `QA_BLOCKED_HARNESS`.
+- An environment or harness blocker must not be converted into an implementation rejection unless independent evidence establishes an implementation defect.
+- When several symptoms exist, select the most specific evidenced root cause that actually prevents the QA decision.
+
 Examples:
 
 - A clear requirement that directly conflicts with authoritative RVSC policy is `QA_REJECTED_REQUIREMENT`.

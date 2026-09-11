@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 import subprocess
@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from controller.generic_qa_worker import _quinn_cognitive_prompt, _repo_root, _validated_cognitive_assurance, execute_mission
+from controller.generic_qa_worker import _classification_consistency_guard, _quinn_cognitive_prompt, _repo_root, _validated_cognitive_assurance, execute_mission
 
 
 class GenericQAWorkerTests(unittest.TestCase):
@@ -91,7 +91,7 @@ class GenericQAWorkerTests(unittest.TestCase):
         self, cognitive
     ):
         cognitive.return_value = {
-            "classification": "QA_ACCEPTED",
+            "causal_state": "SATISFIED",
             "summary": "objective and acceptance evidence are sufficient",
             "findings": [
                 "reviewed implementation satisfies supplied objective"
@@ -130,7 +130,7 @@ class GenericQAWorkerTests(unittest.TestCase):
         self, cognitive
     ):
         cognitive.return_value = {
-            "classification": "QA_REJECTED_IMPLEMENTATION",
+            "causal_state": "IMPLEMENTATION_DEFECT",
             "summary": "implementation does not satisfy objective",
             "findings": ["tests pass but required behavior is absent"],
         }
@@ -178,14 +178,95 @@ class GenericQAWorkerTests(unittest.TestCase):
             "QA_REJECTED_IMPLEMENTATION",
         )
 
-    def test_cognitive_result_rejects_unknown_classification(self):
+    def test_environment_blocker_requires_environment_classification(self):
+        mission = {
+            "validation_results": {
+                "environment_ready": False,
+                "harness_integrity": True,
+            }
+        }
+        cognitive = {
+            "causal_state": "CONTRACT_BLOCKER",
+            "classification": "QA_BLOCKED_CONTRACT",
+            "summary": "dependency unavailable",
+            "findings": ["external endpoint unreachable"],
+        }
+
         with self.assertRaisesRegex(
             ValueError,
-            "unsupported classification",
+            "explicit environment blocker",
+        ):
+            _classification_consistency_guard(mission, cognitive)
+
+    def test_environment_blocker_accepts_environment_classification(self):
+        mission = {
+            "validation_results": {
+                "environment_ready": False,
+                "harness_integrity": True,
+            }
+        }
+        cognitive = {
+            "causal_state": "ENVIRONMENT_BLOCKER",
+            "classification": "QA_BLOCKED_ENVIRONMENT",
+            "summary": "dependency unavailable",
+            "findings": ["external endpoint unreachable"],
+        }
+
+        self.assertIs(
+            _classification_consistency_guard(mission, cognitive),
+            cognitive,
+        )
+
+    def test_consistency_guard_does_not_infer_environment_without_explicit_state(self):
+        mission = {
+            "validation_results": {
+                "harness_integrity": True,
+            }
+        }
+        cognitive = {
+            "causal_state": "CONTRACT_BLOCKER",
+            "classification": "QA_BLOCKED_CONTRACT",
+            "summary": "judgment remains cognitive",
+            "findings": ["no explicit environment blocker"],
+        }
+
+        self.assertIs(
+            _classification_consistency_guard(mission, cognitive),
+            cognitive,
+        )
+
+    def test_causal_state_maps_to_rvsc_disposition_deterministically(self):
+        cases = {
+            "SATISFIED": "QA_ACCEPTED",
+            "IMPLEMENTATION_DEFECT": "QA_REJECTED_IMPLEMENTATION",
+            "REQUIREMENT_DEFECT": "QA_REJECTED_REQUIREMENT",
+            "CONTRACT_BLOCKER": "QA_BLOCKED_CONTRACT",
+            "HARNESS_BLOCKER": "QA_BLOCKED_HARNESS",
+            "ENVIRONMENT_BLOCKER": "QA_BLOCKED_ENVIRONMENT",
+            "BOUNDARY_BLOCKER": "QA_BLOCKED_BOUNDARY",
+            "EVIDENCE_BLOCKER": "QA_BLOCKED_EVIDENCE",
+        }
+
+        for causal_state, expected in cases.items():
+            with self.subTest(causal_state=causal_state):
+                result = _validated_cognitive_assurance(
+                    {
+                        "causal_state": causal_state,
+                        "summary": "root cause assessed",
+                        "findings": ["evidence-backed finding"],
+                    }
+                )
+                self.assertEqual(result["causal_state"], causal_state)
+                self.assertEqual(result["classification"], expected)
+
+    def test_cognitive_result_rejects_unknown_causal_state(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "unsupported causal state",
         ):
             _validated_cognitive_assurance(
                 {
-                    "classification": "QA_MAGIC",
+                    "causal_state": "MAGIC",
                     "summary": "invalid",
                     "findings": ["invalid"],
                 }
@@ -198,7 +279,7 @@ class GenericQAWorkerTests(unittest.TestCase):
         ):
             _validated_cognitive_assurance(
                 {
-                    "classification": "QA_ACCEPTED",
+                    "causal_state": "SATISFIED",
                     "summary": "looks correct",
                     "findings": None,
                 }
@@ -250,7 +331,7 @@ class GenericQAWorkerTests(unittest.TestCase):
                             {
                                 "type": "output_text",
                                 "text": (
-                                    '{"classification":"QA_ACCEPTED",'
+                                    '{"causal_state":"SATISFIED",'
                                     '"summary":"objective satisfied",'
                                     '"findings":["evidence is sufficient"]}'
                                 ),
@@ -287,7 +368,7 @@ class GenericQAWorkerTests(unittest.TestCase):
                 commit_sha="c" * 40,
             )
 
-        self.assertEqual(result["classification"], "QA_ACCEPTED")
+        self.assertEqual(result["causal_state"], "SATISFIED")
         self.assertEqual(result["provider"], "ollama")
         self.assertEqual(result["provider_response_id"], "qa-provider-1")
         self.assertGreater(result["prompt_chars"], 0)
@@ -301,7 +382,7 @@ class GenericQAWorkerTests(unittest.TestCase):
         self.assertEqual(
             set(schema["required"]),
             {
-                "classification",
+                "causal_state",
                 "summary",
                 "findings",
             },
@@ -309,7 +390,8 @@ class GenericQAWorkerTests(unittest.TestCase):
 
         properties = schema["properties"]
 
-        self.assertIn("classification", properties)
+        self.assertIn("causal_state", properties)
+        self.assertNotIn("classification", properties)
         self.assertIn("summary", properties)
         self.assertIn("findings", properties)
 

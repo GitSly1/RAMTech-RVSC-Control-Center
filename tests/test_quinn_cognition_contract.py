@@ -71,6 +71,19 @@ class QuinnCognitionContractTests(unittest.TestCase):
             self.text,
         )
 
+    def test_root_cause_precedence_distinguishes_environment_from_contract(self) -> None:
+        for phrase in (
+            "Classify the condition that prevents a defensible QA disposition",
+            "Use `QA_BLOCKED_CONTRACT` only when the contract itself is the blocker",
+            "Do not use `QA_BLOCKED_CONTRACT` merely because a valid acceptance criterion could not be completed.",
+            "external runtime, provider, dependency, infrastructure, service, or execution environment",
+            "use `QA_BLOCKED_ENVIRONMENT`",
+            "prescribed validation or qualification mechanism is defective",
+            "use `QA_BLOCKED_HARNESS`",
+            "most specific evidenced root cause",
+        ):
+            self.assertIn(phrase, self.text)
+
     def test_classification_taxonomy_covers_blocking_boundaries(self) -> None:
         for phrase in (
             "QA_BLOCKED_HARNESS",

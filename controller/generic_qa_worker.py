@@ -122,30 +122,57 @@ def _quinn_cognitive_prompt(
         "when evidence is insufficient.\n\n"
         "Return ONLY one JSON object with exactly these semantic fields:\n"
         "{"
-        "\"classification\": one of "
-        "\"QA_ACCEPTED\", "
-        "\"QA_REJECTED_IMPLEMENTATION\", "
-        "\"QA_REJECTED_REQUIREMENT\", "
-        "\"QA_BLOCKED_CONTRACT\", "
-        "\"QA_BLOCKED_HARNESS\", "
-        "\"QA_BLOCKED_ENVIRONMENT\", "
-        "\"QA_BLOCKED_BOUNDARY\", "
-        "\"QA_BLOCKED_EVIDENCE\"; "
+        "\"causal_state\": one of "
+        "\"SATISFIED\", "
+        "\"IMPLEMENTATION_DEFECT\", "
+        "\"REQUIREMENT_DEFECT\", "
+        "\"CONTRACT_BLOCKER\", "
+        "\"HARNESS_BLOCKER\", "
+        "\"ENVIRONMENT_BLOCKER\", "
+        "\"BOUNDARY_BLOCKER\", "
+        "\"EVIDENCE_BLOCKER\"; "
         "\"summary\": non-empty string; "
         "\"findings\": array of non-empty strings"
-        "}"
+        "}. "
+        "Determine the evidenced root cause. Do not encode an RVSC QA_* "
+        "disposition; RVSC policy maps causal_state to disposition."
     )
 
 
 
+_QUINN_CAUSAL_STATES = frozenset(
+    {
+        "SATISFIED",
+        "IMPLEMENTATION_DEFECT",
+        "REQUIREMENT_DEFECT",
+        "CONTRACT_BLOCKER",
+        "HARNESS_BLOCKER",
+        "ENVIRONMENT_BLOCKER",
+        "BOUNDARY_BLOCKER",
+        "EVIDENCE_BLOCKER",
+    }
+)
+
+_CAUSAL_STATE_TO_CLASSIFICATION = {
+    "SATISFIED": "QA_ACCEPTED",
+    "IMPLEMENTATION_DEFECT": "QA_REJECTED_IMPLEMENTATION",
+    "REQUIREMENT_DEFECT": "QA_REJECTED_REQUIREMENT",
+    "CONTRACT_BLOCKER": "QA_BLOCKED_CONTRACT",
+    "HARNESS_BLOCKER": "QA_BLOCKED_HARNESS",
+    "ENVIRONMENT_BLOCKER": "QA_BLOCKED_ENVIRONMENT",
+    "BOUNDARY_BLOCKER": "QA_BLOCKED_BOUNDARY",
+    "EVIDENCE_BLOCKER": "QA_BLOCKED_EVIDENCE",
+}
+
+
 def _quinn_assurance_schema() -> dict[str, Any]:
-    classifications = sorted(_COGNITIVE_CLASSIFICATIONS)
+    causal_states = sorted(_QUINN_CAUSAL_STATES)
     return {
         "type": "object",
         "properties": {
-            "classification": {
+            "causal_state": {
                 "type": "string",
-                "enum": classifications,
+                "enum": causal_states,
             },
             "summary": {
                 "type": "string",
@@ -161,7 +188,7 @@ def _quinn_assurance_schema() -> dict[str, Any]:
             },
         },
         "required": [
-            "classification",
+            "causal_state",
             "summary",
             "findings",
         ],
@@ -338,15 +365,50 @@ def _cognitive_assurance(
     return result
 
 
+def _classification_consistency_guard(
+    mission: dict[str, Any],
+    cognitive: dict[str, Any],
+) -> dict[str, Any]:
+    """Fail closed when explicit structured blocker state conflicts with cognition.
+
+    This guard does not infer from Quinn's prose and does not manufacture a
+    replacement classification. It acts only when structured mission evidence
+    establishes an unambiguous causal blocker.
+    """
+    classification = cognitive["classification"]
+    causal_state = cognitive.get("causal_state")
+    validation_results = mission.get("validation_results")
+
+    if not isinstance(validation_results, dict):
+        return cognitive
+
+    environment_blocked = (
+        validation_results.get("environment_ready") is False
+        and validation_results.get("harness_integrity") is True
+    )
+
+    if environment_blocked and (
+        causal_state != "ENVIRONMENT_BLOCKER"
+        or classification != "QA_BLOCKED_ENVIRONMENT"
+    ):
+        raise ValueError(
+            "cognitive causal state conflicts with explicit environment blocker"
+        )
+
+    return cognitive
+
+
 def _validated_cognitive_assurance(result: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(result, dict):
         raise ValueError("cognitive assurance result must be an object")
 
-    classification = str(result.get("classification", "")).strip()
-    if classification not in _COGNITIVE_CLASSIFICATIONS:
+    causal_state = str(result.get("causal_state", "")).strip()
+    if causal_state not in _QUINN_CAUSAL_STATES:
         raise ValueError(
-            "cognitive assurance returned unsupported classification"
+            "cognitive assurance returned unsupported causal state"
         )
+
+    classification = _CAUSAL_STATE_TO_CLASSIFICATION[causal_state]
 
     summary = str(result.get("summary", "")).strip()
     if not summary:
@@ -361,6 +423,7 @@ def _validated_cognitive_assurance(result: dict[str, Any]) -> dict[str, Any]:
         )
 
     validated = {
+        "causal_state": causal_state,
         "classification": classification,
         "summary": summary,
         "findings": [item.strip() for item in findings],
@@ -620,6 +683,10 @@ def execute_mission(*, agent_id: str, agent_name: str, role: str, qa_eligible: b
                     branch=branch,
                     commit_sha=commit_sha,
                 )
+            )
+            cognitive = _classification_consistency_guard(
+                mission,
+                cognitive,
             )
             cognitive_classification = cognitive["classification"]
             evidence.extend(
