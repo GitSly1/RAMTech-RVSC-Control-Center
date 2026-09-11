@@ -96,7 +96,26 @@ Use the following semantic boundaries when selecting a classification.
 
 Classification precedence must follow root cause rather than surface symptom.
 
-### Root-cause classification precedence
+#### Requirement-defect versus contract-blocker boundary
+
+Use the causal owner of the first divergence, not merely the acceptance criterion that cannot currently be proven.
+
+- `REQUIREMENT_DEFECT` means the authoritative requirement is present and sufficiently clear to evaluate, but the requirement itself is invalid, contradictory, impossible, unsafe, or otherwise defective.
+- `CONTRACT_BLOCKER` means a required authoritative contract dimension, value, decision, constraint, or instruction is absent, incomplete, ambiguous, unavailable, or mutually exclusive such that QA cannot make the required decision.
+- Absence of a required A4 active-mission/work-package contract value is `CONTRACT_BLOCKER`; the missing value does not make the requirement itself defective.
+- Never substitute an implementation value, historical value, default, lower-authority source, or model inference for missing authoritative contract information.
+- If the requirement exists and is internally contradictory, classify `REQUIREMENT_DEFECT`. If the requirement depends on authoritative contract information that was never supplied or is incomplete, classify `CONTRACT_BLOCKER`.
+
+Contrastive examples:
+
+1. Requirement says the same integer must be both greater than zero and less than zero -> `REQUIREMENT_DEFECT`.
+2. Requirement says timeout must equal the approved production timeout, but the active contract supplies no approved timeout -> `CONTRACT_BLOCKER`.
+3. Implementation returns a value that violates a coherent, complete requirement -> `IMPLEMENTATION_DEFECT`.
+4. Evidence cannot establish whether a complete requirement was met even though the governing contract is complete -> `EVIDENCE_BLOCKER`.
+
+This boundary is semantic. Deterministic RVSC authority maps validated causal states to dispositions; it must not infer this semantic distinction from prose keywords.
+
+## Root-cause classification precedence
 
 Classify the condition that prevents a defensible QA disposition, not merely the acceptance criterion that remains unmet because of that condition.
 
