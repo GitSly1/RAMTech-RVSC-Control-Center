@@ -8,10 +8,78 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from controller.generic_qa_worker import _classification_consistency_guard, _quinn_cognitive_prompt, _repo_root, _validated_cognitive_assurance, execute_mission
+from controller.generic_qa_worker import _authoritative_knowledge_context, _classification_consistency_guard, _quinn_cognitive_prompt, _repo_root, _validated_cognitive_assurance, execute_mission
 
 
 class GenericQAWorkerTests(unittest.TestCase):
+    def _prepare_quinn_cognition_fixture(self, root: Path) -> str:
+        """Create the minimum complete repository contract Quinn cognition requires."""
+        core = root / "golden-core"
+        governance = root / "governance"
+        core.mkdir(parents=True, exist_ok=True)
+        governance.mkdir(parents=True, exist_ok=True)
+
+        (core / "QA_001_QUINN_COGNITION_CONTRACT_V1.md").write_text(
+            "QUINN CONTRACT",
+            encoding="utf-8",
+        )
+        (core / "MAX_PLATINUM_ENGINEERING_CORE_V1.md").write_text(
+            "MAX DISCIPLINE",
+            encoding="utf-8",
+        )
+
+        (
+            governance / "AUTHORITATIVE_KNOWLEDGE_HIERARCHY.md"
+        ).write_text(
+            "Human/company authority remains supreme. "
+            "Operational projections cannot override stronger evidence.\n",
+            encoding="utf-8",
+        )
+        (governance / "SOURCE_ISOLATION.md").write_text(
+            "Repository and allowed-path boundaries remain authoritative.\n",
+            encoding="utf-8",
+        )
+        (governance / "WORK_PACKAGE_LIFECYCLE.md").write_text(
+            "Independent QA is required before acceptance and promotion.\n",
+            encoding="utf-8",
+        )
+
+        subprocess.run(
+            ["git", "init", "-b", "main"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Fixture"],
+            cwd=root,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.email", "fixture@example.invalid"],
+            cwd=root,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "add", "."],
+            cwd=root,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "quinn cognition fixture"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+        )
+
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.base = Path(self.temporary.name)
@@ -288,16 +356,7 @@ class GenericQAWorkerTests(unittest.TestCase):
     def test_quinn_prompt_uses_bounded_contract_context(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            core = root / "golden-core"
-            core.mkdir()
-            (core / "QA_001_QUINN_COGNITION_CONTRACT_V1.md").write_text(
-                "QUINN CONTRACT",
-                encoding="utf-8",
-            )
-            (core / "MAX_PLATINUM_ENGINEERING_CORE_V1.md").write_text(
-                "MAX DISCIPLINE",
-                encoding="utf-8",
-            )
+            fixture_sha = self._prepare_quinn_cognition_fixture(root)
 
             prompt = _quinn_cognitive_prompt(
                 mission={
@@ -308,7 +367,7 @@ class GenericQAWorkerTests(unittest.TestCase):
                 },
                 review_root=root,
                 branch="rvsc/review",
-                commit_sha="b" * 40,
+                commit_sha=fixture_sha,
             )
 
         self.assertIn("QUINN CONTRACT", prompt)
@@ -345,16 +404,7 @@ class GenericQAWorkerTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            core = root / "golden-core"
-            core.mkdir()
-            (core / "QA_001_QUINN_COGNITION_CONTRACT_V1.md").write_text(
-                "QUINN CONTRACT",
-                encoding="utf-8",
-            )
-            (core / "MAX_PLATINUM_ENGINEERING_CORE_V1.md").write_text(
-                "MAX DISCIPLINE",
-                encoding="utf-8",
-            )
+            fixture_sha = self._prepare_quinn_cognition_fixture(root)
 
             from controller.generic_qa_worker import _cognitive_assurance
 
@@ -365,7 +415,7 @@ class GenericQAWorkerTests(unittest.TestCase):
                 },
                 review_root=root,
                 branch="rvsc/review",
-                commit_sha="c" * 40,
+                commit_sha=fixture_sha,
             )
 
         self.assertEqual(result["causal_state"], "SATISFIED")
@@ -373,6 +423,202 @@ class GenericQAWorkerTests(unittest.TestCase):
         self.assertEqual(result["provider_response_id"], "qa-provider-1")
         self.assertGreater(result["prompt_chars"], 0)
 
+
+    def test_authoritative_knowledge_is_bounded_and_provenanced(self):
+        root = self.base / "knowledge-repo"
+        root.mkdir()
+        subprocess.run(
+            ["git", "init", "-b", "main"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Fixture"],
+            cwd=root,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.email", "fixture@example.invalid"],
+            cwd=root,
+            check=True,
+        )
+
+        files = {
+            "governance/AUTHORITATIVE_KNOWLEDGE_HIERARCHY.md":
+                "Human/company authority remains supreme.\n",
+            "governance/SOURCE_ISOLATION.md":
+                "Allowed paths are bounded and agents cannot expand scope.\n",
+            "governance/WORK_PACKAGE_LIFECYCLE.md":
+                "Independent QA is required before acceptance.\n",
+            "docs/ORCHESTRATION_ARCHITECTURE.md":
+                "RVSC orchestration routes QA-001 Quinn independently.\n",
+            "config/agents.yaml":
+                "agents:\n  QA-001:\n    name: Quinn\n",
+            "config/orchestration.yaml":
+                "qa: QA-001\n",
+            "config/repositories.yaml":
+                "rvsc: GitSly1/RAMTech-RVSC-Control-Center\n",
+            "PROJECT_REGISTRY.md":
+                "RVSC current project registry.\n",
+            "ROADMAP.md":
+                "RVSC roadmap projection.\n",
+            "COMMAND_DASHBOARD.md":
+                "RVSC command dashboard projection.\n",
+            "SPRINT_DASHBOARD.md":
+                "RVSC sprint dashboard projection.\n",
+        }
+
+        for relative_path, content in files.items():
+            path = root / relative_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+
+        subprocess.run(["git", "add", "."], cwd=root, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "knowledge fixture"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+        )
+
+        mission = {
+            "project": "RVSC",
+            "repository": "GitSly1/RAMTech-RVSC-Control-Center",
+            "objective": "Verify Quinn independent QA orchestration",
+            "acceptance_criteria": ["QA remains independent"],
+            "allowed_paths": ["controller/generic_qa_worker.py"],
+            "changed_files": ["controller/generic_qa_worker.py"],
+        }
+
+        context = _authoritative_knowledge_context(mission, root)
+
+        self.assertLessEqual(
+            context["used_chars"],
+            context["budget_chars"],
+        )
+        self.assertTrue(context["sources"])
+
+        for source in context["sources"]:
+            self.assertIn(source["authority_class"], {"A1", "A2", "A5"})
+            self.assertTrue(source["path"])
+            self.assertRegex(source["revision"], r"^[0-9a-f]{40}$")
+            self.assertRegex(source["sha256"], r"^[0-9a-f]{64}$")
+            self.assertIsInstance(source["truncated"], bool)
+            self.assertLessEqual(source["excerpt_chars"], 3000)
+
+    def test_authoritative_knowledge_requires_governance_sources(self):
+        root = self.base / "missing-governance"
+        root.mkdir()
+        subprocess.run(
+            ["git", "init", "-b", "main"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Fixture"],
+            cwd=root,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.email", "fixture@example.invalid"],
+            cwd=root,
+            check=True,
+        )
+        (root / "placeholder.txt").write_text("rvsc\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=root, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "fixture"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "required authoritative knowledge source missing",
+        ):
+            _authoritative_knowledge_context(
+                {"project": "RVSC", "objective": "QA"},
+                root,
+            )
+
+    def test_quinn_prompt_contains_authority_provenance_not_repository_dump(self):
+        root = self.base / "prompt-knowledge"
+        root.mkdir()
+        subprocess.run(
+            ["git", "init", "-b", "main"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Fixture"],
+            cwd=root,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.email", "fixture@example.invalid"],
+            cwd=root,
+            check=True,
+        )
+
+        fixture_files = {
+            "golden-core/QA_001_QUINN_COGNITION_CONTRACT_V1.md":
+                "Quinn independent assurance.",
+            "golden-core/MAX_PLATINUM_ENGINEERING_CORE_V1.md":
+                "Human authority is supreme.",
+            "governance/AUTHORITATIVE_KNOWLEDGE_HIERARCHY.md":
+                "A1 governance controls projections.",
+            "governance/SOURCE_ISOLATION.md":
+                "Scope is bounded.",
+            "governance/WORK_PACKAGE_LIFECYCLE.md":
+                "QA is independent.",
+            "COMMAND_DASHBOARD.md":
+                "RVSC dashboard says executing.",
+        }
+        for relative_path, content in fixture_files.items():
+            path = root / relative_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+
+        subprocess.run(["git", "add", "."], cwd=root, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "prompt fixture"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+        )
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+
+        prompt = _quinn_cognitive_prompt(
+            mission={
+                "project": "RVSC",
+                "repository": "RAMTech-RVSC-Control-Center",
+                "objective": "Review RVSC dashboard execution claim",
+                "acceptance_criteria": ["Use authoritative evidence"],
+                "allowed_paths": ["COMMAND_DASHBOARD.md"],
+                "changed_files": ["COMMAND_DASHBOARD.md"],
+            },
+            review_root=root,
+            branch="rvsc/test",
+            commit_sha=sha,
+        )
+
+        self.assertIn("AUTHORITATIVE INSTITUTIONAL KNOWLEDGE", prompt)
+        self.assertIn('"authority_class": "A1"', prompt)
+        self.assertIn('"path": "governance/SOURCE_ISOLATION.md"', prompt)
+        self.assertIn('"revision":', prompt)
+        self.assertIn('"sha256":', prompt)
+        self.assertIn('"truncated":', prompt)
+        self.assertIn("COMMAND_DASHBOARD.md", prompt)
 
     def test_quinn_schema_is_qa_owned_not_engineering_proposal(self):
         from controller.generic_qa_worker import _quinn_assurance_schema

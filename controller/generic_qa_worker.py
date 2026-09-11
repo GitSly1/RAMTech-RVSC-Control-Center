@@ -35,6 +35,139 @@ _COGNITIVE_CLASSIFICATIONS = {
 
 
 QUINN_COGNITION_CONTEXT_CHAR_BUDGET = 12000
+QUINN_KNOWLEDGE_CONTEXT_CHAR_BUDGET = 9000
+
+_QUINN_KNOWLEDGE_SOURCES = (
+    ("A1", "governance/AUTHORITATIVE_KNOWLEDGE_HIERARCHY.md"),
+    ("A1", "governance/SOURCE_ISOLATION.md"),
+    ("A1", "governance/WORK_PACKAGE_LIFECYCLE.md"),
+    ("A2", "docs/ORCHESTRATION_ARCHITECTURE.md"),
+    ("A2", "config/agents.yaml"),
+    ("A2", "config/orchestration.yaml"),
+    ("A2", "config/repositories.yaml"),
+    ("A5", "PROJECT_REGISTRY.md"),
+    ("A5", "ROADMAP.md"),
+    ("A5", "COMMAND_DASHBOARD.md"),
+    ("A5", "SPRINT_DASHBOARD.md"),
+)
+
+
+def _knowledge_terms(mission: dict[str, Any]) -> frozenset[str]:
+    values = [
+        mission.get("project"),
+        mission.get("repository"),
+        mission.get("objective"),
+        *(mission.get("acceptance_criteria") or []),
+        *(mission.get("allowed_paths") or []),
+        *(mission.get("changed_files") or []),
+    ]
+    terms: set[str] = set()
+    for value in values:
+        for token in re.findall(r"[A-Za-z0-9_.-]{3,}", str(value or "").lower()):
+            terms.add(token)
+    return frozenset(terms)
+
+
+def _knowledge_revision(review_root: Path, relative_path: str) -> str:
+    completed = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=review_root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    revision = completed.stdout.strip()
+    if completed.returncode != 0 or not _FULL_COMMIT_SHA.fullmatch(revision):
+        raise RuntimeError(
+            f"unable to establish knowledge revision for {relative_path}"
+        )
+    return revision
+
+
+def _authoritative_knowledge_context(
+    mission: dict[str, Any],
+    review_root: Path,
+) -> dict[str, Any]:
+    terms = _knowledge_terms(mission)
+    selected: list[dict[str, Any]] = []
+
+    for authority_class, relative_path in _QUINN_KNOWLEDGE_SOURCES:
+        path = (review_root / relative_path).resolve()
+        try:
+            path.relative_to(review_root.resolve())
+        except ValueError as exc:
+            raise RuntimeError(
+                f"knowledge source escaped controlled repository: {relative_path}"
+            ) from exc
+
+        if not path.is_file():
+            if authority_class == "A1":
+                raise RuntimeError(
+                    f"required authoritative knowledge source missing: {relative_path}"
+                )
+            continue
+
+        raw = path.read_text(encoding="utf-8-sig")
+        lowered = raw.lower()
+
+        # Governance is always eligible. Architecture/configuration and
+        # operational projections require mission relevance.
+        score = 100 if authority_class == "A1" else sum(
+            1 for term in terms if term in lowered or term in relative_path.lower()
+        )
+        if authority_class != "A1" and score == 0:
+            continue
+
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        selected.append(
+            {
+                "authority_class": authority_class,
+                "path": relative_path,
+                "revision": _knowledge_revision(review_root, relative_path),
+                "sha256": digest,
+                "score": score,
+                "raw": raw.strip(),
+            }
+        )
+
+    selected.sort(
+        key=lambda item: (
+            int(item["authority_class"][1:]),
+            -int(item["score"]),
+            str(item["path"]),
+        )
+    )
+
+    remaining = QUINN_KNOWLEDGE_CONTEXT_CHAR_BUDGET
+    sources: list[dict[str, Any]] = []
+
+    for item in selected:
+        if remaining <= 0:
+            break
+
+        raw = str(item.pop("raw"))
+        # Reserve room for useful coverage across multiple relevant sources.
+        per_source_limit = min(3000, remaining)
+        excerpt = raw[:per_source_limit]
+        truncated = len(raw) > len(excerpt)
+
+        sources.append(
+            {
+                **item,
+                "excerpt": excerpt,
+                "truncated": truncated,
+                "source_chars": len(raw),
+                "excerpt_chars": len(excerpt),
+            }
+        )
+        remaining -= len(excerpt)
+
+    return {
+        "budget_chars": QUINN_KNOWLEDGE_CONTEXT_CHAR_BUDGET,
+        "used_chars": sum(item["excerpt_chars"] for item in sources),
+        "sources": sources,
+    }
+
 
 
 def _bounded_text(value: Any, limit: int) -> str:
@@ -71,6 +204,10 @@ def _quinn_cognitive_prompt(
     max_core = _load_cognition_asset(
         review_root,
         "golden-core/MAX_PLATINUM_ENGINEERING_CORE_V1.md",
+    )
+    authoritative_knowledge = _authoritative_knowledge_context(
+        mission,
+        review_root,
     )
 
     contract = {
@@ -114,7 +251,17 @@ def _quinn_cognitive_prompt(
         + max_core
         + "\n\nBOUNDED REVIEW CONTEXT:\n"
         + dynamic
+        + "\n\nAUTHORITATIVE INSTITUTIONAL KNOWLEDGE:\n"
+        + json.dumps(
+            authoritative_knowledge,
+            sort_keys=True,
+            ensure_ascii=False,
+        )
         + "\n\n"
+        "Treat institutional knowledge according to its authority_class and "
+        "source provenance. Surface material conflicts; do not silently let "
+        "operational projections override stronger governance or accepted "
+        "evidence. "
         "Independently judge the objective, acceptance sufficiency, "
         "implementation evidence, authority boundaries, evidence integrity, "
         "and material uncertainty. Tests passing is not sufficient by itself. "
