@@ -386,6 +386,64 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
         )
         self.assertEqual(result["source.py"], "A = 2\nB = 2\n")
 
+    def test_locator_edits_reject_final_invalid_python(self):
+        source = {
+            "fixture.py": (
+                "from pathlib import Path\n"
+                "\n"
+                "CONFIG_NAME = 'config.json'\n"
+                "\n"
+                "def load_config():\n"
+                "    config_path = Path.cwd() / CONFIG_NAME\n"
+                "    return config_path.read_text()\n"
+            )
+        }
+        catalog, _ = _source_locator_catalog(source)
+        target = next(
+            item
+            for item in catalog["fixture.py"]
+            if item["line_start"] <= 6 <= item["line_end"]
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "produces invalid Python",
+        ):
+            _apply_locator_edits(
+                source,
+                [{
+                    "operation": "replace",
+                    "path": "fixture.py",
+                    "anchor_id": target["anchor_id"],
+                    "new_text": (
+                        "    config_path = Path(__file__).parent / CONFIG_NAME"
+                        "    return config_path.read_text()\n"
+                    ),
+                }],
+                existing_paths={"fixture.py"},
+            )
+
+    def test_locator_edits_do_not_compile_non_python_files(self):
+        source = {"settings.txt": "VALUE = 1\n"}
+        catalog, _ = _source_locator_catalog(source)
+        anchor_id = catalog["settings.txt"][0]["anchor_id"]
+
+        result = _apply_locator_edits(
+            source,
+            [{
+                "operation": "replace",
+                "path": "settings.txt",
+                "anchor_id": anchor_id,
+                "new_text": "this is not python syntax\n",
+            }],
+            existing_paths={"settings.txt"},
+        )
+
+        self.assertEqual(
+            result["settings.txt"],
+            "this is not python syntax\n",
+        )
+
     def test_locator_edits_support_generated_line_reference(self):
         source = {"source.py": "VALUE = 1\n"}
         catalog, _ = _source_locator_catalog(source)

@@ -383,6 +383,16 @@ def _apply_locator_edits(
         )
         generated_outputs[index] = (path, new_text)
 
+    for path, content in progressive.items():
+        if path.lower().endswith(".py"):
+            try:
+                compile(content, path, "exec")
+            except SyntaxError as exc:
+                raise RuntimeError(
+                    f"bounded locator proposal produces invalid Python "
+                    f"for {path}: {exc.msg} at line {exc.lineno}"
+                ) from exc
+
     return progressive
 
 
