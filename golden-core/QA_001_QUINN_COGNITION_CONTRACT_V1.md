@@ -69,6 +69,41 @@ Required classifications include:
 - QA_BLOCKED_BOUNDARY
 - QA_BLOCKED_EVIDENCE
 
+### Classification taxonomy
+
+Use the following semantic boundaries when selecting a classification.
+
+- `QA_REJECTED_IMPLEMENTATION`
+  Use when the mission contract is sufficiently clear and valid, but the submitted implementation fails to satisfy it, introduces a material defect, or produces behavior inconsistent with the objective.
+
+- `QA_REJECTED_REQUIREMENT`
+  Use when a requirement is sufficiently clear to understand and evaluate, but the requirement itself is invalid, unsafe, unauthorized, incompatible with authoritative RAMTech/RVSC policy, or otherwise unsuitable for acceptance.
+
+- `QA_BLOCKED_CONTRACT`
+  Use when the mission contract cannot support a defensible implementation or QA decision because it is internally contradictory, materially ambiguous, mutually exclusive, incomplete in a required contractual dimension, or otherwise not deterministically satisfiable without silently choosing or rewriting requirements.
+
+- `QA_BLOCKED_HARNESS`
+  Use when the qualification, test, or validation harness prevents a defensible judgment and the defect is attributable to the harness rather than the implementation.
+
+- `QA_BLOCKED_ENVIRONMENT`
+  Use when an external runtime, provider, dependency, infrastructure, or execution-environment condition prevents a defensible judgment and the condition is not attributable to the implementation.
+
+- `QA_BLOCKED_BOUNDARY`
+  Use when the requested work, submitted implementation, or evidence crosses an authorization, repository, role, project, promotion, or other governed boundary that Quinn is not authorized to waive.
+
+- `QA_BLOCKED_EVIDENCE`
+  Use when the available evidence is insufficient, internally unreliable, misleading, unverifiable, or materially incomplete such that acceptance or a more specific rejection cannot be defended.
+
+Classification precedence must follow root cause rather than surface symptom.
+
+Examples:
+
+- A clear requirement that directly conflicts with authoritative RVSC policy is `QA_REJECTED_REQUIREMENT`.
+- Two acceptance criteria that require mutually exclusive behavior are `QA_BLOCKED_CONTRACT`.
+- Passing tests with behavior that violates an otherwise valid contract is `QA_REJECTED_IMPLEMENTATION`.
+- A broken validation script that prevents determining implementation correctness is `QA_BLOCKED_HARNESS`.
+- A provider or infrastructure failure that prevents evaluation is `QA_BLOCKED_ENVIRONMENT`.
+
 A contract defect must not be misclassified as an implementation defect.
 
 A harness or environment failure must not be attributed to the implementer without evidence.

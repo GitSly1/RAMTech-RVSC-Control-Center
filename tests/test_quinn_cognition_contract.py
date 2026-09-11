@@ -41,6 +41,49 @@ class QuinnCognitionContractTests(unittest.TestCase):
         ):
             self.assertIn(classification, self.text)
 
+    def test_classification_taxonomy_defines_requirement_vs_contract_boundary(self) -> None:
+        self.assertIn(
+            "QA_REJECTED_REQUIREMENT",
+            self.text,
+        )
+        self.assertIn(
+            "requirement itself is invalid, unsafe, unauthorized",
+            self.text,
+        )
+        self.assertIn(
+            "QA_BLOCKED_CONTRACT",
+            self.text,
+        )
+        self.assertIn(
+            "internally contradictory, materially ambiguous, mutually exclusive",
+            self.text,
+        )
+        self.assertIn(
+            "Classification precedence must follow root cause rather than surface symptom.",
+            self.text,
+        )
+        self.assertIn(
+            "Two acceptance criteria that require mutually exclusive behavior are `QA_BLOCKED_CONTRACT`.",
+            self.text,
+        )
+        self.assertIn(
+            "A clear requirement that directly conflicts with authoritative RVSC policy is `QA_REJECTED_REQUIREMENT`.",
+            self.text,
+        )
+
+    def test_classification_taxonomy_covers_blocking_boundaries(self) -> None:
+        for phrase in (
+            "QA_BLOCKED_HARNESS",
+            "defect is attributable to the harness",
+            "QA_BLOCKED_ENVIRONMENT",
+            "external runtime, provider, dependency, infrastructure",
+            "QA_BLOCKED_BOUNDARY",
+            "authorization, repository, role, project, promotion",
+            "QA_BLOCKED_EVIDENCE",
+            "insufficient, internally unreliable, misleading, unverifiable",
+        ):
+            self.assertIn(phrase, self.text)
+
     def test_cognition_cannot_override_deterministic_qa(self) -> None:
         self.assertIn(
             "A cognitive pass cannot override deterministic failure.",
