@@ -1867,6 +1867,301 @@ class QuinnStructuredCausalDecisionRegressionTests(unittest.TestCase):
         )
 
 
+class QuinnCausalSatisfactionEligibilityRegressionTests(
+    unittest.TestCase
+):
+    def _validated(
+        self,
+        *,
+        owner,
+        state,
+        blocker_fact,
+    ):
+        from controller.generic_qa_worker import (
+            _validated_cognitive_assurance,
+        )
+
+        positive_fact = (
+            "The reviewed implementation satisfies "
+            "its functional behavior."
+        )
+
+        return _validated_cognitive_assurance(
+            {
+                "observed_facts": [
+                    positive_fact,
+                    blocker_fact,
+                ],
+                "missing_facts": [],
+                "supported_inferences": [],
+                "unsupported_inferences": [],
+                "causal_owner": owner,
+                "causal_justification": blocker_fact,
+                "causal_evidence_refs": [
+                    blocker_fact,
+                ],
+                "causal_state": state,
+                "summary": blocker_fact,
+                "findings": [
+                    blocker_fact,
+                ],
+            }
+        )
+
+    def test_complete_blocker_matrix_survives_positive_implementation_evidence(
+        self,
+    ):
+        from controller.generic_qa_worker import (
+            _causal_decision_consistency_guard,
+        )
+
+        matrix = (
+            (
+                "IMPLEMENTATION",
+                "IMPLEMENTATION_DEFECT",
+                "QA_REJECTED_IMPLEMENTATION",
+                "A material implementation defect remains.",
+            ),
+            (
+                "REQUIREMENT",
+                "REQUIREMENT_DEFECT",
+                "QA_REJECTED_REQUIREMENT",
+                "A material requirement defect remains.",
+            ),
+            (
+                "CONTRACT",
+                "CONTRACT_BLOCKER",
+                "QA_BLOCKED_CONTRACT",
+                "The active contract blocks a defensible decision.",
+            ),
+            (
+                "VALIDATION_HARNESS",
+                "HARNESS_BLOCKER",
+                "QA_BLOCKED_HARNESS",
+                "The prescribed validation harness is defective.",
+            ),
+            (
+                "ENVIRONMENT",
+                "ENVIRONMENT_BLOCKER",
+                "QA_BLOCKED_ENVIRONMENT",
+                "The execution environment blocks a defensible decision.",
+            ),
+            (
+                "AUTHORITY_BOUNDARY",
+                "BOUNDARY_BLOCKER",
+                "QA_BLOCKED_BOUNDARY",
+                "The submission crosses a governed authority boundary.",
+            ),
+            (
+                "EVIDENCE",
+                "EVIDENCE_BLOCKER",
+                "QA_BLOCKED_EVIDENCE",
+                "The evidence cannot support a defensible decision.",
+            ),
+        )
+
+        for (
+            owner,
+            state,
+            classification,
+            blocker_fact,
+        ) in matrix:
+            with self.subTest(
+                owner=owner,
+                state=state,
+            ):
+                cognitive = self._validated(
+                    owner=owner,
+                    state=state,
+                    blocker_fact=blocker_fact,
+                )
+
+                result = (
+                    _causal_decision_consistency_guard(
+                        cognitive
+                    )
+                )
+
+                self.assertEqual(
+                    result["causal_owner"],
+                    owner,
+                )
+                self.assertEqual(
+                    result["causal_state"],
+                    state,
+                )
+                self.assertEqual(
+                    result["classification"],
+                    classification,
+                )
+
+    def test_satisfied_remains_none_owner_without_material_blocker(
+        self,
+    ):
+        from controller.generic_qa_worker import (
+            _causal_decision_consistency_guard,
+            _validated_cognitive_assurance,
+        )
+
+        fact = (
+            "No material governed blocker remains "
+            "and acceptance evidence is sufficient."
+        )
+
+        cognitive = _validated_cognitive_assurance(
+            {
+                "observed_facts": [
+                    fact,
+                ],
+                "missing_facts": [],
+                "supported_inferences": [],
+                "unsupported_inferences": [],
+                "causal_owner": "NONE",
+                "causal_justification": fact,
+                "causal_evidence_refs": [
+                    fact,
+                ],
+                "causal_state": "SATISFIED",
+                "summary": fact,
+                "findings": [
+                    fact,
+                ],
+            }
+        )
+
+        result = (
+            _causal_decision_consistency_guard(
+                cognitive
+            )
+        )
+
+        self.assertEqual(
+            result["causal_owner"],
+            "NONE",
+        )
+        self.assertEqual(
+            result["causal_state"],
+            "SATISFIED",
+        )
+        self.assertEqual(
+            result["classification"],
+            "QA_ACCEPTED",
+        )
+
+    def test_authoritative_contract_defines_satisfied_eligibility(
+        self,
+    ):
+        contract_path = (
+            Path.cwd()
+            / "golden-core"
+            / "QA_001_QUINN_COGNITION_CONTRACT_V1.md"
+        )
+
+        text = contract_path.read_text(
+            encoding="utf-8-sig"
+        )
+
+        self.assertIn(
+            "### Causal-state satisfaction eligibility",
+            text,
+        )
+        self.assertIn(
+            "`SATISFIED` is a whole-disposition causal state",
+            text,
+        )
+        self.assertIn(
+            "no governed authority or scope boundary "
+            "has been crossed",
+            text,
+        )
+        self.assertIn(
+            "Positive evidence in one causal domain does not "
+            "cancel a material blocker in another causal domain.",
+            text,
+        )
+        self.assertIn(
+            "must not manufacture a replacement semantic "
+            "causal state from prose findings",
+            text,
+        )
+
+    def test_rendered_prompt_projects_satisfied_eligibility_semantics(
+        self,
+    ):
+        prompt = _quinn_cognitive_prompt(
+            mission={
+                "project": "RVSC",
+                "repository": (
+                    "GitSly1/RAMTech-RVSC-Control-Center"
+                ),
+                "objective": (
+                    "Review governed engineering work."
+                ),
+                "acceptance_criteria": [
+                    "Implementation is correct.",
+                    "Submission remains inside authorized scope.",
+                ],
+                "allowed_paths": [
+                    "controller/generic_qa_worker.py",
+                ],
+                "changed_files": [
+                    "controller/generic_qa_worker.py",
+                ],
+                "engineering_evidence": [
+                    "Functional behavior passed.",
+                ],
+                "validation_results": {
+                    "environment_ready": True,
+                    "harness_integrity": True,
+                },
+                "contract_assessment": {
+                    "declared": True,
+                    "complete": True,
+                    "blockers": [],
+                },
+            },
+            review_root=Path.cwd(),
+            branch="qualification",
+            commit_sha="a" * 40,
+            authority_root=Path.cwd(),
+        )
+
+        self.assertIn(
+            "SATISFIED ELIGIBILITY RULE:",
+            prompt,
+        )
+
+        self.assertIn(
+            "Positive evidence in one causal domain "
+            "must not cancel a material blocker in another.",
+            prompt,
+        )
+
+        self.assertIn(
+            "Do not preserve the blocker only as a secondary "
+            "finding while selecting SATISFIED",
+            prompt,
+        )
+
+        for owner in (
+            "IMPLEMENTATION",
+            "REQUIREMENT",
+            "CONTRACT",
+            "VALIDATION_HARNESS",
+            "ENVIRONMENT",
+            "AUTHORITY_BOUNDARY",
+            "EVIDENCE",
+        ):
+            with self.subTest(
+                owner=owner,
+            ):
+                self.assertIn(
+                    owner,
+                    prompt,
+                )
+
+
+
 
 if __name__ == "__main__":
     unittest.main()

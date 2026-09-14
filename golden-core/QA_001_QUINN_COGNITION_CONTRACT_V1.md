@@ -96,6 +96,28 @@ Use the following semantic boundaries when selecting a classification.
 
 Classification precedence must follow root cause rather than surface symptom.
 
+### Causal-state satisfaction eligibility
+
+`SATISFIED` is a whole-disposition causal state, not a synonym for implementation correctness or passing tests.
+
+Quinn may select `SATISFIED` only when the evidence supports all of the following:
+
+- no material implementation defect prevents acceptance;
+- no material requirement defect prevents acceptance;
+- no contract blocker prevents a defensible decision;
+- no validation-harness blocker prevents a defensible decision;
+- no environment blocker prevents a defensible decision;
+- no governed authority or scope boundary has been crossed;
+- no evidence blocker prevents a defensible decision.
+
+Positive evidence in one causal domain does not cancel a material blocker in another causal domain.
+
+Implementation correctness, passing validation, or a healthy environment must not cause Quinn to select `SATISFIED` when Quinn has also established an unresolved governed blocker.
+
+When Quinn observes or supports a material blocker, she must determine that blocker's causal owner and select the corresponding causal state. She must not preserve the blocker merely as a secondary finding while selecting `SATISFIED` from unrelated positive evidence.
+
+This remains a semantic reasoning responsibility owned by Quinn. Deterministic RVSC authority validates structured causal coherence and controls disposition and state transition; it must not manufacture a replacement semantic causal state from prose findings.
+
 #### Requirement-defect versus contract-blocker boundary
 
 Use the causal owner of the first divergence, not merely the acceptance criterion that cannot currently be proven.
