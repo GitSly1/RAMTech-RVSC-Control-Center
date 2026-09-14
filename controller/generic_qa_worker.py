@@ -343,6 +343,23 @@ def _quinn_cognitive_prompt(
             "context above; it defines the immediate objective and delegated scope.\n"
             "Do not duplicate A3/A4 payloads here."
         )
+        + "\n\nEPISTEMIC REASONING REQUIREMENT:\n"
+        + (
+            "Before selecting causal_state, explicitly separate observed facts, "
+            "missing facts, supported inferences, and unsupported inferences.\n"
+            "A controller contract_assessment blocker with "
+            "type=MISSING_REQUIRED_CONTRACT_INPUT and authority_class=A4 "
+            "establishes that a required active-mission contract fact is absent. "
+            "Do not invent, default, reconstruct, substitute, or infer that "
+            "missing authoritative value.\n"
+            "A comparison that requires an authoritative value recorded as "
+            "missing is unsupported. Do not claim another value matches, differs "
+            "from, exceeds, violates, or equals an absent authoritative value.\n"
+            "Use only supported inferences when determining causal_state. "
+            "Unsupported inferences must not justify causal_state.\n"
+            "The deterministic controller establishes structured authority facts; "
+            "Quinn retains semantic ownership of causal_state."
+        )
         + "\n\nAUTHORITATIVE INSTITUTIONAL KNOWLEDGE:\n"
         + json.dumps(
             authoritative_knowledge,
@@ -366,6 +383,10 @@ def _quinn_cognitive_prompt(
         "when evidence is insufficient.\n\n"
         "Return ONLY one JSON object with exactly these semantic fields:\n"
         "{"
+        "\"observed_facts\": array of non-empty strings; "
+        "\"missing_facts\": array of non-empty strings; "
+        "\"supported_inferences\": array of non-empty strings; "
+        "\"unsupported_inferences\": array of non-empty strings; "
         "\"causal_state\": one of "
         "\"SATISFIED\", "
         "\"IMPLEMENTATION_DEFECT\", "
@@ -411,9 +432,22 @@ _CAUSAL_STATE_TO_CLASSIFICATION = {
 
 def _quinn_assurance_schema() -> dict[str, Any]:
     causal_states = sorted(_QUINN_CAUSAL_STATES)
+
+    epistemic_list = {
+        "type": "array",
+        "items": {
+            "type": "string",
+            "minLength": 1,
+        },
+    }
+
     return {
         "type": "object",
         "properties": {
+            "observed_facts": epistemic_list,
+            "missing_facts": epistemic_list,
+            "supported_inferences": epistemic_list,
+            "unsupported_inferences": epistemic_list,
             "causal_state": {
                 "type": "string",
                 "enum": causal_states,
@@ -432,6 +466,10 @@ def _quinn_assurance_schema() -> dict[str, Any]:
             },
         },
         "required": [
+            "observed_facts",
+            "missing_facts",
+            "supported_inferences",
+            "unsupported_inferences",
             "causal_state",
             "summary",
             "findings",
@@ -705,6 +743,106 @@ def _acceptance_authority_gate(
     }
 
 
+def _epistemic_consistency_guard(
+    mission: dict[str, Any],
+    cognitive: dict[str, Any],
+) -> dict[str, Any]:
+    contract_assessment = mission.get(
+        "contract_assessment"
+    )
+
+    if not isinstance(
+        contract_assessment,
+        dict,
+    ):
+        return cognitive
+
+    blockers = contract_assessment.get(
+        "blockers"
+    )
+
+    missing_a4 = (
+        contract_assessment.get("complete")
+        is False
+        and isinstance(blockers, list)
+        and bool(blockers)
+        and all(
+            isinstance(item, dict)
+            and item.get("type")
+            == "MISSING_REQUIRED_CONTRACT_INPUT"
+            and item.get("authority_class")
+            == "A4"
+            for item in blockers
+        )
+    )
+
+    if not missing_a4:
+        return cognitive
+
+    missing_facts = cognitive.get(
+        "missing_facts"
+    )
+
+    unsupported = cognitive.get(
+        "unsupported_inferences"
+    )
+
+    supported = cognitive.get(
+        "supported_inferences"
+    )
+
+    if not isinstance(missing_facts, list):
+        raise ValueError(
+            "cognitive assurance did not preserve "
+            "epistemic missing-fact state"
+        )
+
+    if not isinstance(unsupported, list):
+        raise ValueError(
+            "cognitive assurance did not preserve "
+            "unsupported-inference state"
+        )
+
+    if not isinstance(supported, list):
+        raise ValueError(
+            "cognitive assurance did not preserve "
+            "supported-inference state"
+        )
+
+    if not missing_facts:
+        raise ValueError(
+            "cognitive assurance omitted explicit "
+            "missing A4 contract fact"
+        )
+
+    prohibited_comparison_terms = (
+        "matches",
+        "match",
+        "differs",
+        "different",
+        "exceeds",
+        "violates",
+        "equals",
+        "equal",
+        "mismatch",
+    )
+
+    for inference in supported:
+        lowered = inference.casefold()
+
+        if any(
+            term in lowered
+            for term in prohibited_comparison_terms
+        ):
+            raise ValueError(
+                "cognitive assurance promoted a comparison "
+                "requiring missing A4 authority into "
+                "supported inference"
+            )
+
+    return cognitive
+
+
 def _classification_consistency_guard(
     mission: dict[str, Any],
     cognitive: dict[str, Any],
@@ -786,38 +924,92 @@ def _classification_consistency_guard(
     return cognitive
 
 
-def _validated_cognitive_assurance(result: dict[str, Any]) -> dict[str, Any]:
+def _validated_cognitive_assurance(
+    result: dict[str, Any],
+) -> dict[str, Any]:
     if not isinstance(result, dict):
-        raise ValueError("cognitive assurance result must be an object")
+        raise ValueError(
+            "cognitive assurance result must be an object"
+        )
 
-    causal_state = str(result.get("causal_state", "")).strip()
+    epistemic_fields = (
+        "observed_facts",
+        "missing_facts",
+        "supported_inferences",
+        "unsupported_inferences",
+    )
+
+    epistemic: dict[str, list[str]] = {}
+
+    for field in epistemic_fields:
+        value = result.get(field)
+
+        if not isinstance(value, list) or not all(
+            isinstance(item, str) and item.strip()
+            for item in value
+        ):
+            raise ValueError(
+                "cognitive assurance "
+                + field
+                + " must be a list of non-empty strings"
+            )
+
+        epistemic[field] = [
+            item.strip()
+            for item in value
+        ]
+
+    causal_state = str(
+        result.get("causal_state", "")
+    ).strip()
+
     if causal_state not in _QUINN_CAUSAL_STATES:
         raise ValueError(
             "cognitive assurance returned unsupported causal state"
         )
 
-    classification = _CAUSAL_STATE_TO_CLASSIFICATION[causal_state]
+    classification = (
+        _CAUSAL_STATE_TO_CLASSIFICATION[
+            causal_state
+        ]
+    )
 
-    summary = str(result.get("summary", "")).strip()
+    summary = str(
+        result.get("summary", "")
+    ).strip()
+
     if not summary:
-        raise ValueError("cognitive assurance summary is required")
+        raise ValueError(
+            "cognitive assurance summary is required"
+        )
 
     findings = result.get("findings")
+
     if not isinstance(findings, list) or not all(
-        isinstance(item, str) and item.strip() for item in findings
+        isinstance(item, str) and item.strip()
+        for item in findings
     ):
         raise ValueError(
-            "cognitive assurance findings must be a list of non-empty strings"
+            "cognitive assurance findings must be a list "
+            "of non-empty strings"
         )
 
     validated = {
+        **epistemic,
         "causal_state": causal_state,
         "classification": classification,
         "summary": summary,
-        "findings": [item.strip() for item in findings],
+        "findings": [
+            item.strip()
+            for item in findings
+        ],
     }
 
-    for key in ("provider", "provider_response_id", "prompt_chars"):
+    for key in (
+        "provider",
+        "provider_response_id",
+        "prompt_chars",
+    ):
         if key in result:
             validated[key] = result[key]
 
@@ -1072,6 +1264,10 @@ def execute_mission(*, agent_id: str, agent_name: str, role: str, qa_eligible: b
                     commit_sha=commit_sha,
                     authority_root=RVSC_ROOT,
                 )
+            )
+            cognitive = _epistemic_consistency_guard(
+                mission,
+                cognitive,
             )
             cognitive = _classification_consistency_guard(
                 mission,

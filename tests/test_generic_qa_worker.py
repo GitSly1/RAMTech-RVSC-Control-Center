@@ -279,6 +279,10 @@ class GenericQAWorkerTests(unittest.TestCase):
         self, cognitive
     ):
         cognitive.return_value = {
+            "observed_facts": [],
+            "missing_facts": [],
+            "supported_inferences": [],
+            "unsupported_inferences": [],
             "causal_state": "SATISFIED",
             "summary": "objective and acceptance evidence are sufficient",
             "findings": [
@@ -318,6 +322,10 @@ class GenericQAWorkerTests(unittest.TestCase):
         self, cognitive
     ):
         cognitive.return_value = {
+            "observed_facts": [],
+            "missing_facts": [],
+            "supported_inferences": [],
+            "unsupported_inferences": [],
             "causal_state": "IMPLEMENTATION_DEFECT",
             "summary": "implementation does not satisfy objective",
             "findings": ["tests pass but required behavior is absent"],
@@ -516,6 +524,10 @@ class GenericQAWorkerTests(unittest.TestCase):
         cognitive,
     ):
         cognitive.return_value = {
+            "observed_facts": [],
+            "missing_facts": [],
+            "supported_inferences": [],
+            "unsupported_inferences": [],
             "causal_state": "SATISFIED",
             "summary": "tests passed",
             "findings": ["supplied tests passed"],
@@ -558,6 +570,10 @@ class GenericQAWorkerTests(unittest.TestCase):
             with self.subTest(causal_state=causal_state):
                 result = _validated_cognitive_assurance(
                     {
+                        "observed_facts": [],
+                        "missing_facts": [],
+                        "supported_inferences": [],
+                        "unsupported_inferences": [],
                         "causal_state": causal_state,
                         "summary": "root cause assessed",
                         "findings": ["evidence-backed finding"],
@@ -573,6 +589,10 @@ class GenericQAWorkerTests(unittest.TestCase):
         ):
             _validated_cognitive_assurance(
                 {
+                    "observed_facts": [],
+                    "missing_facts": [],
+                    "supported_inferences": [],
+                    "unsupported_inferences": [],
                     "causal_state": "MAGIC",
                     "summary": "invalid",
                     "findings": ["invalid"],
@@ -586,6 +606,10 @@ class GenericQAWorkerTests(unittest.TestCase):
         ):
             _validated_cognitive_assurance(
                 {
+                    "observed_facts": [],
+                    "missing_facts": [],
+                    "supported_inferences": [],
+                    "unsupported_inferences": [],
                     "causal_state": "SATISFIED",
                     "summary": "looks correct",
                     "findings": None,
@@ -630,7 +654,11 @@ class GenericQAWorkerTests(unittest.TestCase):
                             {
                                 "type": "output_text",
                                 "text": (
-                                    '{"causal_state":"SATISFIED",'
+                                    '{"observed_facts":["evidence supplied"],'
+                                    '"missing_facts":[],'
+                                    '"supported_inferences":["objective supported"],'
+                                    '"unsupported_inferences":[],'
+                                    '"causal_state":"SATISFIED",'
                                     '"summary":"objective satisfied",'
                                     '"findings":["evidence is sufficient"]}'
                                 ),
@@ -1187,6 +1215,10 @@ class GenericQAWorkerTests(unittest.TestCase):
         self.assertEqual(
             set(schema["required"]),
             {
+                "observed_facts",
+                "missing_facts",
+                "supported_inferences",
+                "unsupported_inferences",
                 "causal_state",
                 "summary",
                 "findings",
@@ -1195,6 +1227,10 @@ class GenericQAWorkerTests(unittest.TestCase):
 
         properties = schema["properties"]
 
+        self.assertIn("observed_facts", properties)
+        self.assertIn("missing_facts", properties)
+        self.assertIn("supported_inferences", properties)
+        self.assertIn("unsupported_inferences", properties)
         self.assertIn("causal_state", properties)
         self.assertNotIn("classification", properties)
         self.assertIn("summary", properties)
@@ -1203,6 +1239,196 @@ class GenericQAWorkerTests(unittest.TestCase):
         self.assertNotIn("edits", properties)
         self.assertNotIn("commit_message", properties)
         self.assertNotIn("engineering_summary", properties)
+
+
+class QuinnEpistemicBoundaryRegressionTests(unittest.TestCase):
+    def test_old_three_field_provider_result_is_rejected(self):
+        from controller.generic_qa_worker import (
+            _validated_cognitive_assurance,
+        )
+
+        with self.assertRaises(ValueError):
+            _validated_cognitive_assurance(
+                {
+                    "causal_state": "CONTRACT_BLOCKER",
+                    "summary": "blocked",
+                    "findings": ["missing contract input"],
+                }
+            )
+
+    def test_epistemic_schema_requires_grounding_fields(self):
+        from controller.generic_qa_worker import (
+            _quinn_assurance_schema,
+        )
+
+        schema = _quinn_assurance_schema()
+
+        self.assertEqual(
+            set(schema["required"]),
+            {
+                "observed_facts",
+                "missing_facts",
+                "supported_inferences",
+                "unsupported_inferences",
+                "causal_state",
+                "summary",
+                "findings",
+            },
+        )
+
+    def test_missing_a4_fact_cannot_be_supported_comparison(self):
+        from controller.generic_qa_worker import (
+            _epistemic_consistency_guard,
+        )
+
+        mission = {
+            "contract_assessment": {
+                "complete": False,
+                "blockers": [
+                    {
+                        "type":
+                            "MISSING_REQUIRED_CONTRACT_INPUT",
+                        "authority_class": "A4",
+                        "name": "approved_production_timeout",
+                    }
+                ],
+            }
+        }
+
+        cognitive = {
+            "observed_facts": [
+                "implementation timeout is 30"
+            ],
+            "missing_facts": [
+                "approved production timeout is absent"
+            ],
+            "supported_inferences": [
+                "implementation timeout differs from approved timeout"
+            ],
+            "unsupported_inferences": [],
+            "causal_state": "REQUIREMENT_DEFECT",
+            "classification": "QA_REJECTED_REQUIREMENT",
+            "summary": "mismatch",
+            "findings": ["timeout mismatch"],
+        }
+
+        with self.assertRaises(ValueError):
+            _epistemic_consistency_guard(
+                mission,
+                cognitive,
+            )
+
+    def test_missing_a4_fact_allows_grounded_contract_blocker(self):
+        from controller.generic_qa_worker import (
+            _epistemic_consistency_guard,
+        )
+
+        mission = {
+            "contract_assessment": {
+                "complete": False,
+                "blockers": [
+                    {
+                        "type":
+                            "MISSING_REQUIRED_CONTRACT_INPUT",
+                        "authority_class": "A4",
+                        "name": "approved_production_timeout",
+                    }
+                ],
+            }
+        }
+
+        cognitive = {
+            "observed_facts": [
+                "implementation timeout is 30"
+            ],
+            "missing_facts": [
+                "approved production timeout is absent"
+            ],
+            "supported_inferences": [
+                "required A4 value is unavailable"
+            ],
+            "unsupported_inferences": [
+                "timeout comparison cannot be established"
+            ],
+            "causal_state": "CONTRACT_BLOCKER",
+            "classification": "QA_BLOCKED_CONTRACT",
+            "summary": "required contract value is absent",
+            "findings": [
+                "comparison cannot be established"
+            ],
+        }
+
+        result = _epistemic_consistency_guard(
+            mission,
+            cognitive,
+        )
+
+        self.assertEqual(
+            result["causal_state"],
+            "CONTRACT_BLOCKER",
+        )
+
+    def test_prompt_preserves_active_evidence_and_epistemic_order(self):
+        import tempfile
+        from controller.generic_qa_worker import (
+            _quinn_cognitive_prompt,
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fixture_sha = (
+                GenericQAWorkerTests()
+                ._prepare_quinn_cognition_fixture(root)
+            )
+
+            prompt = _quinn_cognitive_prompt(
+                mission={
+                    "objective": "evaluate timeout",
+                    "acceptance_criteria": [
+                        "timeout must equal approved value"
+                    ],
+                    "allowed_paths": ["app.py"],
+                    "engineering_evidence": [
+                        "TARGET_EVIDENCE_PRESENT"
+                    ],
+                    "contract_assessment": {
+                        "complete": False,
+                        "blockers": [
+                            {
+                                "type":
+                                    "MISSING_REQUIRED_CONTRACT_INPUT",
+                                "authority_class": "A4",
+                                "name":
+                                    "approved_production_timeout",
+                            }
+                        ],
+                    },
+                },
+                review_root=root,
+                branch="rvsc/review",
+                commit_sha=fixture_sha,
+                authority_root=root,
+            )
+
+        self.assertIn(
+            "TARGET_EVIDENCE_PRESENT",
+            prompt,
+        )
+        self.assertIn(
+            "CURRENT DECISION AUTHORITY CONTEXT",
+            prompt,
+        )
+        self.assertIn(
+            "EPISTEMIC REASONING REQUIREMENT",
+            prompt,
+        )
+
+        self.assertLess(
+            prompt.index("BOUNDED REVIEW CONTEXT"),
+            prompt.index(
+                "EPISTEMIC REASONING REQUIREMENT"
+            ),
+        )
 
 
 if __name__ == "__main__":
