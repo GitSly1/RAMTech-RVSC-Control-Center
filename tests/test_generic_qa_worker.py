@@ -763,6 +763,48 @@ class GenericQAWorkerTests(unittest.TestCase):
         self.assertIn("[TRUNCATED]", prompt)
         self.assertLess(len(prompt), 35000)
 
+    @patch("controller.generic_qa_worker.urllib.request.urlopen")
+    def test_quinn_ollama_call_owns_shared_context_capacity(self, urlopen):
+        import json
+        from unittest.mock import Mock
+
+        from controller.generic_qa_worker import _quinn_ollama_call
+
+        response = Mock()
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        response.read.return_value = json.dumps(
+            {
+                "model": "qwen2.5-coder:7b-instruct",
+                "response": "{}",
+            }
+        ).encode("utf-8")
+
+        urlopen.return_value = response
+
+        _quinn_ollama_call("bounded QA prompt")
+
+        request = urlopen.call_args.args[0]
+        payload = json.loads(
+            request.data.decode("utf-8")
+        )
+
+        self.assertEqual(
+            payload["options"],
+            {"num_ctx": 32768},
+        )
+        self.assertEqual(
+            payload["model"],
+            "qwen2.5-coder:7b-instruct",
+        )
+        self.assertFalse(
+            payload["stream"]
+        )
+        self.assertIn(
+            "format",
+            payload,
+        )
+
     @patch("controller.generic_qa_worker._quinn_provider_call")
     def test_provider_backed_cognition_returns_structured_assurance(
         self, provider

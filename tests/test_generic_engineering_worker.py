@@ -618,6 +618,10 @@ class GenericEngineeringWorkerTests(unittest.TestCase):
             payload["format"],
             _ollama_proposal_schema(allowed_paths),
         )
+        self.assertEqual(
+            payload["options"],
+            {"num_ctx": 32768},
+        )
 
         schema = payload["format"]
 

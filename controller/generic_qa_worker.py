@@ -582,6 +582,7 @@ def _quinn_ollama_call(prompt: str) -> dict[str, Any]:
     # proposal schema here.
     from controller.generic_engineering_worker import (
         DEFAULT_OLLAMA_MODEL,
+        OLLAMA_CONTEXT_LENGTH,
         OLLAMA_URL,
     )
 
@@ -590,6 +591,9 @@ def _quinn_ollama_call(prompt: str) -> dict[str, Any]:
             "model": DEFAULT_OLLAMA_MODEL,
             "prompt": prompt,
             "stream": False,
+            "options": {
+                "num_ctx": OLLAMA_CONTEXT_LENGTH,
+            },
             "format": _quinn_assurance_schema(),
         }
     ).encode("utf-8")

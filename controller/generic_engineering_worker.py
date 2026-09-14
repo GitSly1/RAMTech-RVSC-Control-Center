@@ -24,6 +24,7 @@ DEFAULT_OLLAMA_MODEL = os.environ.get(
     "RVSC_OLLAMA_MODEL",
     "qwen2.5-coder:7b-instruct",
 )
+OLLAMA_CONTEXT_LENGTH = 32768
 DEFAULT_MODEL = DEFAULT_OPENAI_MODEL
 RVSC_ROOT = Path(__file__).resolve().parents[1]
 MAX_CORE_PATH = Path(os.environ.get("RVSC_MAX_CORE_PATH", str(RVSC_ROOT / "golden-core" / "MAX_PLATINUM_ENGINEERING_CORE_V1.md")))
@@ -818,6 +819,9 @@ def _ollama_call(prompt: str, allowed_paths: tuple[str, ...]) -> dict[str, Any]:
             "model": DEFAULT_OLLAMA_MODEL,
             "prompt": prompt,
             "stream": False,
+            "options": {
+                "num_ctx": OLLAMA_CONTEXT_LENGTH,
+            },
             "format": _ollama_proposal_schema(allowed_paths),
         }
     ).encode("utf-8")
