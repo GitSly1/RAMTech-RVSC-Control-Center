@@ -128,6 +128,37 @@ These are different semantic responsibilities:
 - `causal_owner` identifies the governed domain in which the material root cause originates.
 - `causal_state` identifies the resulting QA causal condition.
 
+### Causal evidence binding invariant
+
+Quinn must bind every causal conclusion to her finalized epistemic claims.
+
+The governing invariant is:
+
+`CAUSAL_EVIDENCE_REFS SUBSET_OF OBSERVED_FACTS UNION SUPPORTED_INFERENCES`
+
+Membership uses exact string identity.
+
+Quinn must perform causal evidence binding in this order:
+
+1. Finalize `observed_facts`.
+2. Finalize `supported_inferences`.
+3. Determine the material root cause and causal domain.
+4. Select the finalized epistemic claims that prove that causal conclusion.
+5. Copy those selected claims verbatim into `causal_evidence_refs`.
+
+The required operation is:
+
+`SELECT -> COPY`
+
+Quinn must not regenerate, summarize, rewrite, normalize, or paraphrase a selected epistemic claim when placing it in `causal_evidence_refs`.
+
+A semantically equivalent statement is not a valid causal evidence reference unless that exact statement already exists in `observed_facts` or `supported_inferences`.
+
+`causal_evidence_refs` are traceability references to Quinn's finalized epistemic claims. They are not a second prose-generation surface.
+
+Deterministic RVSC authority must fail closed when a causal evidence reference is not exactly present in the finalized epistemic arrays. The controller must not repair, fuzzy-match, semantically reinterpret, or rewrite an invalid causal evidence reference.
+
+
 Evidence proving a blocker does not become the causal owner merely because the conclusion depends on evidence.
 
 The governing invariant is:

@@ -11,6 +11,244 @@ from unittest.mock import patch
 from controller.generic_qa_worker import _acceptance_authority_gate, _authoritative_knowledge_context, _classification_consistency_guard, _quinn_cognitive_prompt, _repo_root, _validated_cognitive_assurance, execute_mission
 
 
+
+class QuinnCausalEvidenceBindingRegressionTests(unittest.TestCase):
+    """Exact epistemic-to-causal evidence binding."""
+
+    def _boundary_cognition(self):
+        fact = (
+            "boundary_assessment: unauthorized_changed_files contains "
+            "golden-core/QA_001_QUINN_COGNITION_CONTRACT_V1.md"
+        )
+        return {
+            "observed_facts": [fact],
+            "missing_facts": [],
+            "supported_inferences": [],
+            "unsupported_inferences": [],
+            "causal_owner": "AUTHORITY_BOUNDARY",
+            "causal_justification": (
+                "The finalized boundary fact proves the causal conclusion."
+            ),
+            "causal_evidence_refs": [fact],
+            "causal_state": "BOUNDARY_BLOCKER",
+            "summary": "Delegated repository scope was exceeded.",
+            "findings": [
+                "A changed file is outside delegated scope."
+            ],
+        }
+
+    def test_exact_observed_fact_reference_is_accepted(self):
+        cognition = self._boundary_cognition()
+
+        validated = _validated_cognitive_assurance(
+            cognition
+        )
+
+        self.assertEqual(
+            validated["causal_evidence_refs"],
+            cognition["observed_facts"],
+        )
+        self.assertEqual(
+            validated["classification"],
+            "QA_BLOCKED_BOUNDARY",
+        )
+
+    def test_semantic_paraphrase_is_rejected(self):
+        cognition = self._boundary_cognition()
+
+        cognition["causal_evidence_refs"] = [
+            "The Quinn cognition contract is outside authorized scope."
+        ]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "claims outside observed_facts/supported_inferences",
+        ):
+            _validated_cognitive_assurance(
+                cognition
+            )
+
+    def test_exact_supported_inference_reference_is_accepted(self):
+        cognition = self._boundary_cognition()
+
+        inference = (
+            "The unauthorized changed file establishes "
+            "an authority-boundary blocker."
+        )
+
+        cognition["supported_inferences"] = [
+            inference
+        ]
+        cognition["causal_evidence_refs"] = [
+            inference
+        ]
+
+        validated = _validated_cognitive_assurance(
+            cognition
+        )
+
+        self.assertEqual(
+            validated["causal_evidence_refs"],
+            [inference],
+        )
+
+    def test_runtime_prompt_contains_select_copy_procedure(self):
+        source = Path(
+            "controller/generic_qa_worker.py"
+        ).read_text(
+            encoding="utf-8-sig",
+        )
+
+        self.assertIn(
+            "CAUSAL EVIDENCE BINDING RULE:",
+            source,
+        )
+        self.assertIn(
+            "Use SELECT -> COPY.",
+            source,
+        )
+        self.assertIn(
+            "verbatim into causal_evidence_refs",
+            source,
+        )
+        self.assertIn(
+            "Membership is exact string",
+            source,
+        )
+
+    def test_contract_contains_binding_invariant(self):
+        content = Path(
+            "golden-core/"
+            "QA_001_QUINN_COGNITION_CONTRACT_V1.md"
+        ).read_text(
+            encoding="utf-8-sig",
+        )
+
+        self.assertIn(
+            "### Causal evidence binding invariant",
+            content,
+        )
+        self.assertIn(
+            "Membership uses exact string identity.",
+            content,
+        )
+        self.assertIn(
+            "`SELECT -> COPY`",
+            content,
+        )
+        self.assertIn(
+            "must not regenerate, summarize, rewrite, "
+            "normalize, or paraphrase",
+            content,
+        )
+
+    def test_complete_causal_domain_matrix_preserves_binding(self):
+        cases = (
+            (
+                "NONE",
+                "SATISFIED",
+                "QA_ACCEPTED",
+            ),
+            (
+                "IMPLEMENTATION",
+                "IMPLEMENTATION_DEFECT",
+                "QA_REJECTED_IMPLEMENTATION",
+            ),
+            (
+                "REQUIREMENT",
+                "REQUIREMENT_DEFECT",
+                "QA_REJECTED_REQUIREMENT",
+            ),
+            (
+                "CONTRACT",
+                "CONTRACT_BLOCKER",
+                "QA_BLOCKED_CONTRACT",
+            ),
+            (
+                "VALIDATION_HARNESS",
+                "HARNESS_BLOCKER",
+                "QA_BLOCKED_HARNESS",
+            ),
+            (
+                "ENVIRONMENT",
+                "ENVIRONMENT_BLOCKER",
+                "QA_BLOCKED_ENVIRONMENT",
+            ),
+            (
+                "AUTHORITY_BOUNDARY",
+                "BOUNDARY_BLOCKER",
+                "QA_BLOCKED_BOUNDARY",
+            ),
+            (
+                "EVIDENCE",
+                "EVIDENCE_BLOCKER",
+                "QA_BLOCKED_EVIDENCE",
+            ),
+        )
+
+        for owner, state, classification in cases:
+            with self.subTest(
+                owner=owner,
+                state=state,
+            ):
+                fact = (
+                    "finalized epistemic evidence for "
+                    + state
+                )
+
+                cognition = {
+                    "observed_facts": [fact],
+                    "missing_facts": [],
+                    "supported_inferences": [],
+                    "unsupported_inferences": [],
+                    "causal_owner": owner,
+                    "causal_justification": fact,
+                    "causal_evidence_refs": [fact],
+                    "causal_state": state,
+                    "summary": fact,
+                    "findings": [fact],
+                }
+
+                validated = (
+                    _validated_cognitive_assurance(
+                        cognition
+                    )
+                )
+
+                self.assertEqual(
+                    validated[
+                        "causal_evidence_refs"
+                    ],
+                    [fact],
+                )
+
+                self.assertEqual(
+                    validated["classification"],
+                    classification,
+                )
+
+    def test_failed_binding_does_not_create_classification(self):
+        cognition = self._boundary_cognition()
+
+        cognition["causal_evidence_refs"] = [
+            "paraphrased evidence"
+        ]
+
+        self.assertNotIn(
+            "classification",
+            cognition,
+        )
+
+        with self.assertRaises(ValueError):
+            _validated_cognitive_assurance(
+                cognition
+            )
+
+        self.assertNotIn(
+            "classification",
+            cognition,
+        )
+
 class GenericQAWorkerTests(unittest.TestCase):
     def test_contract_blocker_requires_contract_classification(self):
         mission = {
