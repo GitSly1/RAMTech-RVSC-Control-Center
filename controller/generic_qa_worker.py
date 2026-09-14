@@ -257,6 +257,136 @@ def _bounded_text(value: Any, limit: int) -> str:
     return text[:limit] + "\n[TRUNCATED]"
 
 
+def _normalize_governed_path(value: str) -> str:
+    """Normalize a repository-relative governed path for comparison only."""
+
+    normalized = str(value or "").strip().replace("\\", "/")
+
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+
+    while "//" in normalized:
+        normalized = normalized.replace("//", "/")
+
+    return normalized.rstrip("/")
+
+
+def _governed_path_is_allowed(
+    changed_path: str,
+    allowed_path: str,
+) -> bool:
+    changed = _normalize_governed_path(
+        changed_path
+    )
+    allowed = _normalize_governed_path(
+        allowed_path
+    )
+
+    if not changed or not allowed:
+        return False
+
+    if changed == allowed:
+        return True
+
+    return changed.startswith(
+        allowed + "/"
+    )
+
+
+def _authority_boundary_assessment(
+    mission: dict[str, Any],
+) -> dict[str, Any]:
+    """Establish deterministic A4 scope facts without choosing QA semantics.
+
+    RVSC owns the objective relationship between declared authorized paths and
+    the submitted changed-file set. Quinn retains ownership of the causal
+    interpretation and resulting causal_state.
+    """
+
+    raw_allowed = mission.get(
+        "allowed_paths"
+    )
+    raw_changed = mission.get(
+        "changed_files"
+    )
+
+    allowed_valid = (
+        isinstance(raw_allowed, list)
+        and bool(raw_allowed)
+        and all(
+            isinstance(item, str)
+            and bool(item.strip())
+            for item in raw_allowed
+        )
+    )
+
+    changed_valid = (
+        isinstance(raw_changed, list)
+        and all(
+            isinstance(item, str)
+            and bool(item.strip())
+            for item in raw_changed
+        )
+    )
+
+    complete = (
+        allowed_valid
+        and changed_valid
+    )
+
+    if allowed_valid:
+        allowed_paths = [
+            _normalize_governed_path(item)
+            for item in raw_allowed
+        ]
+    else:
+        allowed_paths = []
+
+    if changed_valid:
+        changed_files = [
+            _normalize_governed_path(item)
+            for item in raw_changed
+        ]
+    else:
+        changed_files = []
+
+    unauthorized_changed_files: list[str] = []
+
+    if complete:
+        for changed in changed_files:
+            if not any(
+                _governed_path_is_allowed(
+                    changed,
+                    allowed,
+                )
+                for allowed in allowed_paths
+            ):
+                unauthorized_changed_files.append(
+                    changed
+                )
+
+    scope_compliant: bool | None
+
+    if complete:
+        scope_compliant = (
+            not unauthorized_changed_files
+        )
+    else:
+        scope_compliant = None
+
+    return {
+        "authority_class": "A4",
+        "complete": complete,
+        "allowed_paths": allowed_paths,
+        "changed_files": changed_files,
+        "unauthorized_changed_files": (
+            unauthorized_changed_files
+        ),
+        "scope_compliant": scope_compliant,
+    }
+
+
+
 def _load_cognition_asset(authority_root: Path, relative_path: str) -> str:
     path = authority_root / relative_path
     try:
@@ -308,6 +438,7 @@ def _quinn_cognitive_prompt(
     # authoritative contract and reviewed identity, not a repository dump.
     evidence_context = {
         "changed_files": mission.get("changed_files") or [],
+        "boundary_assessment": _authority_boundary_assessment(mission),
         "engineering_evidence": mission.get("engineering_evidence") or [],
         "acceptance_results": mission.get("acceptance_results") or {},
         "validation_results": mission.get("validation_results") or {},
@@ -357,6 +488,14 @@ def _quinn_cognitive_prompt(
             "from, exceeds, violates, or equals an absent authoritative value.\n"
             "Use only supported inferences when determining causal_state. "
             "Unsupported inferences must not justify causal_state.\n"
+            "A controller boundary_assessment is an authoritative A4 "
+            "structured fact about the relationship between changed_files "
+            "and allowed_paths. When boundary_assessment.complete is true, "
+            "do not recompute, reverse, or contradict its scope relationship. "
+            "If unauthorized_changed_files is non-empty, those paths are "
+            "outside the active mission authorization. This deterministic "
+            "fact does not choose causal_state; Quinn retains semantic causal "
+            "ownership and must determine its material causal consequence.\n"
             "SATISFIED ELIGIBILITY RULE: SATISFIED is a whole-disposition "
             "causal state, not a synonym for implementation correctness, "
             "passing tests, or healthy execution. Select SATISFIED only when "

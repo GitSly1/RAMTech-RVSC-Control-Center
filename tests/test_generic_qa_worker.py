@@ -2162,6 +2162,226 @@ class QuinnCausalSatisfactionEligibilityRegressionTests(
 
 
 
+class QuinnAuthorityBoundaryFactRegressionTests(
+    unittest.TestCase
+):
+    def test_boundary_assessment_identifies_exact_unauthorized_file(
+        self,
+    ):
+        from controller.generic_qa_worker import (
+            _authority_boundary_assessment,
+        )
+
+        result = _authority_boundary_assessment(
+            {
+                "allowed_paths": [
+                    "controller/generic_qa_worker.py",
+                ],
+                "changed_files": [
+                    "controller/generic_qa_worker.py",
+                    (
+                        "golden-core/"
+                        "QA_001_QUINN_COGNITION_CONTRACT_V1.md"
+                    ),
+                ],
+            }
+        )
+
+        self.assertTrue(
+            result["complete"]
+        )
+
+        self.assertFalse(
+            result["scope_compliant"]
+        )
+
+        self.assertEqual(
+            result["unauthorized_changed_files"],
+            [
+                (
+                    "golden-core/"
+                    "QA_001_QUINN_COGNITION_CONTRACT_V1.md"
+                )
+            ],
+        )
+
+        self.assertEqual(
+            result["authority_class"],
+            "A4",
+        )
+
+    def test_boundary_assessment_accepts_child_of_authorized_module(
+        self,
+    ):
+        from controller.generic_qa_worker import (
+            _authority_boundary_assessment,
+        )
+
+        result = _authority_boundary_assessment(
+            {
+                "allowed_paths": [
+                    "controller",
+                ],
+                "changed_files": [
+                    "controller/generic_qa_worker.py",
+                    "controller/submodule/checks.py",
+                ],
+            }
+        )
+
+        self.assertTrue(
+            result["complete"]
+        )
+
+        self.assertTrue(
+            result["scope_compliant"]
+        )
+
+        self.assertEqual(
+            result["unauthorized_changed_files"],
+            [],
+        )
+
+    def test_boundary_assessment_normalizes_repository_relative_separators(
+        self,
+    ):
+        from controller.generic_qa_worker import (
+            _authority_boundary_assessment,
+        )
+
+        result = _authority_boundary_assessment(
+            {
+                "allowed_paths": [
+                    "./controller",
+                ],
+                "changed_files": [
+                    r"controller\generic_qa_worker.py",
+                ],
+            }
+        )
+
+        self.assertTrue(
+            result["scope_compliant"]
+        )
+
+        self.assertEqual(
+            result["changed_files"],
+            [
+                "controller/generic_qa_worker.py",
+            ],
+        )
+
+    def test_boundary_assessment_does_not_infer_when_contract_fact_is_incomplete(
+        self,
+    ):
+        from controller.generic_qa_worker import (
+            _authority_boundary_assessment,
+        )
+
+        result = _authority_boundary_assessment(
+            {
+                "allowed_paths": [
+                    "controller",
+                ],
+            }
+        )
+
+        self.assertFalse(
+            result["complete"]
+        )
+
+        self.assertIsNone(
+            result["scope_compliant"]
+        )
+
+        self.assertEqual(
+            result["unauthorized_changed_files"],
+            [],
+        )
+
+    def test_rendered_prompt_projects_authoritative_boundary_fact(
+        self,
+    ):
+        unauthorized = (
+            "golden-core/"
+            "QA_001_QUINN_COGNITION_CONTRACT_V1.md"
+        )
+
+        prompt = _quinn_cognitive_prompt(
+            mission={
+                "project": "RVSC",
+                "repository": (
+                    "GitSly1/RAMTech-RVSC-Control-Center"
+                ),
+                "objective": (
+                    "Review governed engineering work."
+                ),
+                "acceptance_criteria": [
+                    "Implementation works.",
+                    "Submission remains in authorized scope.",
+                ],
+                "allowed_paths": [
+                    "controller/generic_qa_worker.py",
+                ],
+                "changed_files": [
+                    "controller/generic_qa_worker.py",
+                    unauthorized,
+                ],
+                "engineering_evidence": [
+                    "Functional behavior passed.",
+                ],
+                "validation_results": {
+                    "environment_ready": True,
+                    "harness_integrity": True,
+                },
+                "contract_assessment": {
+                    "declared": True,
+                    "complete": True,
+                    "blockers": [],
+                },
+            },
+            review_root=Path.cwd(),
+            branch="qualification",
+            commit_sha="a" * 40,
+            authority_root=Path.cwd(),
+        )
+
+        self.assertIn(
+            '"boundary_assessment"',
+            prompt,
+        )
+
+        self.assertIn(
+            '"scope_compliant": false',
+            prompt,
+        )
+
+        self.assertIn(
+            '"unauthorized_changed_files": '
+            '["'
+            + unauthorized
+            + '"]',
+            prompt,
+        )
+
+        self.assertIn(
+            "controller boundary_assessment is an authoritative A4 "
+            "structured fact",
+            prompt,
+        )
+
+        self.assertIn(
+            "This deterministic fact does not choose causal_state",
+            prompt,
+        )
+
+        self.assertIn(
+            "Quinn retains semantic causal ownership",
+            prompt,
+        )
+
+
+
 
 if __name__ == "__main__":
     unittest.main()
