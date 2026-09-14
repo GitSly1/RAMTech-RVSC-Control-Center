@@ -539,6 +539,28 @@ def _quinn_cognitive_prompt(
         QUINN_COGNITION_CONTEXT_CHAR_BUDGET,
     )
 
+    authoritative_epistemic_facts = (
+        _authoritative_epistemic_facts(
+            mission
+        )
+    )
+
+    if authoritative_epistemic_facts:
+        authoritative_epistemic_projection = (
+            "AUTHORITATIVE EPISTEMIC ATOMS:\n"
+            + "\n".join(
+                "COPY EXACTLY AS OBSERVED FACT: "
+                + fact
+                for fact in authoritative_epistemic_facts
+            )
+            + "\n\n"
+        )
+    else:
+        authoritative_epistemic_projection = (
+            "AUTHORITATIVE EPISTEMIC ATOMS:\n"
+            "NONE\n\n"
+        )
+
     return (
         "You are Quinn (QA-001), RAMTech independent Quality Assurance.\n\n"
         "QUINN COGNITION CONTRACT:\n"
@@ -547,7 +569,9 @@ def _quinn_cognitive_prompt(
         + max_core
         + "\n\nBOUNDED REVIEW CONTEXT:\n"
         + dynamic
-        + "\n\nCURRENT DECISION AUTHORITY CONTEXT:\n"
+        + "\n\n"
+        + authoritative_epistemic_projection
+        + "CURRENT DECISION AUTHORITY CONTEXT:\n"
         + (
             "A3 = engineering/validation evidence already supplied in the "
             "BOUNDED REVIEW CONTEXT above; evaluate its sufficiency and provenance.\n"
@@ -581,8 +605,12 @@ def _quinn_cognitive_prompt(
             "review context may contain authoritative_epistemic_facts generated "
             "deterministically by RVSC from controller-owned mission state. Every "
             "string in authoritative_epistemic_facts is an established material "
-            "fact and MUST be copied verbatim into observed_facts before causal "
-            "reasoning. Do not omit, summarize, paraphrase, weaken, or replace "
+            "fact. The same canonical strings are exposed separately under "
+            "AUTHORITATIVE EPISTEMIC ATOMS. Copy the text after each "
+            "COPY EXACTLY AS OBSERVED FACT: prefix verbatim into observed_facts "
+            "before causal reasoning; the prefix itself is not part of the fact. "
+            "Do not copy the JSON container or its field label as a substitute. "
+            "Do not omit, summarize, paraphrase, weaken, or replace "
             "those facts. Preserving the facts does not choose causal_owner or "
             "causal_state; Quinn retains semantic ownership of the causal "
             "conclusion. If authoritative_epistemic_facts is empty, do not invent "

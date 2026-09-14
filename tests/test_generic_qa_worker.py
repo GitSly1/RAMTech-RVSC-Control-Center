@@ -393,7 +393,7 @@ class QuinnAuthoritativeEpistemicPreservationTests(unittest.TestCase):
                 "BOUNDED REVIEW CONTEXT:\n"
             )
             bounded_suffix = (
-                "\n\nCURRENT DECISION AUTHORITY CONTEXT:"
+                "\n\nAUTHORITATIVE EPISTEMIC ATOMS:"
             )
 
             bounded_text = prompt.split(
@@ -417,14 +417,187 @@ class QuinnAuthoritativeEpistemicPreservationTests(unittest.TestCase):
                 [required],
             )
 
+            projection_line = (
+                "COPY EXACTLY AS OBSERVED FACT: "
+                + required
+            )
+
+            self.assertIn(
+                "AUTHORITATIVE EPISTEMIC ATOMS:\n",
+                prompt,
+            )
+
+            self.assertEqual(
+                prompt.count(projection_line),
+                1,
+            )
+
             self.assertIn(
                 "AUTHORITATIVE EPISTEMIC PRESERVATION RULE:",
                 prompt,
             )
+
             self.assertIn(
-                "MUST be copied verbatim into observed_facts",
+                "Do not copy the JSON container or its field label as a substitute.",
                 prompt,
             )
+            self.assertIn(
+                "COPY EXACTLY AS OBSERVED FACT: prefix verbatim into observed_facts",
+                prompt,
+            )
+
+    def test_prompt_projects_none_when_no_authoritative_atom_exists(self):
+        mission = {
+            "project": "rvsc",
+            "repository": (
+                "GitSly1/"
+                "RAMTech-RVSC-Control-Center"
+            ),
+            "objective": "Qualify work.",
+            "acceptance_criteria": [
+                "Behavior is correct."
+            ],
+            "allowed_paths": [
+                "controller/generic_qa_worker.py"
+            ],
+            "changed_files": [
+                "controller/generic_qa_worker.py"
+            ],
+        }
+
+        self.assertEqual(
+            _authoritative_epistemic_facts(
+                mission
+            ),
+            (),
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            core = root / "golden-core"
+            governance = root / "governance"
+
+            core.mkdir(parents=True)
+            governance.mkdir(parents=True)
+
+            (
+                core
+                / "QA_001_QUINN_COGNITION_CONTRACT_V1.md"
+            ).write_text(
+                "QUINN CONTRACT",
+                encoding="utf-8",
+            )
+
+            (
+                core
+                / "MAX_PLATINUM_ENGINEERING_CORE_V1.md"
+            ).write_text(
+                "MAX DISCIPLINE",
+                encoding="utf-8",
+            )
+
+            (
+                governance
+                / "AUTHORITATIVE_KNOWLEDGE_HIERARCHY.md"
+            ).write_text(
+                "Governance authority.",
+                encoding="utf-8",
+            )
+
+            (
+                governance
+                / "SOURCE_ISOLATION.md"
+            ).write_text(
+                "Source isolation.",
+                encoding="utf-8",
+            )
+
+            (
+                governance
+                / "WORK_PACKAGE_LIFECYCLE.md"
+            ).write_text(
+                "Lifecycle.",
+                encoding="utf-8",
+            )
+
+            subprocess.run(
+                ["git", "init", "-b", "main"],
+                cwd=root,
+                check=True,
+                capture_output=True,
+            )
+
+            subprocess.run(
+                [
+                    "git",
+                    "config",
+                    "user.name",
+                    "Fixture",
+                ],
+                cwd=root,
+                check=True,
+            )
+
+            subprocess.run(
+                [
+                    "git",
+                    "config",
+                    "user.email",
+                    "fixture@example.invalid",
+                ],
+                cwd=root,
+                check=True,
+            )
+
+            subprocess.run(
+                ["git", "add", "."],
+                cwd=root,
+                check=True,
+            )
+
+            subprocess.run(
+                ["git", "commit", "-m", "fixture"],
+                cwd=root,
+                check=True,
+                capture_output=True,
+            )
+
+            prompt = _quinn_cognitive_prompt(
+                mission=mission,
+                review_root=root,
+                branch="rvsc/test",
+                commit_sha="b" * 40,
+                authority_root=root,
+            )
+
+        self.assertIn(
+            "AUTHORITATIVE EPISTEMIC ATOMS:\nNONE\n\n",
+            prompt,
+        )
+
+        atoms_start = prompt.index(
+            "AUTHORITATIVE EPISTEMIC ATOMS:\n"
+        )
+
+        authority_start = prompt.index(
+            "\n\nCURRENT DECISION AUTHORITY CONTEXT:",
+            atoms_start,
+        )
+
+        atom_projection = prompt[
+            atoms_start:authority_start
+        ]
+
+        self.assertEqual(
+            atom_projection,
+            "AUTHORITATIVE EPISTEMIC ATOMS:\nNONE",
+        )
+
+        self.assertNotIn(
+            "COPY EXACTLY AS OBSERVED FACT:",
+            atom_projection,
+        )
 
     def test_contract_contains_authoritative_preservation_invariant(self):
         content = Path(
@@ -444,6 +617,14 @@ class QuinnAuthoritativeEpistemicPreservationTests(unittest.TestCase):
         )
         self.assertIn(
             "Membership uses exact string identity.",
+            content,
+        )
+        self.assertIn(
+            "independently addressable literal epistemic atom",
+            content,
+        )
+        self.assertIn(
+            "serialized container, field label, wrapper, paraphrase",
             content,
         )
 

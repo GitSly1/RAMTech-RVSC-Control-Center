@@ -142,6 +142,10 @@ The governing invariant is:
 
 Membership uses exact string identity.
 
+Provider-facing serialization must expose every required canonical observed fact as an independently addressable literal epistemic atom in addition to any structured JSON context used for provenance. The literal projection must preserve the canonical string unchanged.
+
+The projection label or copy directive is transport scaffolding and is not part of the canonical fact. Quinn copies only the canonical atom into `observed_facts`. A serialized container, field label, wrapper, paraphrase, or representation of the collection is not a substitute for the canonical member.
+
 This exact `observed_facts` preservation requirement applies to deterministic controller facts that represent positively established blocker states, including governed authority-boundary violations, explicit environment blockers, and explicit validation-harness blockers.
 
 Authoritative absence is a different epistemic condition. A missing A4 contract input remains governed through `missing_facts`; it must not be retyped as an observed fact merely because the controller established that the value is absent.
