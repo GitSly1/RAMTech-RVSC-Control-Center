@@ -387,6 +387,82 @@ def _authority_boundary_assessment(
 
 
 
+def _authoritative_epistemic_facts(
+    mission: dict[str, Any],
+) -> tuple[str, ...]:
+    """Return canonical controller-established facts cognition must preserve.
+
+    These strings establish deterministic mission facts only. They do not
+    select causal_owner, causal_state, or final QA disposition; Quinn retains
+    semantic ownership of those judgments.
+    """
+
+    facts: list[str] = []
+
+    boundary = _authority_boundary_assessment(
+        mission
+    )
+
+    unauthorized = boundary.get(
+        "unauthorized_changed_files"
+    )
+
+    if (
+        boundary.get("complete") is True
+        and boundary.get("scope_compliant") is False
+        and isinstance(unauthorized, list)
+        and bool(unauthorized)
+    ):
+        facts.append(
+            "authority_boundary:"
+            "scope_compliant=false;"
+            "unauthorized_changed_files="
+            + json.dumps(
+                unauthorized,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
+
+    validation_results = mission.get(
+        "validation_results"
+    )
+
+    if isinstance(validation_results, dict):
+        environment_ready = (
+            validation_results.get(
+                "environment_ready"
+            )
+        )
+        harness_integrity = (
+            validation_results.get(
+                "harness_integrity"
+            )
+        )
+
+        if (
+            environment_ready is False
+            and harness_integrity is True
+        ):
+            facts.append(
+                "validation_results:"
+                "environment_ready=false;"
+                "harness_integrity=true"
+            )
+
+        if (
+            harness_integrity is False
+            and environment_ready is not False
+        ):
+            facts.append(
+                "validation_results:"
+                "harness_integrity=false;"
+                "environment_ready!=false"
+            )
+
+    return tuple(facts)
+
+
 def _load_cognition_asset(authority_root: Path, relative_path: str) -> str:
     path = authority_root / relative_path
     try:
@@ -439,6 +515,11 @@ def _quinn_cognitive_prompt(
     evidence_context = {
         "changed_files": mission.get("changed_files") or [],
         "boundary_assessment": _authority_boundary_assessment(mission),
+        "authoritative_epistemic_facts": list(
+            _authoritative_epistemic_facts(
+                mission
+            )
+        ),
         "engineering_evidence": mission.get("engineering_evidence") or [],
         "acceptance_results": mission.get("acceptance_results") or {},
         "validation_results": mission.get("validation_results") or {},
@@ -496,6 +577,16 @@ def _quinn_cognitive_prompt(
             "outside the active mission authorization. This deterministic "
             "fact does not choose causal_state; Quinn retains semantic causal "
             "ownership and must determine its material causal consequence.\n"
+            "AUTHORITATIVE EPISTEMIC PRESERVATION RULE: the bounded "
+            "review context may contain authoritative_epistemic_facts generated "
+            "deterministically by RVSC from controller-owned mission state. Every "
+            "string in authoritative_epistemic_facts is an established material "
+            "fact and MUST be copied verbatim into observed_facts before causal "
+            "reasoning. Do not omit, summarize, paraphrase, weaken, or replace "
+            "those facts. Preserving the facts does not choose causal_owner or "
+            "causal_state; Quinn retains semantic ownership of the causal "
+            "conclusion. If authoritative_epistemic_facts is empty, do not invent "
+            "one.\n"
             "SATISFIED ELIGIBILITY RULE: SATISFIED is a whole-disposition "
             "causal state, not a synonym for implementation correctness, "
             "passing tests, or healthy execution. Select SATISFIED only when "
@@ -1002,6 +1093,34 @@ def _epistemic_consistency_guard(
     mission: dict[str, Any],
     cognitive: dict[str, Any],
 ) -> dict[str, Any]:
+    observed = cognitive.get(
+        "observed_facts"
+    )
+
+    if not isinstance(observed, list):
+        raise ValueError(
+            "cognitive assurance did not preserve "
+            "observed-fact state"
+        )
+
+    required_authoritative_facts = (
+        _authoritative_epistemic_facts(
+            mission
+        )
+    )
+
+    missing_authoritative_facts = [
+        fact
+        for fact in required_authoritative_facts
+        if fact not in observed
+    ]
+
+    if missing_authoritative_facts:
+        raise ValueError(
+            "cognitive assurance omitted authoritative "
+            "structured fact"
+        )
+
     contract_assessment = mission.get(
         "contract_assessment"
     )

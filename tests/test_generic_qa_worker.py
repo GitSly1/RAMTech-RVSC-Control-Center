@@ -8,8 +8,444 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from controller.generic_qa_worker import _acceptance_authority_gate, _authoritative_knowledge_context, _classification_consistency_guard, _quinn_cognitive_prompt, _repo_root, _validated_cognitive_assurance, execute_mission
+from controller.generic_qa_worker import _acceptance_authority_gate, _authoritative_epistemic_facts, _authoritative_knowledge_context, _classification_consistency_guard, _epistemic_consistency_guard, _quinn_cognitive_prompt, _repo_root, _validated_cognitive_assurance, execute_mission
 
+
+
+
+class QuinnAuthoritativeEpistemicPreservationTests(unittest.TestCase):
+    """Controller-established material facts must survive into cognition."""
+
+    def _base_cognition(self, observed=None):
+        fact = "ordinary positive implementation evidence"
+
+        return {
+            "observed_facts": (
+                list(observed)
+                if observed is not None
+                else [fact]
+            ),
+            "missing_facts": [],
+            "supported_inferences": [],
+            "unsupported_inferences": [],
+            "causal_owner": "NONE",
+            "causal_justification": fact,
+            "causal_evidence_refs": [fact],
+            "causal_state": "SATISFIED",
+            "classification": "QA_ACCEPTED",
+            "summary": fact,
+            "findings": [fact],
+        }
+
+    def test_boundary_fact_is_canonical_and_material(self):
+        mission = {
+            "allowed_paths": [
+                "controller/generic_qa_worker.py"
+            ],
+            "changed_files": [
+                "controller/generic_qa_worker.py",
+                (
+                    "golden-core/"
+                    "QA_001_QUINN_COGNITION_CONTRACT_V1.md"
+                ),
+            ],
+        }
+
+        facts = _authoritative_epistemic_facts(
+            mission
+        )
+
+        self.assertEqual(
+            facts,
+            (
+                'authority_boundary:scope_compliant=false;'
+                'unauthorized_changed_files=["golden-core/'
+                'QA_001_QUINN_COGNITION_CONTRACT_V1.md"]',
+            ),
+        )
+
+    def test_environment_fact_is_canonical_and_material(self):
+        mission = {
+            "validation_results": {
+                "environment_ready": False,
+                "harness_integrity": True,
+            }
+        }
+
+        self.assertEqual(
+            _authoritative_epistemic_facts(
+                mission
+            ),
+            (
+                "validation_results:"
+                "environment_ready=false;"
+                "harness_integrity=true",
+            ),
+        )
+
+    def test_harness_fact_is_canonical_and_material(self):
+        mission = {
+            "validation_results": {
+                "environment_ready": True,
+                "harness_integrity": False,
+            }
+        }
+
+        self.assertEqual(
+            _authoritative_epistemic_facts(
+                mission
+            ),
+            (
+                "validation_results:"
+                "harness_integrity=false;"
+                "environment_ready!=false",
+            ),
+        )
+
+    def test_missing_a4_contract_fact_is_not_retyped_as_observed(self):
+        mission = {
+            "contract_assessment": {
+                "complete": False,
+                "blockers": [
+                    {
+                        "type": "MISSING_REQUIRED_CONTRACT_INPUT",
+                        "authority_class": "A4",
+                        "name": "approved_value",
+                    }
+                ],
+            }
+        }
+
+        self.assertEqual(
+            _authoritative_epistemic_facts(
+                mission
+            ),
+            (),
+        )
+
+        cognition = {
+            "observed_facts": [
+                "implementation evidence is present"
+            ],
+            "missing_facts": [
+                "approved value is absent"
+            ],
+            "supported_inferences": [
+                "required A4 value is unavailable"
+            ],
+            "unsupported_inferences": [],
+            "causal_owner": "CONTRACT",
+            "causal_justification": (
+                "required A4 value is unavailable"
+            ),
+            "causal_evidence_refs": [
+                "required A4 value is unavailable"
+            ],
+            "causal_state": "CONTRACT_BLOCKER",
+            "classification": "QA_BLOCKED_CONTRACT",
+            "summary": "required contract value is absent",
+            "findings": [
+                "required contract input is missing"
+            ],
+        }
+
+        self.assertIs(
+            _epistemic_consistency_guard(
+                mission,
+                cognition,
+            ),
+            cognition,
+        )
+
+    def test_no_material_controller_blocker_requires_no_fact(self):
+        mission = {
+            "allowed_paths": ["source.py"],
+            "changed_files": ["source.py"],
+            "validation_results": {
+                "environment_ready": True,
+                "harness_integrity": True,
+            },
+            "contract_assessment": {
+                "complete": True,
+                "blockers": [],
+            },
+        }
+
+        self.assertEqual(
+            _authoritative_epistemic_facts(
+                mission
+            ),
+            (),
+        )
+
+    def test_guard_rejects_omitted_boundary_fact(self):
+        mission = {
+            "allowed_paths": ["source.py"],
+            "changed_files": [
+                "source.py",
+                "outside.py",
+            ],
+        }
+
+        cognition = self._base_cognition()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "omitted authoritative structured fact",
+        ):
+            _epistemic_consistency_guard(
+                mission,
+                cognition,
+            )
+
+    def test_guard_accepts_exact_boundary_preservation(self):
+        mission = {
+            "allowed_paths": ["source.py"],
+            "changed_files": [
+                "source.py",
+                "outside.py",
+            ],
+        }
+
+        required = (
+            _authoritative_epistemic_facts(
+                mission
+            )
+        )
+
+        cognition = self._base_cognition(
+            observed=[
+                "ordinary positive implementation evidence",
+                *required,
+            ]
+        )
+
+        self.assertIs(
+            _epistemic_consistency_guard(
+                mission,
+                cognition,
+            ),
+            cognition,
+        )
+
+    def test_guard_matrix_rejects_each_omitted_controller_fact(self):
+        missions = (
+            {
+                "allowed_paths": ["source.py"],
+                "changed_files": [
+                    "source.py",
+                    "outside.py",
+                ],
+            },
+            {
+                "validation_results": {
+                    "environment_ready": False,
+                    "harness_integrity": True,
+                },
+            },
+            {
+                "validation_results": {
+                    "environment_ready": True,
+                    "harness_integrity": False,
+                },
+            },
+        )
+
+        for mission in missions:
+            with self.subTest(mission=mission):
+                self.assertTrue(
+                    _authoritative_epistemic_facts(
+                        mission
+                    )
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "omitted authoritative structured fact",
+                ):
+                    _epistemic_consistency_guard(
+                        mission,
+                        self._base_cognition(),
+                    )
+
+    def test_prompt_exposes_exact_authoritative_fact_list(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            core = root / "golden-core"
+            governance = root / "governance"
+
+            core.mkdir(parents=True)
+            governance.mkdir(parents=True)
+
+            (
+                core
+                / "QA_001_QUINN_COGNITION_CONTRACT_V1.md"
+            ).write_text(
+                "QUINN CONTRACT",
+                encoding="utf-8",
+            )
+
+            (
+                core
+                / "MAX_PLATINUM_ENGINEERING_CORE_V1.md"
+            ).write_text(
+                "MAX DISCIPLINE",
+                encoding="utf-8",
+            )
+
+            (
+                governance
+                / "AUTHORITATIVE_KNOWLEDGE_HIERARCHY.md"
+            ).write_text(
+                "Governance authority.",
+                encoding="utf-8",
+            )
+
+            (
+                governance
+                / "SOURCE_ISOLATION.md"
+            ).write_text(
+                "Source isolation.",
+                encoding="utf-8",
+            )
+
+            (
+                governance
+                / "WORK_PACKAGE_LIFECYCLE.md"
+            ).write_text(
+                "Lifecycle.",
+                encoding="utf-8",
+            )
+
+            subprocess.run(
+                ["git", "init", "-b", "main"],
+                cwd=root,
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "config",
+                    "user.name",
+                    "Fixture",
+                ],
+                cwd=root,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "config",
+                    "user.email",
+                    "fixture@example.invalid",
+                ],
+                cwd=root,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "add", "."],
+                cwd=root,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "fixture"],
+                cwd=root,
+                check=True,
+                capture_output=True,
+            )
+
+            mission = {
+                "project": "rvsc",
+                "repository": (
+                    "GitSly1/"
+                    "RAMTech-RVSC-Control-Center"
+                ),
+                "objective": "Qualify work.",
+                "acceptance_criteria": [
+                    "Behavior is correct."
+                ],
+                "allowed_paths": ["source.py"],
+                "changed_files": [
+                    "source.py",
+                    "outside.py",
+                ],
+            }
+
+            prompt = _quinn_cognitive_prompt(
+                mission=mission,
+                review_root=root,
+                branch="rvsc/test",
+                commit_sha="a" * 40,
+                authority_root=root,
+            )
+
+            required = (
+                _authoritative_epistemic_facts(
+                    mission
+                )[0]
+            )
+
+            import json
+
+            bounded_prefix = (
+                "BOUNDED REVIEW CONTEXT:\n"
+            )
+            bounded_suffix = (
+                "\n\nCURRENT DECISION AUTHORITY CONTEXT:"
+            )
+
+            bounded_text = prompt.split(
+                bounded_prefix,
+                1,
+            )[1].split(
+                bounded_suffix,
+                1,
+            )[0]
+
+            bounded = json.loads(
+                bounded_text
+            )
+
+            self.assertEqual(
+                bounded[
+                    "evidence_context"
+                ][
+                    "authoritative_epistemic_facts"
+                ],
+                [required],
+            )
+
+            self.assertIn(
+                "AUTHORITATIVE EPISTEMIC PRESERVATION RULE:",
+                prompt,
+            )
+            self.assertIn(
+                "MUST be copied verbatim into observed_facts",
+                prompt,
+            )
+
+    def test_contract_contains_authoritative_preservation_invariant(self):
+        content = Path(
+            "golden-core/"
+            "QA_001_QUINN_COGNITION_CONTRACT_V1.md"
+        ).read_text(
+            encoding="utf-8-sig",
+        )
+
+        self.assertIn(
+            "### Authoritative epistemic preservation invariant",
+            content,
+        )
+        self.assertIn(
+            "AUTHORITATIVE_EPISTEMIC_FACTS SUBSET_OF OBSERVED_FACTS",
+            content,
+        )
+        self.assertIn(
+            "Membership uses exact string identity.",
+            content,
+        )
 
 
 class QuinnCausalEvidenceBindingRegressionTests(unittest.TestCase):

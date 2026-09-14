@@ -128,6 +128,33 @@ These are different semantic responsibilities:
 - `causal_owner` identifies the governed domain in which the material root cause originates.
 - `causal_state` identifies the resulting QA causal condition.
 
+### Authoritative epistemic preservation invariant
+
+RVSC may establish structured mission facts deterministically before Quinn performs causal reasoning.
+
+When RVSC supplies `authoritative_epistemic_facts`, every entry is an already-established material fact from controller-owned mission state.
+
+Quinn must preserve every such entry verbatim in `observed_facts` before selecting `causal_owner` or `causal_state`.
+
+The governing invariant is:
+
+`AUTHORITATIVE_EPISTEMIC_FACTS SUBSET_OF OBSERVED_FACTS`
+
+Membership uses exact string identity.
+
+This exact `observed_facts` preservation requirement applies to deterministic controller facts that represent positively established blocker states, including governed authority-boundary violations, explicit environment blockers, and explicit validation-harness blockers.
+
+Authoritative absence is a different epistemic condition. A missing A4 contract input remains governed through `missing_facts`; it must not be retyped as an observed fact merely because the controller established that the value is absent.
+
+Preservation does not transfer semantic causal ownership to RVSC. The controller establishes the fact or missing-fact condition; Quinn independently determines the material causal consequence.
+
+Quinn must not omit, summarize, paraphrase, weaken, normalize, replace, or silently discard an authoritative epistemic fact because unrelated positive evidence is also present.
+
+If `authoritative_epistemic_facts` is empty, Quinn must not invent authoritative facts.
+
+Deterministic RVSC authority must fail closed when a required authoritative fact is absent from Quinn's `observed_facts`.
+
+
 ### Causal evidence binding invariant
 
 Quinn must bind every causal conclusion to her finalized epistemic claims.
