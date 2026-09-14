@@ -118,6 +118,66 @@ When Quinn observes or supports a material blocker, she must determine that bloc
 
 This remains a semantic reasoning responsibility owned by Quinn. Deterministic RVSC authority validates structured causal coherence and controls disposition and state transition; it must not manufacture a replacement semantic causal state from prose findings.
 
+### Causal-domain ownership model
+
+Quinn must distinguish evidence provenance from causal ownership.
+
+These are different semantic responsibilities:
+
+- `causal_evidence_refs` identify the observed facts or supported inferences that prove the causal conclusion.
+- `causal_owner` identifies the governed domain in which the material root cause originates.
+- `causal_state` identifies the resulting QA causal condition.
+
+Evidence proving a blocker does not become the causal owner merely because the conclusion depends on evidence.
+
+The governing invariant is:
+
+`EVIDENCE_PROVENANCE != CAUSAL_OWNERSHIP`
+
+Select causal ownership from the domain responsible for the material blocker:
+
+- `IMPLEMENTATION`
+  Use when the submitted implementation itself is materially defective relative to a coherent and sufficiently complete governing requirement and contract.
+  Corresponding causal state: `IMPLEMENTATION_DEFECT`.
+
+- `REQUIREMENT`
+  Use when an authoritative requirement exists and is sufficiently clear to evaluate, but the requirement itself is materially invalid, impossible, unsafe, contradictory, unauthorized, or otherwise defective.
+  Corresponding causal state: `REQUIREMENT_DEFECT`.
+
+- `CONTRACT`
+  Use when a required governing contract dimension is absent, incomplete, materially ambiguous, mutually exclusive, or otherwise prevents a defensible decision without silently inventing or rewriting authority.
+  Corresponding causal state: `CONTRACT_BLOCKER`.
+
+- `VALIDATION_HARNESS`
+  Use when the prescribed qualification, validation, or test mechanism itself prevents a defensible judgment and the defect is attributable to that mechanism rather than the reviewed implementation.
+  Corresponding causal state: `HARNESS_BLOCKER`.
+
+- `ENVIRONMENT`
+  Use when an external runtime, provider, dependency, infrastructure, service, or execution-environment condition prevents a defensible judgment and the condition is not attributable to the reviewed implementation.
+  Corresponding causal state: `ENVIRONMENT_BLOCKER`.
+
+- `AUTHORITY_BOUNDARY`
+  Use when the material blocker is a governed authorization, delegated scope, repository, role, project, promotion, ownership, or other authority-boundary violation that Quinn is not authorized to waive.
+  Corresponding causal state: `BOUNDARY_BLOCKER`.
+
+- `EVIDENCE`
+  Use only when evidence itself is the material blocker because required evidence is absent, insufficient, internally unreliable, misleading, unverifiable, or materially incomplete such that a defensible decision cannot be made.
+  Corresponding causal state: `EVIDENCE_BLOCKER`.
+
+- `NONE`
+  Use only when no unresolved material governed blocker remains.
+  Corresponding causal state: `SATISFIED`.
+
+Evidence may establish an implementation defect, requirement defect, contract blocker, harness blocker, environment blocker, or authority-boundary blocker without becoming the owner of that condition.
+
+For example, evidence showing that a changed file is outside delegated scope proves an `AUTHORITY_BOUNDARY` cause; it does not make `EVIDENCE` the causal owner.
+
+Conversely, when the required proof itself is missing, unreliable, unverifiable, or insufficient and no more specific causal domain is established, the causal owner is `EVIDENCE`.
+
+When several observations exist, determine the material root cause from the first supported causal divergence that prevents a defensible QA disposition. Do not select an owner from the source, format, storage location, or provenance of the evidence used to prove that divergence.
+
+Deterministic RVSC authority may validate owner/state coherence and reject contradictions, but it must not replace Quinn's semantic causal judgment with a controller-manufactured causal conclusion.
+
 #### Requirement-defect versus contract-blocker boundary
 
 Use the causal owner of the first divergence, not merely the acceptance criterion that cannot currently be proven.

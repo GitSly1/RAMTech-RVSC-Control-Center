@@ -1867,6 +1867,320 @@ class QuinnStructuredCausalDecisionRegressionTests(unittest.TestCase):
         )
 
 
+class QuinnCausalDomainOntologyRegressionTests(
+    unittest.TestCase
+):
+    def _validated(
+        self,
+        *,
+        owner,
+        state,
+        fact,
+    ):
+        from controller.generic_qa_worker import (
+            _validated_cognitive_assurance,
+        )
+
+        return _validated_cognitive_assurance(
+            {
+                "observed_facts": [
+                    fact,
+                ],
+                "missing_facts": [],
+                "supported_inferences": [],
+                "unsupported_inferences": [],
+                "causal_owner": owner,
+                "causal_justification": fact,
+                "causal_evidence_refs": [
+                    fact,
+                ],
+                "causal_state": state,
+                "summary": fact,
+                "findings": [
+                    fact,
+                ],
+            }
+        )
+
+    def test_runtime_prompt_projects_evidence_provenance_owner_distinction(
+        self,
+    ):
+        prompt = _quinn_cognitive_prompt(
+            mission={
+                "objective": "review governed engineering work",
+                "acceptance_criteria": [
+                    "implementation works",
+                    "submission remains inside delegated scope",
+                ],
+                "allowed_paths": [
+                    "controller/generic_qa_worker.py",
+                ],
+                "changed_files": [
+                    "controller/generic_qa_worker.py",
+                    (
+                        "golden-core/"
+                        "QA_001_QUINN_COGNITION_CONTRACT_V1.md"
+                    ),
+                ],
+                "engineering_evidence": [
+                    "authorized implementation behavior passed",
+                ],
+                "acceptance_results": {
+                    "functional_behavior": "passed",
+                },
+                "validation_results": {
+                    "environment_ready": True,
+                    "harness_integrity": True,
+                },
+                "contract_assessment": {
+                    "declared": True,
+                    "complete": True,
+                    "blockers": [],
+                },
+            },
+            review_root=Path.cwd(),
+            branch="qualification",
+            commit_sha="a" * 40,
+            authority_root=Path.cwd(),
+        )
+
+        self.assertIn(
+            "CAUSAL DOMAIN OWNERSHIP RULE",
+            prompt,
+        )
+        self.assertIn(
+            "Evidence provenance and causal ownership are not "
+            "the same concept.",
+            prompt,
+        )
+        self.assertIn(
+            "Evidence showing a changed file outside delegated scope "
+            "proves an AUTHORITY_BOUNDARY cause",
+            prompt,
+        )
+        self.assertIn(
+            "EVIDENCE only when evidence itself is absent, "
+            "insufficient, unreliable, misleading, unverifiable, or "
+            "materially incomplete",
+            prompt,
+        )
+
+    def test_evidence_reference_does_not_make_evidence_the_owner(
+        self,
+    ):
+        from controller.generic_qa_worker import (
+            _causal_decision_consistency_guard,
+        )
+
+        fact = (
+            "boundary_assessment:unauthorized_changed_files "
+            "contains golden-core/"
+            "QA_001_QUINN_COGNITION_CONTRACT_V1.md"
+        )
+
+        cognitive = self._validated(
+            owner="AUTHORITY_BOUNDARY",
+            state="BOUNDARY_BLOCKER",
+            fact=fact,
+        )
+
+        result = _causal_decision_consistency_guard(
+            cognitive
+        )
+
+        self.assertEqual(
+            result["causal_evidence_refs"],
+            [
+                fact,
+            ],
+        )
+        self.assertEqual(
+            result["causal_owner"],
+            "AUTHORITY_BOUNDARY",
+        )
+        self.assertEqual(
+            result["causal_state"],
+            "BOUNDARY_BLOCKER",
+        )
+        self.assertEqual(
+            result["classification"],
+            "QA_BLOCKED_BOUNDARY",
+        )
+
+    def test_causal_domain_matrix_keeps_evidence_provenance_separate_from_owner(
+        self,
+    ):
+        from controller.generic_qa_worker import (
+            _causal_decision_consistency_guard,
+        )
+
+        matrix = (
+            (
+                "IMPLEMENTATION",
+                "IMPLEMENTATION_DEFECT",
+                "QA_REJECTED_IMPLEMENTATION",
+                (
+                    "Engineering evidence establishes that the "
+                    "submitted implementation violates a coherent "
+                    "required behavior."
+                ),
+            ),
+            (
+                "REQUIREMENT",
+                "REQUIREMENT_DEFECT",
+                "QA_REJECTED_REQUIREMENT",
+                (
+                    "Governance evidence establishes that the "
+                    "authoritative requirement itself is invalid."
+                ),
+            ),
+            (
+                "CONTRACT",
+                "CONTRACT_BLOCKER",
+                "QA_BLOCKED_CONTRACT",
+                (
+                    "Contract evidence establishes that a required "
+                    "A4 governing value is absent."
+                ),
+            ),
+            (
+                "VALIDATION_HARNESS",
+                "HARNESS_BLOCKER",
+                "QA_BLOCKED_HARNESS",
+                (
+                    "Validation evidence establishes that the "
+                    "prescribed harness evaluated the wrong artifact."
+                ),
+            ),
+            (
+                "ENVIRONMENT",
+                "ENVIRONMENT_BLOCKER",
+                "QA_BLOCKED_ENVIRONMENT",
+                (
+                    "Execution evidence establishes that an external "
+                    "runtime dependency is unavailable."
+                ),
+            ),
+            (
+                "AUTHORITY_BOUNDARY",
+                "BOUNDARY_BLOCKER",
+                "QA_BLOCKED_BOUNDARY",
+                (
+                    "Boundary evidence establishes that the submitted "
+                    "change exceeds delegated authorization."
+                ),
+            ),
+        )
+
+        for (
+            owner,
+            state,
+            classification,
+            evidence_fact,
+        ) in matrix:
+            with self.subTest(
+                owner=owner,
+                state=state,
+            ):
+                cognitive = self._validated(
+                    owner=owner,
+                    state=state,
+                    fact=evidence_fact,
+                )
+
+                result = (
+                    _causal_decision_consistency_guard(
+                        cognitive
+                    )
+                )
+
+                self.assertEqual(
+                    result["causal_owner"],
+                    owner,
+                )
+                self.assertNotEqual(
+                    result["causal_owner"],
+                    "EVIDENCE",
+                )
+                self.assertEqual(
+                    result["causal_state"],
+                    state,
+                )
+                self.assertEqual(
+                    result["classification"],
+                    classification,
+                )
+
+    def test_evidence_remains_owner_when_evidence_itself_is_material_blocker(
+        self,
+    ):
+        from controller.generic_qa_worker import (
+            _causal_decision_consistency_guard,
+        )
+
+        fact = (
+            "Required acceptance evidence is absent and no more "
+            "specific causal defect can be established."
+        )
+
+        cognitive = self._validated(
+            owner="EVIDENCE",
+            state="EVIDENCE_BLOCKER",
+            fact=fact,
+        )
+
+        result = _causal_decision_consistency_guard(
+            cognitive
+        )
+
+        self.assertEqual(
+            result["causal_owner"],
+            "EVIDENCE",
+        )
+        self.assertEqual(
+            result["causal_state"],
+            "EVIDENCE_BLOCKER",
+        )
+        self.assertEqual(
+            result["classification"],
+            "QA_BLOCKED_EVIDENCE",
+        )
+
+    def test_none_owner_remains_reserved_for_satisfied(
+        self,
+    ):
+        from controller.generic_qa_worker import (
+            _causal_decision_consistency_guard,
+        )
+
+        fact = (
+            "No unresolved material governed blocker remains."
+        )
+
+        cognitive = self._validated(
+            owner="NONE",
+            state="SATISFIED",
+            fact=fact,
+        )
+
+        result = _causal_decision_consistency_guard(
+            cognitive
+        )
+
+        self.assertEqual(
+            result["causal_owner"],
+            "NONE",
+        )
+        self.assertEqual(
+            result["causal_state"],
+            "SATISFIED",
+        )
+        self.assertEqual(
+            result["classification"],
+            "QA_ACCEPTED",
+        )
+
+
 class QuinnCausalSatisfactionEligibilityRegressionTests(
     unittest.TestCase
 ):
