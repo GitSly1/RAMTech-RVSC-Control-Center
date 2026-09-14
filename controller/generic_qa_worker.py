@@ -357,6 +357,12 @@ def _quinn_cognitive_prompt(
             "from, exceeds, violates, or equals an absent authoritative value.\n"
             "Use only supported inferences when determining causal_state. "
             "Unsupported inferences must not justify causal_state.\n"
+            "Preserve causal actor ownership from evidence through inference. "
+            "A defect evidenced for one actor or mechanism must not be transferred "
+            "to another actor, component, requirement, environment, or authority "
+            "without independent evidence establishing that new owner. "
+            "In particular, failure of a validation or test mechanism does not by "
+            "itself establish a defect in the reviewed implementation.\n"
             "The deterministic controller establishes structured authority facts; "
             "Quinn retains semantic ownership of causal_state."
         )
@@ -871,6 +877,19 @@ def _classification_consistency_guard(
     ):
         raise ValueError(
             "cognitive causal state conflicts with explicit environment blocker"
+        )
+
+    harness_blocked = (
+        validation_results.get("harness_integrity") is False
+        and validation_results.get("environment_ready") is not False
+    )
+
+    if harness_blocked and (
+        causal_state != "HARNESS_BLOCKER"
+        or classification != "QA_BLOCKED_HARNESS"
+    ):
+        raise ValueError(
+            "cognitive causal state conflicts with explicit harness blocker"
         )
 
     contract_assessment = mission.get(

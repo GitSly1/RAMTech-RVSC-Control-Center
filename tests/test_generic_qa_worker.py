@@ -374,6 +374,102 @@ class GenericQAWorkerTests(unittest.TestCase):
             "QA_REJECTED_IMPLEMENTATION",
         )
 
+    def test_harness_blocker_requires_harness_classification(self):
+        mission = {
+            "validation_results": {
+                "environment_ready": True,
+                "harness_integrity": False,
+            }
+        }
+        cognitive = {
+            "causal_state": "REQUIREMENT_DEFECT",
+            "classification": "QA_REJECTED_REQUIREMENT",
+            "summary": "validation mechanism failed",
+            "findings": [
+                "prescribed validation mechanism is defective"
+            ],
+        }
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "explicit harness blocker",
+        ):
+            _classification_consistency_guard(
+                mission,
+                cognitive,
+            )
+
+    def test_harness_blocker_accepts_harness_classification(self):
+        mission = {
+            "validation_results": {
+                "environment_ready": True,
+                "harness_integrity": False,
+            }
+        }
+        cognitive = {
+            "causal_state": "HARNESS_BLOCKER",
+            "classification": "QA_BLOCKED_HARNESS",
+            "summary": "validation mechanism is defective",
+            "findings": [
+                "prescribed validation mechanism cannot establish correctness"
+            ],
+        }
+
+        self.assertIs(
+            _classification_consistency_guard(
+                mission,
+                cognitive,
+            ),
+            cognitive,
+        )
+
+    def test_consistency_guard_does_not_infer_harness_without_explicit_state(self):
+        mission = {
+            "validation_results": {
+                "environment_ready": True,
+            }
+        }
+        cognitive = {
+            "causal_state": "REQUIREMENT_DEFECT",
+            "classification": "QA_REJECTED_REQUIREMENT",
+            "summary": "judgment remains cognitive",
+            "findings": [
+                "no explicit harness blocker"
+            ],
+        }
+
+        self.assertIs(
+            _classification_consistency_guard(
+                mission,
+                cognitive,
+            ),
+            cognitive,
+        )
+
+    def test_environment_unavailable_takes_precedence_over_harness_integrity_false(self):
+        mission = {
+            "validation_results": {
+                "environment_ready": False,
+                "harness_integrity": False,
+            }
+        }
+        cognitive = {
+            "causal_state": "ENVIRONMENT_BLOCKER",
+            "classification": "QA_BLOCKED_ENVIRONMENT",
+            "summary": "environment is unavailable",
+            "findings": [
+                "external runtime prevents defensible validation"
+            ],
+        }
+
+        self.assertIs(
+            _classification_consistency_guard(
+                mission,
+                cognitive,
+            ),
+            cognitive,
+        )
+
     def test_environment_blocker_requires_environment_classification(self):
         mission = {
             "validation_results": {
@@ -1366,6 +1462,53 @@ class QuinnEpistemicBoundaryRegressionTests(unittest.TestCase):
         self.assertEqual(
             result["causal_state"],
             "CONTRACT_BLOCKER",
+        )
+
+    def test_prompt_requires_causal_actor_ownership_preservation(self):
+        mission = {
+            "objective": "review implementation",
+            "acceptance_criteria": [
+                "validation must evaluate the reviewed target"
+            ],
+            "allowed_paths": [
+                "controller/generic_qa_worker.py"
+            ],
+            "changed_files": [
+                "controller/generic_qa_worker.py"
+            ],
+            "engineering_evidence": [],
+            "acceptance_results": {},
+            "validation_results": {
+                "environment_ready": True,
+                "harness_integrity": False,
+            },
+            "contract_assessment": {
+                "declared": True,
+                "complete": True,
+                "blockers": [],
+            },
+        }
+
+        prompt = _quinn_cognitive_prompt(
+            mission=mission,
+            review_root=Path.cwd(),
+            branch="qualification",
+            commit_sha="a" * 40,
+            authority_root=Path.cwd(),
+        )
+
+        self.assertIn(
+            "Preserve causal actor ownership from evidence through inference.",
+            prompt,
+        )
+        self.assertIn(
+            "must not be transferred",
+            prompt,
+        )
+        self.assertIn(
+            "failure of a validation or test mechanism does not by itself "
+            "establish a defect in the reviewed implementation",
+            prompt,
         )
 
     def test_prompt_preserves_active_evidence_and_epistemic_order(self):
