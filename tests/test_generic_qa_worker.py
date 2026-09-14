@@ -279,10 +279,13 @@ class GenericQAWorkerTests(unittest.TestCase):
         self, cognitive
     ):
         cognitive.return_value = {
-            "observed_facts": [],
+            "observed_facts": ["objective and acceptance evidence are sufficient"],
             "missing_facts": [],
             "supported_inferences": [],
             "unsupported_inferences": [],
+            "causal_owner": "NONE",
+            "causal_justification": "objective and acceptance evidence are sufficient",
+            "causal_evidence_refs": ["objective and acceptance evidence are sufficient"],
             "causal_state": "SATISFIED",
             "summary": "objective and acceptance evidence are sufficient",
             "findings": [
@@ -322,10 +325,13 @@ class GenericQAWorkerTests(unittest.TestCase):
         self, cognitive
     ):
         cognitive.return_value = {
-            "observed_facts": [],
+            "observed_facts": ["required implementation behavior is absent"],
             "missing_facts": [],
             "supported_inferences": [],
             "unsupported_inferences": [],
+            "causal_owner": "IMPLEMENTATION",
+            "causal_justification": "required implementation behavior is absent",
+            "causal_evidence_refs": ["required implementation behavior is absent"],
             "causal_state": "IMPLEMENTATION_DEFECT",
             "summary": "implementation does not satisfy objective",
             "findings": ["tests pass but required behavior is absent"],
@@ -620,10 +626,13 @@ class GenericQAWorkerTests(unittest.TestCase):
         cognitive,
     ):
         cognitive.return_value = {
-            "observed_facts": [],
+            "observed_facts": ["supplied tests passed"],
             "missing_facts": [],
             "supported_inferences": [],
             "unsupported_inferences": [],
+            "causal_owner": "NONE",
+            "causal_justification": "supplied tests passed",
+            "causal_evidence_refs": ["supplied tests passed"],
             "causal_state": "SATISFIED",
             "summary": "tests passed",
             "findings": ["supplied tests passed"],
@@ -666,10 +675,22 @@ class GenericQAWorkerTests(unittest.TestCase):
             with self.subTest(causal_state=causal_state):
                 result = _validated_cognitive_assurance(
                     {
-                        "observed_facts": [],
+                        "observed_facts": ["evidence-backed finding"],
                         "missing_facts": [],
                         "supported_inferences": [],
                         "unsupported_inferences": [],
+                        "causal_owner": {
+                            "SATISFIED": "NONE",
+                            "IMPLEMENTATION_DEFECT": "IMPLEMENTATION",
+                            "REQUIREMENT_DEFECT": "REQUIREMENT",
+                            "CONTRACT_BLOCKER": "CONTRACT",
+                            "HARNESS_BLOCKER": "VALIDATION_HARNESS",
+                            "ENVIRONMENT_BLOCKER": "ENVIRONMENT",
+                            "BOUNDARY_BLOCKER": "AUTHORITY_BOUNDARY",
+                            "EVIDENCE_BLOCKER": "EVIDENCE",
+                        }[causal_state],
+                        "causal_justification": "evidence-backed finding",
+                        "causal_evidence_refs": ["evidence-backed finding"],
                         "causal_state": causal_state,
                         "summary": "root cause assessed",
                         "findings": ["evidence-backed finding"],
@@ -685,10 +706,13 @@ class GenericQAWorkerTests(unittest.TestCase):
         ):
             _validated_cognitive_assurance(
                 {
-                    "observed_facts": [],
+                    "observed_facts": ["invalid causal state was returned"],
                     "missing_facts": [],
                     "supported_inferences": [],
                     "unsupported_inferences": [],
+                    "causal_owner": "NONE",
+                    "causal_justification": "invalid causal state was returned",
+                    "causal_evidence_refs": ["invalid causal state was returned"],
                     "causal_state": "MAGIC",
                     "summary": "invalid",
                     "findings": ["invalid"],
@@ -702,10 +726,13 @@ class GenericQAWorkerTests(unittest.TestCase):
         ):
             _validated_cognitive_assurance(
                 {
-                    "observed_facts": [],
+                    "observed_facts": ["objective appears correct"],
                     "missing_facts": [],
                     "supported_inferences": [],
                     "unsupported_inferences": [],
+                    "causal_owner": "NONE",
+                    "causal_justification": "objective appears correct",
+                    "causal_evidence_refs": ["objective appears correct"],
                     "causal_state": "SATISFIED",
                     "summary": "looks correct",
                     "findings": None,
@@ -1315,6 +1342,9 @@ class GenericQAWorkerTests(unittest.TestCase):
                 "missing_facts",
                 "supported_inferences",
                 "unsupported_inferences",
+                "causal_owner",
+                "causal_justification",
+                "causal_evidence_refs",
                 "causal_state",
                 "summary",
                 "findings",
@@ -1327,6 +1357,9 @@ class GenericQAWorkerTests(unittest.TestCase):
         self.assertIn("missing_facts", properties)
         self.assertIn("supported_inferences", properties)
         self.assertIn("unsupported_inferences", properties)
+        self.assertIn("causal_owner", properties)
+        self.assertIn("causal_justification", properties)
+        self.assertIn("causal_evidence_refs", properties)
         self.assertIn("causal_state", properties)
         self.assertNotIn("classification", properties)
         self.assertIn("summary", properties)
@@ -1366,6 +1399,9 @@ class QuinnEpistemicBoundaryRegressionTests(unittest.TestCase):
                 "missing_facts",
                 "supported_inferences",
                 "unsupported_inferences",
+                "causal_owner",
+                "causal_justification",
+                "causal_evidence_refs",
                 "causal_state",
                 "summary",
                 "findings",
@@ -1402,6 +1438,9 @@ class QuinnEpistemicBoundaryRegressionTests(unittest.TestCase):
                 "implementation timeout differs from approved timeout"
             ],
             "unsupported_inferences": [],
+            "causal_owner": "REQUIREMENT",
+            "causal_justification": "implementation timeout differs from approved timeout",
+            "causal_evidence_refs": ["implementation timeout differs from approved timeout"],
             "causal_state": "REQUIREMENT_DEFECT",
             "classification": "QA_REJECTED_REQUIREMENT",
             "summary": "mismatch",
@@ -1446,6 +1485,9 @@ class QuinnEpistemicBoundaryRegressionTests(unittest.TestCase):
             "unsupported_inferences": [
                 "timeout comparison cannot be established"
             ],
+            "causal_owner": "CONTRACT",
+            "causal_justification": "required A4 value is unavailable",
+            "causal_evidence_refs": ["required A4 value is unavailable"],
             "causal_state": "CONTRACT_BLOCKER",
             "classification": "QA_BLOCKED_CONTRACT",
             "summary": "required contract value is absent",
@@ -1572,6 +1614,216 @@ class QuinnEpistemicBoundaryRegressionTests(unittest.TestCase):
                 "EPISTEMIC REASONING REQUIREMENT"
             ),
         )
+
+
+
+class QuinnStructuredCausalDecisionRegressionTests(unittest.TestCase):
+    def test_structured_causal_schema_requires_decision_binding(self):
+        from controller.generic_qa_worker import (
+            _quinn_assurance_schema,
+        )
+
+        schema = _quinn_assurance_schema()
+        required = set(schema["required"])
+
+        self.assertTrue(
+            {
+                "causal_owner",
+                "causal_justification",
+                "causal_evidence_refs",
+            }.issubset(required)
+        )
+
+        owner_schema = schema[
+            "properties"
+        ]["causal_owner"]
+
+        self.assertEqual(
+            set(owner_schema["enum"]),
+            {
+                "NONE",
+                "IMPLEMENTATION",
+                "REQUIREMENT",
+                "CONTRACT",
+                "VALIDATION_HARNESS",
+                "ENVIRONMENT",
+                "AUTHORITY_BOUNDARY",
+                "EVIDENCE",
+            },
+        )
+
+    def test_validator_rejects_causal_reference_outside_supported_evidence(self):
+        raw = {
+            "observed_facts": [
+                "Harness opened fixture_B.json."
+            ],
+            "missing_facts": [],
+            "supported_inferences": [
+                "The failed validation cannot establish "
+                "implementation correctness."
+            ],
+            "unsupported_inferences": [],
+            "causal_owner": "VALIDATION_HARNESS",
+            "causal_justification": (
+                "The harness inspected the wrong artifact."
+            ),
+            "causal_evidence_refs": [
+                "This claim was never observed or supported."
+            ],
+            "causal_state": "HARNESS_BLOCKER",
+            "summary": "Harness blocks judgment.",
+            "findings": [
+                "Wrong validation artifact."
+            ],
+        }
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "claims outside observed_facts/supported_inferences",
+        ):
+            _validated_cognitive_assurance(
+                raw
+            )
+
+    def test_causal_guard_rejects_owner_state_contradiction(self):
+        from controller.generic_qa_worker import (
+            _causal_decision_consistency_guard,
+        )
+
+        cognitive = {
+            "observed_facts": [
+                "The validation mechanism evaluated "
+                "the wrong artifact."
+            ],
+            "missing_facts": [],
+            "supported_inferences": [
+                "The validation failure does not establish "
+                "a defect in the reviewed implementation."
+            ],
+            "unsupported_inferences": [],
+            "causal_owner": "VALIDATION_HARNESS",
+            "causal_justification": (
+                "The validator inspected the wrong artifact."
+            ),
+            "causal_evidence_refs": [
+                "The validation failure does not establish "
+                "a defect in the reviewed implementation."
+            ],
+            "causal_state": "IMPLEMENTATION_DEFECT",
+            "classification": "QA_REJECTED_IMPLEMENTATION",
+            "summary": "Contradictory causal decision.",
+            "findings": [
+                "Harness evidence was transferred "
+                "to implementation."
+            ],
+        }
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "causal owner conflicts with selected causal state",
+        ):
+            _causal_decision_consistency_guard(
+                cognitive
+            )
+
+    def test_causal_guard_preserves_valid_harness_decision(self):
+        from controller.generic_qa_worker import (
+            _causal_decision_consistency_guard,
+        )
+
+        evidence = (
+            "The prescribed validation mechanism "
+            "evaluated the wrong artifact."
+        )
+
+        cognitive = {
+            "observed_facts": [
+                evidence
+            ],
+            "missing_facts": [],
+            "supported_inferences": [
+                "The failed validation cannot establish "
+                "implementation correctness."
+            ],
+            "unsupported_inferences": [],
+            "causal_owner": "VALIDATION_HARNESS",
+            "causal_justification": (
+                "The harness itself evaluated "
+                "the wrong artifact."
+            ),
+            "causal_evidence_refs": [
+                evidence
+            ],
+            "causal_state": "HARNESS_BLOCKER",
+            "classification": "QA_BLOCKED_HARNESS",
+            "summary": (
+                "Harness blocks defensible judgment."
+            ),
+            "findings": [
+                "Wrong artifact was evaluated."
+            ],
+        }
+
+        result = (
+            _causal_decision_consistency_guard(
+                cognitive
+            )
+        )
+
+        self.assertEqual(
+            result["causal_owner"],
+            "VALIDATION_HARNESS",
+        )
+
+        self.assertEqual(
+            result["causal_state"],
+            "HARNESS_BLOCKER",
+        )
+
+    def test_prompt_requires_structured_causal_decision_binding(self):
+        prompt = _quinn_cognitive_prompt(
+            mission={
+                "objective": "review implementation",
+                "acceptance_criteria": [
+                    "judge evidenced root cause"
+                ],
+                "allowed_paths": [
+                    "controller/generic_qa_worker.py"
+                ],
+                "changed_files": [
+                    "controller/generic_qa_worker.py"
+                ],
+                "engineering_evidence": [],
+                "acceptance_results": {},
+                "validation_results": {},
+                "contract_assessment": {
+                    "declared": True,
+                    "complete": True,
+                    "blockers": [],
+                },
+            },
+            review_root=Path.cwd(),
+            branch="qualification",
+            commit_sha="a" * 40,
+            authority_root=Path.cwd(),
+        )
+
+        self.assertIn(
+            "select exactly one causal_owner",
+            prompt,
+        )
+
+        self.assertIn(
+            "causal_evidence_refs",
+            prompt,
+        )
+
+        self.assertIn(
+            "causal_owner and causal_state must "
+            "describe the same evidenced root cause",
+            prompt,
+        )
+
 
 
 if __name__ == "__main__":

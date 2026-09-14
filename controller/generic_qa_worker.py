@@ -357,6 +357,14 @@ def _quinn_cognitive_prompt(
             "from, exceeds, violates, or equals an absent authoritative value.\n"
             "Use only supported inferences when determining causal_state. "
             "Unsupported inferences must not justify causal_state.\n"
+            "Before selecting causal_state, select exactly one causal_owner from "
+            "NONE, IMPLEMENTATION, REQUIREMENT, CONTRACT, VALIDATION_HARNESS, "
+            "ENVIRONMENT, AUTHORITY_BOUNDARY, or EVIDENCE. Provide a non-empty "
+            "causal_justification and one or more causal_evidence_refs. Each "
+            "causal_evidence_ref must exactly copy a claim already present in "
+            "observed_facts or supported_inferences. Do not invent evidence in "
+            "the causal decision fields. causal_owner and causal_state must "
+            "describe the same evidenced root cause.\n"
             "Preserve causal actor ownership from evidence through inference. "
             "A defect evidenced for one actor or mechanism must not be transferred "
             "to another actor, component, requirement, environment, or authority "
@@ -393,6 +401,14 @@ def _quinn_cognitive_prompt(
         "\"missing_facts\": array of non-empty strings; "
         "\"supported_inferences\": array of non-empty strings; "
         "\"unsupported_inferences\": array of non-empty strings; "
+        "\"causal_owner\": exactly one of "
+        "\"NONE\", \"IMPLEMENTATION\", \"REQUIREMENT\", \"CONTRACT\", "
+        "\"VALIDATION_HARNESS\", \"ENVIRONMENT\", "
+        "\"AUTHORITY_BOUNDARY\", or \"EVIDENCE\"; "
+        "\"causal_justification\": non-empty string explaining why the "
+        "referenced evidence supports the selected root cause; "
+        "\"causal_evidence_refs\": array of one or more exact strings copied "
+        "from observed_facts or supported_inferences; "
         "\"causal_state\": one of "
         "\"SATISFIED\", "
         "\"IMPLEMENTATION_DEFECT\", "
@@ -436,6 +452,29 @@ _CAUSAL_STATE_TO_CLASSIFICATION = {
 }
 
 
+_QUINN_CAUSAL_OWNERS = {
+    "NONE",
+    "IMPLEMENTATION",
+    "REQUIREMENT",
+    "CONTRACT",
+    "VALIDATION_HARNESS",
+    "ENVIRONMENT",
+    "AUTHORITY_BOUNDARY",
+    "EVIDENCE",
+}
+
+_CAUSAL_STATE_TO_OWNER = {
+    "SATISFIED": "NONE",
+    "IMPLEMENTATION_DEFECT": "IMPLEMENTATION",
+    "REQUIREMENT_DEFECT": "REQUIREMENT",
+    "CONTRACT_BLOCKER": "CONTRACT",
+    "HARNESS_BLOCKER": "VALIDATION_HARNESS",
+    "ENVIRONMENT_BLOCKER": "ENVIRONMENT",
+    "BOUNDARY_BLOCKER": "AUTHORITY_BOUNDARY",
+    "EVIDENCE_BLOCKER": "EVIDENCE",
+}
+
+
 def _quinn_assurance_schema() -> dict[str, Any]:
     causal_states = sorted(_QUINN_CAUSAL_STATES)
 
@@ -454,6 +493,22 @@ def _quinn_assurance_schema() -> dict[str, Any]:
             "missing_facts": epistemic_list,
             "supported_inferences": epistemic_list,
             "unsupported_inferences": epistemic_list,
+            "causal_owner": {
+                "type": "string",
+                "enum": sorted(_QUINN_CAUSAL_OWNERS),
+            },
+            "causal_justification": {
+                "type": "string",
+                "minLength": 1,
+            },
+            "causal_evidence_refs": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "minLength": 1,
+                },
+                "minItems": 1,
+            },
             "causal_state": {
                 "type": "string",
                 "enum": causal_states,
@@ -476,6 +531,9 @@ def _quinn_assurance_schema() -> dict[str, Any]:
             "missing_facts",
             "supported_inferences",
             "unsupported_inferences",
+            "causal_owner",
+            "causal_justification",
+            "causal_evidence_refs",
             "causal_state",
             "summary",
             "findings",
@@ -849,6 +907,84 @@ def _epistemic_consistency_guard(
     return cognitive
 
 
+def _causal_decision_consistency_guard(
+    cognitive: dict[str, Any],
+) -> dict[str, Any]:
+    """Fail closed when Quinn's structured causal decision contradicts itself."""
+
+    causal_state = str(
+        cognitive.get("causal_state", "")
+    ).strip()
+
+    causal_owner = str(
+        cognitive.get("causal_owner", "")
+    ).strip()
+
+    expected_owner = (
+        _CAUSAL_STATE_TO_OWNER.get(
+            causal_state
+        )
+    )
+
+    if expected_owner is None:
+        raise ValueError(
+            "cognitive causal decision has unsupported causal state"
+        )
+
+    if causal_owner != expected_owner:
+        raise ValueError(
+            "cognitive causal owner conflicts with selected causal state"
+        )
+
+    refs = cognitive.get(
+        "causal_evidence_refs"
+    )
+
+    observed = cognitive.get(
+        "observed_facts"
+    )
+
+    supported = cognitive.get(
+        "supported_inferences"
+    )
+
+    if (
+        not isinstance(refs, list)
+        or not refs
+        or not isinstance(observed, list)
+        or not isinstance(supported, list)
+    ):
+        raise ValueError(
+            "cognitive causal decision evidence is incomplete"
+        )
+
+    available = set(
+        observed + supported
+    )
+
+    if any(
+        ref not in available
+        for ref in refs
+    ):
+        raise ValueError(
+            "cognitive causal decision cites unsupported evidence"
+        )
+
+    justification = str(
+        cognitive.get(
+            "causal_justification",
+            "",
+        )
+    ).strip()
+
+    if not justification:
+        raise ValueError(
+            "cognitive causal decision lacks justification"
+        )
+
+    return cognitive
+
+
 def _classification_consistency_guard(
     mission: dict[str, Any],
     cognitive: dict[str, Any],
@@ -978,6 +1114,65 @@ def _validated_cognitive_assurance(
             for item in value
         ]
 
+    causal_owner = str(
+        result.get("causal_owner", "")
+    ).strip()
+
+    if causal_owner not in _QUINN_CAUSAL_OWNERS:
+        raise ValueError(
+            "cognitive assurance returned unsupported causal owner"
+        )
+
+    causal_justification = str(
+        result.get("causal_justification", "")
+    ).strip()
+
+    if not causal_justification:
+        raise ValueError(
+            "cognitive assurance causal_justification is required"
+        )
+
+    causal_evidence_refs = result.get(
+        "causal_evidence_refs"
+    )
+
+    if (
+        not isinstance(causal_evidence_refs, list)
+        or not causal_evidence_refs
+        or not all(
+            isinstance(item, str)
+            and item.strip()
+            for item in causal_evidence_refs
+        )
+    ):
+        raise ValueError(
+            "cognitive assurance causal_evidence_refs must be "
+            "a non-empty list of non-empty strings"
+        )
+
+    causal_evidence_refs = [
+        item.strip()
+        for item in causal_evidence_refs
+    ]
+
+    available_causal_evidence = set(
+        epistemic["observed_facts"]
+        + epistemic["supported_inferences"]
+    )
+
+    unknown_causal_refs = [
+        item
+        for item in causal_evidence_refs
+        if item
+        not in available_causal_evidence
+    ]
+
+    if unknown_causal_refs:
+        raise ValueError(
+            "cognitive assurance causal_evidence_refs contain "
+            "claims outside observed_facts/supported_inferences"
+        )
+
     causal_state = str(
         result.get("causal_state", "")
     ).strip()
@@ -1015,6 +1210,9 @@ def _validated_cognitive_assurance(
 
     validated = {
         **epistemic,
+        "causal_owner": causal_owner,
+        "causal_justification": causal_justification,
+        "causal_evidence_refs": causal_evidence_refs,
         "causal_state": causal_state,
         "classification": classification,
         "summary": summary,
@@ -1286,6 +1484,9 @@ def execute_mission(*, agent_id: str, agent_name: str, role: str, qa_eligible: b
             )
             cognitive = _epistemic_consistency_guard(
                 mission,
+                cognitive,
+            )
+            cognitive = _causal_decision_consistency_guard(
                 cognitive,
             )
             cognitive = _classification_consistency_guard(
