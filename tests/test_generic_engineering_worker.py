@@ -10,6 +10,7 @@ from unittest.mock import Mock, call, patch
 from controller.engineering_environment import EngineeringEnvironmentError
 from controller.engineering_runner import EngineeringValidationError
 from controller.generic_engineering_worker import _evaluate_acceptance_contract, _proposal_diagnostics, _apply_bounded_edits, _apply_locator_edits, _source_locator_catalog, _budget_context_files, _bounded_context_text, _configure_git_identity, _git_identity, _ollama_call, _ollama_proposal_schema, _engineering_repair_prompt, _read_context_files, _repo_root, _validations, _worker_request, execute_mission
+import subprocess
 
 
 class GenericEngineeringWorkerTests(unittest.TestCase):
@@ -2168,6 +2169,122 @@ class SemanticAcceptanceGateTests(unittest.TestCase):
             ("semantic_acceptance:not_required",),
         )
 
+
+
+class MissionTargetWorkspaceResolutionTests(unittest.TestCase):
+    def _git(self, cwd, *args):
+        completed = subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        return completed.stdout.strip()
+
+    def test_target_workspace_redirects_engineering_git_authority(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            remote = base / "remote.git"
+            workspace = base / "workspace"
+
+            self._git(base, "init", "--bare", str(remote))
+            self._git(base, "clone", str(remote), str(workspace))
+
+            mission = {
+                "project": "rvsc",
+                "repository": str(remote),
+                "target_workspace": str(workspace),
+            }
+
+            with patch.dict(
+                os.environ,
+                {"RVSC_RVSC_TARGET_WORKSPACE": str(workspace)},
+                clear=False,
+            ):
+                self.assertEqual(_repo_root(mission), workspace.resolve())
+
+    def test_target_workspace_origin_must_match_repository(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            remote = base / "remote.git"
+            other = base / "other.git"
+            workspace = base / "workspace"
+
+            self._git(base, "init", "--bare", str(remote))
+            self._git(base, "init", "--bare", str(other))
+            self._git(base, "clone", str(remote), str(workspace))
+
+            mission = {
+                "project": "rvsc",
+                "repository": str(other),
+                "target_workspace": str(workspace),
+            }
+
+            with patch.dict(
+                os.environ,
+                {"RVSC_RVSC_TARGET_WORKSPACE": str(workspace)},
+                clear=False,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "target_workspace origin does not match mission repository",
+                ):
+                    _repo_root(mission)
+
+    def test_target_workspace_requires_configured_authority(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            mission = {
+                "project": "rvsc",
+                "repository": "example/repository",
+                "target_workspace": str(workspace),
+            }
+            with patch.dict(
+                os.environ,
+                {"RVSC_RVSC_TARGET_WORKSPACE": ""},
+                clear=False,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "RVSC_RVSC_TARGET_WORKSPACE is required",
+                ):
+                    _repo_root(mission)
+
+    def test_target_workspace_cannot_expand_configured_authority(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            requested = base / "requested"
+            authorized = base / "authorized"
+            requested.mkdir()
+            authorized.mkdir()
+            mission = {
+                "project": "rvsc",
+                "repository": "example/repository",
+                "target_workspace": str(requested),
+            }
+            with patch.dict(
+                os.environ,
+                {"RVSC_RVSC_TARGET_WORKSPACE": str(authorized)},
+                clear=False,
+            ):
+                with self.assertRaisesRegex(ValueError, "not authorized"):
+                    _repo_root(mission)
+
+    def test_project_mapping_remains_default_without_target_workspace(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            expected = Path(temporary)
+            mission = {
+                "project": "rvsc",
+                "repository": "GitSly1/RAMTech-RVSC-Control-Center",
+            }
+            with patch.dict(
+                os.environ,
+                {"RVSC_RVSC_REPO": str(expected)},
+                clear=False,
+            ):
+                self.assertEqual(_repo_root(mission), expected.resolve())
 
 if __name__ == "__main__":
     unittest.main()

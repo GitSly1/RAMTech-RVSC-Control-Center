@@ -1746,6 +1746,11 @@ _PROJECT_REPOSITORIES = {
     "semantiq": ("RVSC_SEMANTIQ_REPO", Path(r"D:\Py_Proj\RAMTech-SEMANTIQ"), {"gitsly1/ramtech-semantiq", "ramtech-semantiq"}),
     "moxie": ("RVSC_MOXIE_REPO", Path(r"D:\Py_Proj\RAMTech-MOXIE"), {"gitsly1/ramtech-moxie", "ramtech-moxie"}),
 }
+_PROJECT_TARGET_WORKSPACES = {
+    "rvsc": "RVSC_RVSC_TARGET_WORKSPACE",
+    "semantiq": "RVSC_SEMANTIQ_TARGET_WORKSPACE",
+    "moxie": "RVSC_MOXIE_TARGET_WORKSPACE",
+}
 
 
 def _record(checkpoint: Checkpoint | None, name: str, evidence: tuple[str, ...]) -> None:
@@ -1784,6 +1789,7 @@ def _repo_root(mission: dict[str, Any]) -> Path:
     mapping = _PROJECT_REPOSITORIES.get(project)
     if mapping is None:
         raise ValueError(f"no controlled repository mapping for QA project {project or '<missing>'}")
+
     env_name, default, accepted_repositories = mapping
 
     repository = _mission_text(mission, "engineering_repository") or _mission_text(mission, "repository")
@@ -1794,7 +1800,60 @@ def _repo_root(mission: dict[str, Any]) -> Path:
     ):
         raise ValueError(f"repository {repository} does not match QA project {project}")
 
-    return Path(os.environ.get(env_name, str(default))).resolve()
+    target_workspace = _mission_text(mission, "target_workspace")
+    if not target_workspace:
+        return Path(os.environ.get(env_name, str(default))).resolve()
+
+    workspace = Path(target_workspace).expanduser()
+    if not workspace.is_absolute():
+        raise ValueError("target_workspace must be an absolute local path")
+
+    workspace = workspace.resolve()
+
+    authority_env = _PROJECT_TARGET_WORKSPACES[project]
+    authorized_workspace = os.environ.get(authority_env, "").strip()
+    if not authorized_workspace:
+        raise ValueError(f"{authority_env} is required when target_workspace is supplied")
+
+    authorized_path = Path(authorized_workspace).expanduser()
+    if not authorized_path.is_absolute():
+        raise ValueError(f"{authority_env} must be an absolute local path")
+    if workspace != authorized_path.resolve():
+        raise ValueError("target_workspace is not authorized for project")
+
+    if not workspace.is_dir():
+        raise ValueError("target_workspace does not exist or is not a directory")
+
+    git_marker = workspace / ".git"
+    if not git_marker.exists():
+        raise ValueError("target_workspace is not a Git worktree")
+
+    if not repository:
+        raise ValueError("repository is required when target_workspace is supplied")
+
+    origin = subprocess.run(
+        ("git", "remote", "get-url", "origin"),
+        cwd=workspace,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+    if origin.returncode != 0 or not origin.stdout.strip():
+        raise ValueError("target_workspace origin is unavailable")
+
+    expected = repository.replace("\\", "/").rstrip("/").lower()
+    observed = origin.stdout.strip().replace("\\", "/").rstrip("/").lower()
+
+    if expected.endswith(".git"):
+        expected = expected[:-4]
+    if observed.endswith(".git"):
+        observed = observed[:-4]
+
+    if expected != observed:
+        raise ValueError("target_workspace origin does not match mission repository")
+
+    return workspace
 
 
 def _requested_commit(mission: dict[str, Any]) -> str:
