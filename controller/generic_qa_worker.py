@@ -387,6 +387,101 @@ def _authority_boundary_assessment(
 
 
 
+def _acceptance_evidence_assessment(
+    mission: dict[str, Any],
+) -> dict[str, Any]:
+    """Return deterministic availability facts for acceptance evidence.
+
+    This assessment establishes evidence availability only. It does not
+    select causal_owner, causal_state, or final QA disposition.
+    """
+
+    raw_engineering_evidence = mission.get(
+        "engineering_evidence"
+    )
+    raw_acceptance_results = mission.get(
+        "acceptance_results"
+    )
+
+    engineering_evidence_valid = (
+        isinstance(raw_engineering_evidence, list)
+    )
+    acceptance_results_valid = (
+        isinstance(raw_acceptance_results, dict)
+    )
+
+    engineering_evidence = (
+        raw_engineering_evidence
+        if engineering_evidence_valid
+        else []
+    )
+    acceptance_results = (
+        raw_acceptance_results
+        if acceptance_results_valid
+        else {}
+    )
+
+    complete = (
+        engineering_evidence_valid
+        and acceptance_results_valid
+    )
+
+    evidence_present: bool | None
+    evidence_verified: bool | None = None
+    implementation_behavior_claimed: bool | None = None
+    implementation_behavior_verified: bool | None = None
+
+    if complete:
+        evidence_present = bool(
+            engineering_evidence
+            or acceptance_results
+        )
+
+        claimed_value = acceptance_results.get(
+            "implementation_behavior_claimed"
+        )
+        verified_value = acceptance_results.get(
+            "implementation_behavior_verified"
+        )
+
+        if isinstance(claimed_value, bool):
+            implementation_behavior_claimed = claimed_value
+
+        if isinstance(verified_value, bool):
+            implementation_behavior_verified = verified_value
+            evidence_verified = verified_value
+
+        if (
+            mission.get("requires_semantic_acceptance") is True
+            and evidence_verified is None
+        ):
+            evidence_verified = bool(
+                _acceptance_authority_gate(
+                    mission
+                ).get("eligible")
+            )
+    else:
+        evidence_present = None
+
+    return {
+        "authority_class": "A3",
+        "complete": complete,
+        "engineering_evidence_present": bool(
+            engineering_evidence
+        ),
+        "acceptance_results_present": bool(
+            acceptance_results
+        ),
+        "evidence_present": evidence_present,
+        "evidence_verified": evidence_verified,
+        "implementation_behavior_claimed": (
+            implementation_behavior_claimed
+        ),
+        "implementation_behavior_verified": (
+            implementation_behavior_verified
+        ),
+    }
+
 def _authoritative_epistemic_facts(
     mission: dict[str, Any],
 ) -> tuple[str, ...]:
@@ -460,6 +555,31 @@ def _authoritative_epistemic_facts(
                 "environment_ready!=false"
             )
 
+    evidence = _acceptance_evidence_assessment(
+        mission
+    )
+
+    if (
+        evidence.get("complete") is True
+        and evidence.get("evidence_present") is False
+    ):
+        facts.append(
+            "acceptance_evidence:"
+            "engineering_evidence_present=false;"
+            "acceptance_results_present=false"
+        )
+
+    if (
+        evidence.get("complete") is True
+        and evidence.get("evidence_present") is True
+        and evidence.get("evidence_verified") is False
+    ):
+        facts.append(
+            "acceptance_evidence:"
+            "evidence_present=true;"
+            "evidence_verified=false"
+        )
+
     return tuple(facts)
 
 
@@ -515,6 +635,9 @@ def _quinn_cognitive_prompt(
     evidence_context = {
         "changed_files": mission.get("changed_files") or [],
         "boundary_assessment": _authority_boundary_assessment(mission),
+        "acceptance_evidence_assessment": _acceptance_evidence_assessment(
+            mission
+        ),
         "authoritative_epistemic_facts": list(
             _authoritative_epistemic_facts(
                 mission
@@ -601,6 +724,24 @@ def _quinn_cognitive_prompt(
             "outside the active mission authorization. This deterministic "
             "fact does not choose causal_state; Quinn retains semantic causal "
             "ownership and must determine its material causal consequence.\n"
+            "A controller acceptance_evidence_assessment is an authoritative A3 "
+            "structured fact about whether acceptance evidence was supplied. "
+            "When acceptance_evidence_assessment.complete is true and "
+            "evidence_present is false, both engineering_evidence and "
+            "acceptance_results are absent. Preserve that deterministic evidence "
+            "availability fact exactly. The fact establishes evidence absence "
+            "only; Quinn retains semantic ownership of its material causal "
+            "consequence and causal_state.\n"
+            "When acceptance_evidence_assessment.complete is true, "
+            "evidence_present is true, and evidence_verified is false, evidence "
+            "or a claim was supplied but verification has not been established. "
+            "Preserve that deterministic verification-status fact exactly. "
+            "Evidence presence and claim presence must not be treated as "
+            "verification. A changed file identifies provenance and review scope; "
+            "changed-file existence alone does not establish defective "
+            "implementation behavior. These facts do not choose causal_owner or "
+            "causal_state; Quinn retains semantic ownership of their material "
+            "causal consequence.\n"
             "AUTHORITATIVE EPISTEMIC PRESERVATION RULE: the bounded "
             "review context may contain authoritative_epistemic_facts generated "
             "deterministically by RVSC from controller-owned mission state. Every "
@@ -1247,6 +1388,7 @@ def _epistemic_consistency_guard(
 
 def _causal_decision_consistency_guard(
     cognitive: dict[str, Any],
+    mission: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Fail closed when Quinn's structured causal decision contradicts itself."""
 
@@ -1319,6 +1461,36 @@ def _causal_decision_consistency_guard(
         raise ValueError(
             "cognitive causal decision lacks justification"
         )
+
+    if (
+        causal_state == "IMPLEMENTATION_DEFECT"
+        and isinstance(mission, dict)
+    ):
+        changed_files = mission.get(
+            "changed_files"
+        )
+        changed_file_facts: set[str] = set()
+
+        if isinstance(changed_files, list):
+            changed_file_facts = {
+                f"{path} is changed"
+                for path in changed_files
+                if isinstance(path, str) and path.strip()
+            }
+
+        evidence = _acceptance_evidence_assessment(
+            mission
+        )
+
+        if (
+            evidence.get("evidence_verified") is False
+            and bool(refs)
+            and set(refs).issubset(changed_file_facts)
+        ):
+            raise ValueError(
+                "changed-file provenance cannot independently establish "
+                "implementation defect"
+            )
 
     return cognitive
 
@@ -1826,6 +1998,7 @@ def execute_mission(*, agent_id: str, agent_name: str, role: str, qa_eligible: b
             )
             cognitive = _causal_decision_consistency_guard(
                 cognitive,
+                mission=mission,
             )
             cognitive = _classification_consistency_guard(
                 mission,

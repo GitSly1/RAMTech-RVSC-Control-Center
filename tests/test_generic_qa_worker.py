@@ -2966,6 +2966,305 @@ class QuinnCausalDomainOntologyRegressionTests(
                     classification,
                 )
 
+    def test_missing_acceptance_evidence_is_canonical_material_fact(
+        self,
+    ):
+        from controller.generic_qa_worker import (
+            _authoritative_epistemic_facts,
+        )
+
+        mission = {
+            "engineering_evidence": [],
+            "acceptance_results": {},
+        }
+
+        self.assertEqual(
+            _authoritative_epistemic_facts(
+                mission
+            ),
+            (
+                "acceptance_evidence:"
+                "engineering_evidence_present=false;"
+                "acceptance_results_present=false",
+            ),
+        )
+
+    def test_present_acceptance_evidence_requires_no_missing_evidence_fact(
+        self,
+    ):
+        from controller.generic_qa_worker import (
+            _authoritative_epistemic_facts,
+        )
+
+        mission = {
+            "engineering_evidence": [
+                "Acceptance behavior passed."
+            ],
+            "acceptance_results": {},
+        }
+
+        self.assertEqual(
+            _authoritative_epistemic_facts(
+                mission
+            ),
+            (),
+        )
+
+    def test_missing_acceptance_evidence_fact_must_be_preserved(
+        self,
+    ):
+        from controller.generic_qa_worker import (
+            _authoritative_epistemic_facts,
+            _epistemic_consistency_guard,
+        )
+
+        mission = {
+            "engineering_evidence": [],
+            "acceptance_results": {},
+        }
+
+        required = _authoritative_epistemic_facts(
+            mission
+        )
+
+        cognitive = {
+            "observed_facts": [],
+            "missing_facts": [],
+            "supported_inferences": [],
+            "unsupported_inferences": [],
+        }
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "omitted authoritative structured fact",
+        ):
+            _epistemic_consistency_guard(
+                mission,
+                cognitive,
+            )
+
+        cognitive["observed_facts"] = list(
+            required
+        )
+
+        result = _epistemic_consistency_guard(
+            mission,
+            cognitive,
+        )
+
+        self.assertEqual(
+            result["observed_facts"],
+            list(required),
+        )
+
+    def test_q191_prompt_explains_present_but_unverified_evidence(
+        self,
+    ):
+        from controller.generic_qa_worker import (
+            _quinn_cognitive_prompt,
+        )
+
+        mission = {
+            "changed_files": [
+                "controller/generic_qa_worker.py",
+            ],
+            "engineering_evidence": [
+                "implementation behavior is claimed",
+            ],
+            "acceptance_results": {
+                "implementation_behavior_claimed": True,
+                "implementation_behavior_verified": False,
+            },
+        }
+
+        repo_root = Path(__file__).resolve().parents[1]
+
+        prompt = _quinn_cognitive_prompt(
+            mission=mission,
+            review_root=repo_root,
+            branch="qualification",
+            commit_sha="abc123",
+            authority_root=repo_root,
+        )
+
+        self.assertIn(
+            (
+                "evidence or a claim was supplied but verification "
+                "has not been established"
+            ),
+            prompt,
+        )
+
+        self.assertIn(
+            (
+                "Evidence presence and claim presence must not be "
+                "treated as verification."
+            ),
+            prompt,
+        )
+
+        self.assertIn(
+            (
+                "changed-file existence alone does not establish "
+                "defective implementation behavior."
+            ),
+            prompt,
+        )
+
+        self.assertIn(
+            (
+                "These facts do not choose causal_owner or "
+                "causal_state; Quinn retains semantic ownership"
+            ),
+            prompt,
+        )
+
+    def test_missing_acceptance_evidence_fact_is_factual_not_causal(
+        self,
+    ):
+        from controller.generic_qa_worker import (
+            _acceptance_evidence_assessment,
+            _authoritative_epistemic_facts,
+        )
+
+        mission = {
+            "engineering_evidence": [],
+            "acceptance_results": {},
+        }
+
+        assessment = _acceptance_evidence_assessment(
+            mission
+        )
+        facts = _authoritative_epistemic_facts(
+            mission
+        )
+
+        self.assertIs(
+            assessment["evidence_present"],
+            False,
+        )
+        self.assertIsNone(
+            assessment["evidence_verified"],
+        )
+        self.assertIsNone(
+            assessment["implementation_behavior_claimed"],
+        )
+        self.assertIsNone(
+            assessment["implementation_behavior_verified"],
+        )
+        self.assertEqual(
+            facts,
+            (
+                (
+                    "acceptance_evidence:"
+                    "engineering_evidence_present=false;"
+                    "acceptance_results_present=false"
+                ),
+            ),
+        )
+
+    def test_q191_claimed_but_unverified_evidence_is_structured_fact(
+        self,
+    ):
+        from controller.generic_qa_worker import (
+            _acceptance_evidence_assessment,
+        )
+
+        mission = {
+            "engineering_evidence": [
+                (
+                    "implementation behavior is claimed, but no attributable "
+                    "validation artifact, reproducible proof, or independently "
+                    "verifiable result is supplied"
+                ),
+            ],
+            "acceptance_results": {
+                "implementation_behavior_claimed": True,
+                "implementation_behavior_verified": False,
+            },
+        }
+
+        assessment = _acceptance_evidence_assessment(
+            mission
+        )
+
+        self.assertIs(
+            assessment["implementation_behavior_claimed"],
+            True,
+        )
+        self.assertIs(
+            assessment["implementation_behavior_verified"],
+            False,
+        )
+        self.assertIs(
+            assessment["evidence_verified"],
+            False,
+        )
+
+    def test_q191_changed_file_alone_cannot_support_implementation_defect(
+        self,
+    ):
+        from controller.generic_qa_worker import (
+            _causal_decision_consistency_guard,
+            _validated_cognitive_assurance,
+        )
+
+        changed_fact = (
+            "controller/generic_qa_worker.py is changed"
+        )
+
+        mission = {
+            "changed_files": [
+                "controller/generic_qa_worker.py",
+            ],
+            "engineering_evidence": [
+                (
+                    "implementation behavior is claimed, but no attributable "
+                    "validation artifact, reproducible proof, or independently "
+                    "verifiable result is supplied"
+                ),
+            ],
+            "acceptance_results": {
+                "implementation_behavior_claimed": True,
+                "implementation_behavior_verified": False,
+            },
+        }
+
+        cognitive = _validated_cognitive_assurance(
+            {
+                "observed_facts": [
+                    changed_fact,
+                ],
+                "missing_facts": [],
+                "supported_inferences": [],
+                "unsupported_inferences": [],
+                "causal_owner": "IMPLEMENTATION",
+                "causal_justification": (
+                    "The changed file may affect the behavior being claimed."
+                ),
+                "causal_evidence_refs": [
+                    changed_fact,
+                ],
+                "causal_state": "IMPLEMENTATION_DEFECT",
+                "summary": (
+                    "Changed-file provenance was treated as defect proof."
+                ),
+                "findings": [
+                    "Implementation defect was not independently established."
+                ],
+            }
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "changed-file provenance cannot independently establish "
+            "implementation defect",
+        ):
+            _causal_decision_consistency_guard(
+                cognitive,
+                mission=mission,
+            )
+
     def test_evidence_remains_owner_when_evidence_itself_is_material_blocker(
         self,
     ):
