@@ -18,6 +18,21 @@ ALLOWED_TRANSITIONS = {
 REQUIRED_HANDOFF_KEYS = {"files_changed", "validation_results", "risks", "commit_or_pr"}
 QA_ACCEPTED = "QA_ACCEPTED"
 QA_REJECTED = "QA_REJECTED"
+QA_BLOCKED_CONTRACT = "QA_BLOCKED_CONTRACT"
+QA_BLOCKED_HARNESS = "QA_BLOCKED_HARNESS"
+QA_BLOCKED_ENVIRONMENT = "QA_BLOCKED_ENVIRONMENT"
+QA_BLOCKED_BOUNDARY = "QA_BLOCKED_BOUNDARY"
+QA_BLOCKED_EVIDENCE = "QA_BLOCKED_EVIDENCE"
+
+QA_COMPLETED_DISPOSITIONS = frozenset({
+    QA_ACCEPTED,
+    QA_REJECTED,
+    QA_BLOCKED_CONTRACT,
+    QA_BLOCKED_HARNESS,
+    QA_BLOCKED_ENVIRONMENT,
+    QA_BLOCKED_BOUNDARY,
+    QA_BLOCKED_EVIDENCE,
+})
 
 
 @dataclass(frozen=True)
@@ -292,18 +307,51 @@ def build_qa_mission(*, engineering_mission: dict[str, Any], engineering_result:
 def validate_qa_result(result: Any) -> tuple[str, tuple[str, ...]]:
     if not isinstance(result, dict):
         raise QAHandoffError("malformed QA dispatch result", category="malformed_qa_response", response=result)
+
     verdict = result.get("verdict")
-    if verdict not in {QA_ACCEPTED, QA_REJECTED}:
+    cognitive_classification = str(result.get("cognitive_classification") or "").strip()
+    acceptance_classification = str(result.get("acceptance_classification") or "").strip()
+    cognitive_assurance = result.get("cognitive_assurance")
+    acceptance_authority = result.get("acceptance_authority")
+
+    disposition = verdict
+    if (
+        verdict == QA_REJECTED
+        and cognitive_classification in QA_COMPLETED_DISPOSITIONS
+        and cognitive_classification != QA_ACCEPTED
+        and isinstance(cognitive_assurance, dict)
+        and str(cognitive_assurance.get("classification") or "").strip() == cognitive_classification
+    ):
+        disposition = cognitive_classification
+    elif (
+        verdict == QA_REJECTED
+        and acceptance_classification in QA_COMPLETED_DISPOSITIONS
+        and acceptance_classification != QA_ACCEPTED
+        and isinstance(acceptance_authority, dict)
+        and acceptance_authority.get("eligible") is False
+    ):
+        disposition = acceptance_classification
+    elif verdict not in {QA_ACCEPTED, QA_REJECTED}:
         raise QAHandoffError("malformed QA evidence: valid verdict missing", category="malformed_qa_response", response=result)
+
     evidence_value = result.get("evidence")
     if not isinstance(evidence_value, (list, tuple)):
         raise QAHandoffError("malformed QA evidence: evidence bundle missing", category="malformed_qa_response", response=result)
     evidence = tuple(str(item).strip() for item in evidence_value if str(item).strip())
     if not evidence:
         raise QAHandoffError("malformed QA evidence: evidence bundle empty", category="malformed_qa_response", response=result)
-    if result.get("success") is not True:
-        raise QAHandoffError("QA dispatch failed", category="qa_worker_failure", response=result)
-    return verdict, evidence
+
+    success = result.get("success")
+    if disposition == QA_ACCEPTED:
+        if success is not True:
+            raise QAHandoffError("QA acceptance reported unsuccessful execution", category="qa_worker_failure", response=result)
+    elif disposition == QA_REJECTED:
+        if success is not True:
+            raise QAHandoffError("QA dispatch failed", category="qa_worker_failure", response=result)
+    elif success is not False:
+        raise QAHandoffError("QA blocker has inconsistent execution status", category="malformed_qa_response", response=result)
+
+    return disposition, evidence
 
 
 def evaluate_merge_eligibility(*, status: str, target_repository: str, actual_repository: str, base_branch: str, work_branch: str, changed_files: Iterable[str], allowed_paths: Iterable[str], forbidden_paths: Iterable[str], acceptance_results: dict[str, bool], validation_results: dict[str, bool], handoff_report: dict, pr_exists: bool, pr_mergeable: bool, review_approved: bool, qa_accepted: bool) -> GateResult:

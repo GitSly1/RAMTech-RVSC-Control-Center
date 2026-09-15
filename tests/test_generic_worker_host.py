@@ -356,6 +356,27 @@ class GenericWorkerHostTests(unittest.TestCase):
         self.assertFalse(result["success"])
         self.assertEqual(result["qa_handoff"]["classification"], "qa_rejected")
 
+    def test_completed_evidence_blocker_is_known_progression_block(self):
+        blocked = {
+            "success": False,
+            "verdict": QA_REJECTED,
+            "cognitive_classification": "QA_BLOCKED_EVIDENCE",
+            "cognitive_assurance": {
+                "classification": "QA_BLOCKED_EVIDENCE",
+                "causal_state": "EVIDENCE_BLOCKER",
+            },
+            "evidence": ["acceptance_evidence:evidence_present=true;evidence_verified=false"],
+        }
+        with patch("controller.generic_worker_host.select_registered_qa_agent", return_value=self.qa), patch("controller.generic_worker_host.dispatch_qa_payload", return_value=blocked), patch("controller.generic_worker_host._checkpoint"):
+            result = automatic_qa_handoff(self.noah, self.mission, self.engineering)
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["verdict"], "QA_BLOCKED_EVIDENCE")
+        self.assertEqual(result["qa_handoff"]["classification"], "qa_blocked")
+        self.assertFalse(host._ambiguous_post_dispatch_qa_failure(result))
+        self.assertFalse(result["qa_handoff"]["retryable"])
+        self.assertTrue(result["qa_handoff"]["dispatch_started"])
+
     def test_qa_accepted_preserves_identity(self):
         with patch("controller.generic_worker_host.select_registered_qa_agent", return_value=self.qa), patch("controller.generic_worker_host.dispatch_qa_payload", return_value={"success": True, "verdict": QA_ACCEPTED, "evidence": ["tests:pass"]}), patch("controller.generic_worker_host._checkpoint"):
             result = automatic_qa_handoff(self.noah, self.mission, self.engineering)

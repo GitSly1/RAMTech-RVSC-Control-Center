@@ -646,12 +646,17 @@ def automatic_qa_handoff(implementer: RegisteredAgent, mission: dict[str, Any], 
         return _qa_failure_result(engineering_result, mission, exc, dispatch_started=dispatch_started)
     except Exception as exc:
         return _qa_failure_result(engineering_result, mission, QAHandoffError(str(exc)), dispatch_started=dispatch_started)
-    combined = {**engineering_result, "success": verdict == QA_ACCEPTED, "verdict": verdict, "qa_evidence": list(evidence), "qa_handoff": {"success": verdict == QA_ACCEPTED, "classification": "qa_accepted" if verdict == QA_ACCEPTED else "qa_rejected", "retryable": False, "dispatch_started": True, "qa_agent_id": qa_agent.agent_id, "verdict": verdict, "evidence": list(evidence), "engineering_project": qa_mission["engineering_project"], "engineering_repository": qa_mission["engineering_repository"], "engineering_branch": qa_mission["engineering_branch"], "engineering_commit_sha": qa_mission["engineering_commit_sha"]}}
-    if verdict == QA_REJECTED:
+    accepted = verdict == QA_ACCEPTED
+    handoff_classification = "qa_accepted" if accepted else ("qa_rejected" if verdict == QA_REJECTED else "qa_blocked")
+    combined = {**engineering_result, "success": accepted, "verdict": verdict, "qa_evidence": list(evidence), "qa_handoff": {"success": accepted, "classification": handoff_classification, "retryable": False, "dispatch_started": True, "qa_agent_id": qa_agent.agent_id, "verdict": verdict, "evidence": list(evidence), "engineering_project": qa_mission["engineering_project"], "engineering_repository": qa_mission["engineering_repository"], "engineering_branch": qa_mission["engineering_branch"], "engineering_commit_sha": qa_mission["engineering_commit_sha"]}}
+    if accepted:
+        _checkpoint("qa_accepted", evidence)
+    elif verdict == QA_REJECTED:
         combined["summary"] = "automatic QA rejected the engineering result; progression blocked"
         _checkpoint("qa_rejected", evidence)
     else:
-        _checkpoint("qa_accepted", evidence)
+        combined["summary"] = f"automatic QA blocked progression: {verdict}"
+        _checkpoint("qa_blocked", (f"qa_disposition:{verdict}", *evidence))
     return combined
 
 

@@ -169,6 +169,23 @@ class WorkPackageControllerTests(unittest.TestCase):
         self.assertEqual(verdict, QA_REJECTED)
         self.assertEqual(evidence, ("tests:failed",))
 
+    def test_validate_qa_result_preserves_completed_evidence_blocker(self):
+        verdict, evidence = validate_qa_result({
+            "success": False,
+            "verdict": QA_REJECTED,
+            "cognitive_classification": "QA_BLOCKED_EVIDENCE",
+            "cognitive_assurance": {
+                "classification": "QA_BLOCKED_EVIDENCE",
+                "causal_state": "EVIDENCE_BLOCKER",
+            },
+            "evidence": ["acceptance_evidence:evidence_present=true;evidence_verified=false"],
+        })
+        self.assertEqual(verdict, "QA_BLOCKED_EVIDENCE")
+        self.assertEqual(
+            evidence,
+            ("acceptance_evidence:evidence_present=true;evidence_verified=false",),
+        )
+
     def test_validate_qa_result_classifies_malformed_response(self):
         malformed = {"success": True, "evidence": ["tests:pass"]}
         with self.assertRaises(QAHandoffError) as raised:
