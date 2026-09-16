@@ -1,78 +1,94 @@
 # RVSC Unattended Orchestration Architecture
 
+Constitutional alignment: RVSC Constitution
+
 ## Objective
-RVSC agents operate unattended by default and are supervised by exception. GitHub is the durable control plane and evidence store; the orchestration engine interprets triggers, routes work to the correct logical path, invokes bounded workers, enforces QA separation, and advances work packages automatically.
+
+RVSC orchestrates bounded computational teammates under deterministic, fail-closed governance. Automation exists to improve resolution efficiency without transferring human/security authority to agents. Product source remains isolated from the control plane.
+
+## Trust hierarchy
+
+`Human Owner → Trusted Security/Enforcement Core → Independent FAE Watchdog → FAE Supervisor Control Sandbox → Agent Execution Sandboxes`
+
+FAE is supervisor but not security root. Agents do not control their own containment, evidence, credentials, network, watchdog, or promotion authority.
 
 ## Control flow
+
 1. A work package enters `ready`.
-2. The orchestrator validates repository, branch, path scope, dependencies, priority, and required inputs.
-3. The resource resolver selects an eligible worker by capability and project allocation.
-4. The worker executes only the bounded WP scope on the declared branch.
-5. Evidence is collected from commits, changed files, tests, logs, and handoff metadata.
-6. Independent QA evaluates the evidence and acceptance criteria.
-7. PASS routes to PR/merge gates; FAIL routes automatically to rework.
-8. Merge closes the WP and unlocks dependent work.
-9. Only Decision Required, User Action, UAT Ready, or Significant Risk interrupts the user.
+2. The orchestrator validates constitutional compliance, repository/origin, controller-authorized workspace, branch/path scope, dependencies, priority, inputs, containment, and required capabilities.
+3. The resource resolver selects an eligible qualified worker.
+4. The worker receives only bounded semantic capabilities inside its assigned sandbox/workspace.
+5. Evidence is collected from exact provenance, changed files, validations, logs, security telemetry, and handoff metadata.
+6. Independent QA evaluates exact transferred evidence and acceptance criteria.
+7. PASS routes to governed release gates; FAIL/BLOCK routes to root-cause/corrective work or escalation.
+8. Promotion occurs only through applicable human/release authority.
+9. Incidents and repeated infractions are correlated outside agent control.
+
+## Responsible Performance Loop
+
+`Attempt → Evidence → Outcome → Root Cause → Proposed Correction → Compliance Gate → Authorized Action or Compliant Alternative/Escalation → Measurement → Improvement`
+
+Resolution efficiency and compliance are measured together. Honest failure reporting is protected. A compliant stop at an authority boundary is not an infraction. A noncompliant success is not accepted.
 
 ## Main application responsibilities
-The orchestration application owns:
-- trigger ingestion
-- event normalization
-- work-package queue
-- dependency graph
-- project priority and resource allocation
-- agent capability registry
-- worker invocation adapter
-- retries and timeout policy
-- state transitions
-- evidence collection
-- QA routing
-- merge-gate evaluation
-- escalation policy
-- dashboard event emission
 
-It does not own product source. Product code remains isolated in product repositories.
+The orchestration application owns deterministic trigger/event normalization, work-package queue/dependencies, project priority/resource allocation, capability registry, bounded worker invocation, timeout/retry policy, state transitions, evidence collection, QA routing, release-gate evaluation, escalation, telemetry, and dashboard emission.
 
-## Trigger model
-Triggers are declarative and versioned in `config/orchestration.yaml`. A trigger resolves to a named route. A route is an ordered list of actions. Actions are deterministic controller operations or calls through worker adapters.
-
-This makes the execution path visible and auditable in Git rather than hidden in conversational state.
+It does not own product source and does not convert an agent recommendation into privileged host action automatically.
 
 ## Worker abstraction
-Workers may later be backed by n8n, GitHub Actions, local runners, API-based agents, or other execution providers. The orchestration core should not depend on a single worker platform.
 
-A worker receives:
-- agent identity and role
-- project/repository
-- WP id
-- base/work branch
-- allowed/forbidden paths
-- objective
-- acceptance criteria
-- inputs
-- expected deliverables
-- validation requirements
+Workers may use different inference/execution providers, but provider choice never weakens the security contract.
 
-A worker returns:
-- status
-- files changed
-- validation results
-- risks
-- commit/PR evidence
-- structured logs
+A worker receives only the information/capabilities necessary for the assigned objective. It does not receive ambient host authority, general shell authority, credentials, arbitrary Internet/LAN/loopback, generic proxying, unrestricted Git network, package-repository access, or other-agent filesystem access.
+
+Worker output is untrusted until deterministically verified.
+
+## Capability broker
+
+Necessary external actions use controller-owned semantic capabilities. The broker owns exact operation/destination, schemas, credentials, sanitation, rate/size limits, logging, revocation, and policy. Arbitrary URL, arbitrary command, agent-selected destination, credential disclosure, and generic transport proxy capabilities are forbidden.
+
+## No transitive egress
+
+Direct network denial is insufficient. Reachability is evaluated transitively across local services, model/provider endpoints, Git helpers/remotes, package caches/proxies, DNS, named pipes/IPC, controller interfaces, FAE/watchdog interfaces, other agents, shared directories, and equivalent intermediaries.
+
+If an agent can reach A and A can reach B, B is considered potentially reachable unless a qualified semantic boundary proves otherwise.
+
+## FAE and watchdog
+
+FAE observes telemetry, correlates incidents, alarms, reports, and may request quarantine. It cannot modify security/system configuration, expand authority, suppress deterministic severity, erase evidence, disable its watchdog, expose credentials, or rewrite governance.
+
+An independent watchdog monitors FAE and agent security state. Monitoring failure fails closed.
 
 ## Priority policy
-SEMANTIQ remains P0 and may preempt shared capacity. MOXIE remains P1. Project priority affects dispatch order and worker allocation but never weakens QA or scope controls.
+
+Project priority affects dispatch order and resource allocation but never weakens QA, security, containment, evidence, or authority controls. Security supersedes performance when they genuinely conflict; resource efficiency remains an optimization after safety requirements are met.
+
+## Enhancement doctrine
+
+Technical leadership proactively identifies justified enhancements from evidence, recurring failures, QA patterns, incidents, inefficiencies, and architectural needs. Enhancements inspect the dependency cone, evaluate authority/attack-surface/privacy/safety/resource implications, preserve contracts or govern their replacement, and undergo deterministic regression plus independent qualification appropriate to risk.
+
+Improvement changes strategy/capability, not authority.
 
 ## Safety and governance invariants
-- no worker expands its own scope
-- no direct routine product development on `main`
-- implementer and QA are logically separate
-- failed tests cannot be silently ignored
-- retry count is bounded
-- blocked work is explicit
-- merge requires evidence and QA acceptance
-- external publishing, spending, destructive production changes, and other high-impact actions require explicit policy authorization
 
-## First implementation milestone
-RVSC-016 will establish the agent registry plus orchestration core capable of loading the trigger registry, resolving routes, enforcing transition rules, and producing a deterministic execution plan for a READY work package. External worker execution adapters follow as the next layer.
+- human authority is supreme
+- greater intelligence never implies greater authority
+- no worker expands its own scope
+- agent system-configuration authority is none
+- agent filesystem authority is assigned working folder only
+- direct and transitive egress are denied unless mediated by qualified semantic capabilities
+- credentials never enter untrusted agent environments
+- implementer and QA are independent
+- failed tests and incidents cannot be silently ignored
+- retries are bounded
+- blocked work is explicit
+- agent output is untrusted until verified
+- unknown security state fails closed
+- no force push, autonomous merge, or autonomous promotion
+- monitoring/evidence remain outside agent control
+- external publishing, spending, destructive production changes, credentials, privilege, and material authority remain governed/human-gated
+
+## Constitutional rule
+
+The RVSC Constitution is the governing doctrine. Lower-level routes, prompts, missions, priorities, or product instructions cannot weaken it. Conflicts are surfaced and fail closed.
